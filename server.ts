@@ -12,11 +12,13 @@ import {
   ThinkingLevel,
 } from '@google/genai';
 import initSqlJs from 'sql.js';
+import type { DomainProfile } from './src/types/deck';
+import { formatProfilePromptBlock, inferDomainProfile } from './src/utils/domainProfiles';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 function getAiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -51,7 +53,7 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
 - **Proibição de Definições Inertes e Prompts Binários:** NUNCA crie perguntas passivas de dicionário ("O que é X?", "Defina X") nem prompts binários ("Sim/Não", "Verdadeiro/Falso").
 - **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Além de condutas em vinhetas clínicas, crie prompts que cobrem **o porquê fisiopatológico/mecanístico** ("Por que X ocorre?", "Como diferenciar A de B à beira-leito?", "Por que droga Y é contraindicada no contexto Z?"), construindo uma rede densa de compreensão em vez de decoreba isolada.
 - **Regra "More Than You Think" (Matuschak):** Quando um conceito P1/P2 for central para o Internato, ataque-o por múltiplos ângulos complementares (ex.: reconhecimento → conduta imediata → mecanismo/armadilha diferencial), cada um em seu próprio card focado.
-- **Prompts de Saliência Clínica (Salience Prompts):** Em casos clínicos, apresente a situação concreta ([CENÁRIO + IDADE/IG] + [CLÍNICA/SINAIS VITAIS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento à beira do leito.
+- **Prompts de Saliência Clínica (Salience Prompts):** Em cenários aplicados, apresente a situação concreta ([CENÁRIO + PERFIL/CONTEXTO] + [ACHADOS/SINAIS/DADOS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento na prática médica.
 
 3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
 - A quantidade final de cards deve refletir a cobertura clínica completa (P1 a P4) sem encher linguiça e **sem amputar conceitos essenciais**:
@@ -60,11 +62,12 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
   c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais "por que/como") ou "cloze" (critérios numéricos, limiares, doses críticas e alvos em âncora clínica enxuta com 1 única lacuna {{c1::...}}). Em "cloze" de regra geral, NÃO force vinheta artificial com idade/tempo de uso quando isso não altera a conduta.
 - NÃO inclua o campo "sources" nos cards.
 
-4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4), IMAGENS FIDEDIGNAS E FORMATAÇÃO:
-- P1 (Urgência / Emergência / Minuto Zero): Sinais de alarme (red flags), critérios de instabilidade/gravidade, conduta imediata de estabilização, manobras salvadoras, cirurgia/parto de emergência, 1ª droga (com dose e via), conduta na refratariedade (2ª linha), antídotos e contraindicações fatais.
-- P2 (Decisão Diagnóstica e Reconhecimento Visual): Exame inicial de 1ª linha vs. Padrão-Ouro confirmatório, interpretação de exames/imagens fidedignas em image_mode: "recognition", escores e pontos de corte numéricos exatos.
-- P3 (Manejo Ambulatorial / UBS / Enfermaria / Prevenção): Tratamento de 1ª escolha, populações especiais (gestantes, crianças, idosos, comorbidades), rastreamento, profilaxias, vacinas, critérios de internação e controle de cura.
-- P4 (Fisiopatologia Aplicada e Diferenciais): Mecanismos causais que explicam sinais clínicos/tratamentos e contrastes diferenciais.
+4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4 ADAPTÁVEL POR PERFIL DE DOMÍNIO), IMAGENS FIDEDIGNAS E FORMATAÇÃO:
+- A matriz P1–P4 adapta-se dinamicamente ao **Perfil de Domínio** ativo do tema ("emergencia", "ambulatorio", "cirurgico", "preventiva_normativo"), conforme bloco de perfil fornecido em cada requisição:
+  * **P1** = Prioridade Máxima / Conduta Crítica do Perfil (emergência/minuto zero no perfil Emergência; indicação cirúrgica/choque/dano no Cirúrgico; indicação/contraindicação/critério diagnóstico no Ambulatorial; lei/sigilo/notificação/princípio ético-SUS no Preventiva/Normativo).
+  * **P2** = Decisão Diagnóstica, Estadiamento, Escores e Reconhecimento Visual (exames reais em image_mode: "recognition", pontos de corte numéricos exatos, interpretação de medidas/índices).
+  * **P3** = Manejo Longitudinal / Seguimento / Prevenção / Fluxo Operacional (tratamento de 1ª linha, populações especiais, rastreamento, vacinas, reabilitação, prazos/fluxos documentais).
+  * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Clássicas de Banca (mecanismos causais, pares confundíveis, exceções normativas).
 - FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato, ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>).
 - PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X").
@@ -411,276 +414,575 @@ async function resolveDocumentPartsForGemini(
   return parts;
 }
 
-// PT -> EN medical translation dictionary for high-recall medical image retrieval on Wikimedia Commons & NLM Open-i
+// PT -> EN medical translation dictionary for high-recall real medical image retrieval
 const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
-  [/\bapendicite(?:\s+aguda)?\b/gi, 'acute appendicitis CT'],
-  [/\bdiverticulite(?:\s+aguda)?\b/gi, 'acute diverticulitis CT'],
-  [/\bcolecistite(?:\s+aguda)?\b/gi, 'acute cholecystitis ultrasound'],
-  [/\bpancreatite(?:\s+aguda)?\b/gi, 'acute pancreatitis CT'],
-  [/\bpneumot[oó]rax(?:\s+hipertensivo)?\b/gi, 'tension pneumothorax chest xray'],
-  [/\bpneumoperit[oô]nio\b/gi, 'pneumoperitoneum chest xray'],
-  [/\bedema\s+agudo\s+de\s+pulm[aã]o\b/gi, 'pulmonary edema chest xray'],
-  [/\binsufici[eê]ncia\s+card[ií]aca\b/gi, 'heart failure cardiomegaly chest xray'],
-  [/\binfarto|iam|supradesnivelamento\b/gi, 'ST elevation myocardial infarction ECG'],
-  [/\bfibrila[cç][aã]o\s+atrial\b/gi, 'atrial fibrillation ECG'],
+  [/\bapendicite(?:\s+aguda)?\b/gi, 'acute appendicitis CT ultrasound'],
+  [/\bdiverticulite(?:\s+aguda)?\b/gi, 'acute diverticulitis abdominal CT'],
+  [/\bcolecistite(?:\s+aguda)?\b/gi, 'acute cholecystitis gallbladder ultrasound'],
+  [/\bpancreatite(?:\s+aguda)?\b/gi, 'acute pancreatitis abdominal CT'],
+  [/\bpneumot[oó]rax(?:\s+hipertensivo)?\b/gi, 'tension pneumothorax chest x-ray'],
+  [/\bpneumoperit[oô]nio\b/gi, 'pneumoperitoneum upright chest x-ray'],
+  [/\bedema\s+agudo\s+de\s+pulm[aã]o\b/gi, 'acute pulmonary edema chest x-ray'],
+  [/\binsufici[eê]ncia\s+card[ií]aca\b/gi, 'congestive heart failure cardiomegaly chest x-ray'],
+  [/\binfarto|iam|supradesnivelamento\b/gi, 'ST elevation myocardial infarction ECG LITFL'],
+  [/\bfibrila[cç][aã]o\s+atrial\b/gi, 'atrial fibrillation ECG rhythm strip'],
   [/\btaquicardia\s+ventricular\b/gi, 'ventricular tachycardia ECG'],
-  [/\bflutter\s+atrial\b/gi, 'atrial flutter ECG'],
-  [/\bbloqueio\s+atrioventricular\b/gi, 'third degree heart block ECG'],
-  [/\bcardiotocografia|dip\s+ii|sofrimento\s+fetal\b/gi, 'cardiotocography fetal heart rate'],
-  [/\bpr[eé][-\s]?ecl[aâ]mpsia|ecl[aâ]mpsia|síndrome\s+hellp\b/gi, 'preeclampsia schistocytes blood smear'],
-  [/\bhemorragia\s+p[oó]s[-\s]?parto|bal[aã]o\s+de\s+bakri\b/gi, 'postpartum hemorrhage uterus'],
-  [/\bgravidez\s+ect[oó]pica\b/gi, 'ectopic pregnancy ultrasound'],
-  [/\bpneumonia\b/gi, 'lobar pneumonia chest xray'],
-  [/\btuberculose\b/gi, 'pulmonary tuberculosis cavitation chest xray'],
-  [/\bderrame\s+pleural\b/gi, 'pleural effusion chest xray'],
-  [/\btromboembolismo\s+pulmonar|\btep\b/gi, 'pulmonary embolism CT angiography'],
+  [/\bflutter\s+atrial\b/gi, 'atrial flutter sawtooth ECG'],
+  [/\bbloqueio\s+atrioventricular\b/gi, 'third degree AV block complete heart block ECG'],
+  [/\bcardiotocografia|dip\s+ii|desacelera[cç][aã]o|sofrimento\s+fetal|taquissistolia|uterot[oô]nic/gi, 'cardiotocography fetal heart rate deceleration uterine tachysystole'],
+  [/\bindu[cç][aã]o\s+do\s+parto|misoprostol|ocitocina\b/gi, 'cardiotocography uterine tachysystole labor induction'],
+  [/\bpr[eé][-\s]?ecl[aâ]mpsia|ecl[aâ]mpsia|s[ií]ndrome\s+hellp\b/gi, 'HELLP syndrome schistocytes peripheral blood smear'],
+  [/\bhemorragia\s+p[oó]s[-\s]?parto|bal[aã]o\s+de\s+bakri|atonia\s+uterina\b/gi, 'postpartum hemorrhage Bakri balloon tamponade'],
+  [/\bgravidez\s+ect[oó]pica\b/gi, 'ectopic pregnancy transvaginal ultrasound'],
+  [/\bdescolamento\s+prematuro\s+de\s+placenta|placenta\s+pr[eé]via\b/gi, 'placental abruption placenta previa ultrasound'],
+  [/\bpartograma\b/gi, 'partogram labor progression WHO curve'],
+  [/\bpneumonia\b/gi, 'lobar pneumonia consolidation chest x-ray'],
+  [/\btuberculose\b/gi, 'pulmonary tuberculosis cavitation chest x-ray'],
+  [/\bderrame\s+pleural\b/gi, 'pleural effusion chest x-ray meniscus sign'],
+  [/\btromboembolismo\s+pulmonar|\btep\b/gi, 'pulmonary embolism CT pulmonary angiography'],
   [/\bavc\s+isqu[eê]mico\b/gi, 'ischemic stroke brain CT'],
-  [/\bavc\s+hemorr[aá]gico|hemorragia\s+subaracn[oó]idea\b/gi, 'subarachnoid hemorrhage brain CT'],
-  [/\bhematoma\s+epidural\b/gi, 'epidural hematoma brain CT'],
-  [/\bhematoma\s+subdural\b/gi, 'subdural hematoma brain CT'],
-  [/\bobstru[cç][aã]o\s+intestinal|volvo\b/gi, 'bowel obstruction sigmoid volvulus xray'],
-  [/\bintussuscep[cç][aã]o\b/gi, 'intussusception target sign ultrasound'],
-  [/\bretinopatia\s+hipertensiva|retinopatia\s+diab[eé]tica|fundoscopia\b/gi, 'hypertensive retinopathy fundus'],
-  [/\bmelanoma|carcinoma\s+basocelular|dermatoscopia\b/gi, 'melanoma dermoscopy skin lesion'],
+  [/\bavc\s+hemorr[aá]gico|hemorragia\s+subaracn[oó]idea\b/gi, 'subarachnoid hemorrhage head CT'],
+  [/\bhematoma\s+epidural\b/gi, 'epidural hematoma lens shaped head CT'],
+  [/\bhematoma\s+subdural\b/gi, 'subdural hematoma crescent head CT'],
+  [/\bobstru[cç][aã]o\s+intestinal|volvo\b/gi, 'bowel obstruction sigmoid volvulus coffee bean x-ray'],
+  [/\bintussuscep[cç][aã]o\b/gi, 'intussusception target sign pediatric ultrasound'],
+  [/\bestenose\s+hipertr[oó]fica\s+de\s+piloro\b/gi, 'hypertrophic pyloric stenosis ultrasound'],
+  [/\bepigloti(?:te|tis)|crupe|laringotraque[ií]te\b/gi, 'croup steeple sign epiglottitis thumbprint neck x-ray'],
+  [/\bbronquiolite\b/gi, 'bronchiolitis chest x-ray hyperinflation pediatric'],
+  [/\bdoen[cç]a\s+da\s+membrana\s+hialina|s[ií]ndrome\s+do\s+desconforto\b/gi, 'neonatal respiratory distress syndrome ground glass chest x-ray'],
+  [/\bretinopatia\s+hipertensiva|retinopatia\s+diab[eé]tica|fundoscopia\b/gi, 'hypertensive diabetic retinopathy fundus photography'],
+  [/\bpapiledema\b/gi, 'papilledema optic disc fundoscopy'],
+  [/\bmelanoma|carcinoma\s+basocelular|dermatoscopia\b/gi, 'melanoma basal cell carcinoma dermoscopy'],
+  [/\bherpes\s+zoster|varicela|impetigo|celulite|erisipela\b/gi, 'herpes zoster dermatome skin rash clinical photo'],
+  [/\bs[ií]filis|cancro|linfogranuloma\b/gi, 'secondary syphilis palmar plantar rash clinical photo'],
+  [/\bcirrose|ascite|varizes\s+esof[aá]gicas\b/gi, 'esophageal varices endoscopy liver cirrhosis'],
+  [/\bfratura|luxa[cç][aã]o|osteomielite\b/gi, 'bone fracture dislocation radiograph x-ray'],
 ];
 
-function buildEnglishMedicalSearchQuery(rawQuery: string): string {
-  let translated = rawQuery;
-  for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
-    if (regex.test(translated)) {
-      return enTerm;
-    }
+const BLOCKED_IMAGE_URL_PATTERN =
+  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_)/i;
+
+function isSpamOrLogoImageUrl(url: string, title = ''): boolean {
+  const combined = `${url} ${title}`;
+  if (!url || BLOCKED_IMAGE_URL_PATTERN.test(combined)) return true;
+  if (/\.(?:tif|tiff|pdf|djvu|ogg|ogv|webm|mp4|mp3|wav)$/i.test(url.split('?')[0])) {
+    return true;
   }
-  translated = translated
-    .replace(/\b(?:na|no|em|de|do|da|dos|das|para|com|sem|qual|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return translated || 'medical radiology diagnosis';
+  return false;
 }
 
-async function searchWikimediaCommonsMedical(searchQuery: string) {
-  const enQuery = buildEnglishMedicalSearchQuery(searchQuery);
-  const url = new URL('https://commons.wikimedia.org/w/api.php');
-  url.searchParams.set('action', 'query');
-  url.searchParams.set('generator', 'search');
-  url.searchParams.set('gsrsearch', `filetype:bitmap ${enQuery}`);
-  url.searchParams.set('gsrnamespace', '6');
-  url.searchParams.set('gsrlimit', '6');
-  url.searchParams.set('prop', 'imageinfo');
-  url.searchParams.set('iiprop', 'url|extmetadata');
-  url.searchParams.set('iiurlwidth', '800');
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('origin', '*');
+function buildEnglishMedicalSearchQueries(
+  rawQuery: string,
+  topic = '',
+  question = ''
+): string[] {
+  const queries: string[] = [];
+  const combined = `${rawQuery} ${topic} ${question}`;
 
-  const resp = await fetch(url.toString(), {
-    headers: {
-      'User-Agent': 'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-    },
-    signal: AbortSignal.timeout(2500),
-  });
-  if (!resp.ok) {
-    throw new Error(`Wikimedia HTTP ${resp.status}`);
+  for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
+    if (regex.test(combined) && !queries.includes(enTerm)) {
+      queries.push(enTerm);
+      if (queries.length >= 2) break;
+    }
   }
-  const data = (await resp.json()) as {
-    query?: {
-      pages?: Record<
-        string,
-        {
-          pageid?: number;
-          title?: string;
-          imageinfo?: Array<{
-            thumburl?: string;
-            url?: string;
-            extmetadata?: {
-              ImageDescription?: { value?: string };
-              ObjectName?: { value?: string };
-            };
-          }>;
-        }
-      >;
-    };
-  };
 
-  const pages = Object.values(data?.query?.pages || {});
-  return pages
-    .map((p, idx) => {
-      const info = p.imageinfo?.[0];
-      if (!info?.url) return null;
-      const rawTitle = (p.title || `Imagem Médica ${idx + 1}`).replace(/^File:/i, '');
-      const cleanName = rawTitle
-        .toLowerCase()
-        .replace(/[^a-z0-9.]+/g, '_')
-        .replace(/^_|_$/g, '');
-      const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
-      const cleanDesc = descHtml
-        .replace(/<[^>]*>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 180);
+  const stripped = rawQuery
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(
+      /\b(?:na|no|nos|nas|em|de|do|da|dos|das|para|com|sem|qual|quais|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente|gestante|evolui|apresenta|reacao|adversa|exame|achado)\b/gi,
+      ' '
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
 
-      return {
-        id: `wiki-${p.pageid || idx}`,
-        title: rawTitle.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '),
-        thumbUrl: info.thumburl || info.url,
-        fullUrl: info.url,
-        description: cleanDesc || `Imagem médica de referência para ${searchQuery}.`,
-        suggestedFilename:
-          cleanName.endsWith('.jpg') || cleanName.endsWith('.png')
-            ? cleanName
-            : `${cleanName}.jpg`,
-        defaultLegend: cleanDesc
-          ? `Exame complementar demonstrando ${cleanDesc.slice(0, 130)}.`
-          : `Imagem diagnóstica demonstrando achado clássico de ${searchQuery}.`,
-        source: 'Wikimedia Commons Medical',
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
+  if (stripped && !queries.includes(stripped)) {
+    queries.push(stripped);
+  }
+  if (queries.length === 0) {
+    queries.push('clinical medical imaging diagnosis');
+  }
+  return queries.slice(0, 3);
 }
 
 /**
- * Queries the public NLM Open-i Biomedical Image Search Engine (`https://openi.nlm.nih.gov/api/search`)
- * for peer-reviewed clinical images (ECG, Chest X-Ray, CT, Ultrasound, Dermatology).
+ * Uses Gemini (when available) to translate a Portuguese clinical prompt/card into 2–3 high-signal
+ * English medical image search queries (e.g., "uterine tachysystole cardiotocography", "late deceleration CTG").
  */
-async function searchNlmOpenIMedical(searchQuery: string) {
-  const enQuery = buildEnglishMedicalSearchQuery(searchQuery);
-  const url = new URL('https://openi.nlm.nih.gov/api/search');
-  url.searchParams.set('query', enQuery);
-  url.searchParams.set('m', '1');
-  url.searchParams.set('n', '6');
+async function expandMedicalQueriesWithGemini(
+  ai: GoogleGenAI | null,
+  rawQuery: string,
+  topic = '',
+  question = '',
+  hint = ''
+): Promise<string[]> {
+  const fallbackQueries = buildEnglishMedicalSearchQueries(rawQuery, topic, question);
+  if (!ai) return fallbackQueries;
 
-  const resp = await fetch(url.toString(), {
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': 'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-    },
-    signal: AbortSignal.timeout(2800),
-  });
-  if (!resp.ok) {
-    throw new Error(`NLM Open-i HTTP ${resp.status}`);
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: `Traduza e expanda esta busca clínica para encontrar IMAGENS MÉDICAS REAIS na internet (Wikimedia Commons, Wikipedia, Radiopaedia, LITFL, DermNet, PubMed).
+Retorne EXCLUSIVAMENTE um JSON array com 2 a 3 termos curtos em INGLÊS (2 a 5 palavras cada, focados no exame/foto/traçado clínico real):
+- Busca: "${rawQuery}"
+- Tópico: "${topic}"
+- Pergunta: "${question.slice(0, 220)}"
+- Comentário: "${hint.slice(0, 180)}"
+Exemplo de saída: ["cardiotocography late decelerations", "uterine tachysystole CTG"]`,
+      config: {
+        responseMimeType: 'application/json',
+        maxOutputTokens: 200,
+      },
+    });
+    const parsed = JSON.parse(extractJsonBlock(response.text || '[]'));
+    if (Array.isArray(parsed)) {
+      const llmQueries = parsed
+        .map((q) => String(q || '').trim())
+        .filter((q) => q.length >= 3 && q.length <= 70);
+      if (llmQueries.length > 0) {
+        return Array.from(new Set([...llmQueries, ...fallbackQueries])).slice(0, 3);
+      }
+    }
+  } catch {
+    // Silent fallback to deterministic PT->EN medical dictionary
+  }
+  return fallbackQueries;
+}
+
+interface MedicalImageCandidate {
+  id: string;
+  title: string;
+  thumbUrl: string;
+  fullUrl: string;
+  description: string;
+  suggestedFilename: string;
+  defaultLegend: string;
+  source: string;
+  isSvg?: boolean;
+}
+
+const WIKIMEDIA_USER_AGENT =
+  'Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)';
+
+/**
+ * Searches English and Portuguese Wikipedia articles for real curated medical images
+ * attached to peer-reviewed encyclopedic articles (avoiding noisy Commons spam).
+ */
+async function searchWikipediaMedicalImages(
+  enQueries: string[],
+  ptQuery: string
+): Promise<MedicalImageCandidate[]> {
+  const primaryEn = (enQueries[0] || '').split(/\s+/).slice(0, 4).join(' ');
+  const searches: Array<{ lang: 'en' | 'pt'; query: string }> = [
+    ...(primaryEn ? [{ lang: 'en' as const, query: primaryEn }] : []),
+    ...(ptQuery ? [{ lang: 'pt' as const, query: ptQuery }] : []),
+  ];
+
+  const results: MedicalImageCandidate[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const { lang, query } of searches) {
+    if (results.length >= 6) break;
+    try {
+      const searchUrl = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+      searchUrl.searchParams.set('action', 'query');
+      searchUrl.searchParams.set('list', 'search');
+      searchUrl.searchParams.set('srsearch', query);
+      searchUrl.searchParams.set('srlimit', '3');
+      searchUrl.searchParams.set('format', 'json');
+      searchUrl.searchParams.set('origin', '*');
+
+      const sResp = await fetch(searchUrl.toString(), {
+        headers: { 'User-Agent': WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500),
+      });
+      if (!sResp.ok) continue;
+      const sData = (await sResp.json()) as {
+        query?: { search?: Array<{ title?: string }> };
+      };
+      const titles = (sData.query?.search || [])
+        .map((item) => item.title)
+        .filter((t): t is string => Boolean(t));
+      if (titles.length === 0) continue;
+
+      const pagesUrl = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+      pagesUrl.searchParams.set('action', 'query');
+      pagesUrl.searchParams.set('titles', titles.join('|'));
+      pagesUrl.searchParams.set('prop', 'pageimages|images');
+      pagesUrl.searchParams.set('piprop', 'original|thumbnail');
+      pagesUrl.searchParams.set('pithumbsize', '900');
+      pagesUrl.searchParams.set('imlimit', '20');
+      pagesUrl.searchParams.set('format', 'json');
+      pagesUrl.searchParams.set('origin', '*');
+
+      const pResp = await fetch(pagesUrl.toString(), {
+        headers: { 'User-Agent': WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500),
+      });
+      if (!pResp.ok) continue;
+      const pData = (await pResp.json()) as {
+        query?: {
+          pages?: Record<
+            string,
+            {
+              title?: string;
+              thumbnail?: { source?: string };
+              original?: { source?: string };
+              images?: Array<{ title?: string }>;
+            }
+          >;
+        };
+      };
+
+      const fileTitles = new Set<string>();
+      for (const page of Object.values(pData.query?.pages || {})) {
+        for (const img of page.images || []) {
+          if (img.title && !isSpamOrLogoImageUrl(img.title, img.title)) {
+            fileTitles.add(img.title);
+          }
+        }
+      }
+
+      if (fileTitles.size === 0) continue;
+      const fileList = Array.from(fileTitles).slice(0, 10);
+
+      const infoUrl = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+      infoUrl.searchParams.set('action', 'query');
+      infoUrl.searchParams.set('titles', fileList.join('|'));
+      infoUrl.searchParams.set('prop', 'imageinfo');
+      infoUrl.searchParams.set('iiprop', 'url|mime|size|extmetadata');
+      infoUrl.searchParams.set('iiurlwidth', '900');
+      infoUrl.searchParams.set('format', 'json');
+      infoUrl.searchParams.set('origin', '*');
+
+      const iResp = await fetch(infoUrl.toString(), {
+        headers: { 'User-Agent': WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500),
+      });
+      if (!iResp.ok) continue;
+      const iData = (await iResp.json()) as {
+        query?: {
+          pages?: Record<
+            string,
+            {
+              pageid?: number;
+              title?: string;
+              imageinfo?: Array<{
+                thumburl?: string;
+                url?: string;
+                mime?: string;
+                width?: number;
+                height?: number;
+                extmetadata?: { ImageDescription?: { value?: string } };
+              }>;
+            }
+          >;
+        };
+      };
+
+      for (const [idx, page] of Object.values(iData.query?.pages || {}).entries()) {
+        const info = page.imageinfo?.[0];
+        if (!info?.url) continue;
+        const mime = (info.mime || '').toLowerCase();
+        if (!mime.startsWith('image/')) continue;
+        if ((info.width || 0) < 220 || (info.height || 0) < 140) continue;
+
+        const targetUrl = info.thumburl || info.url;
+        if (isSpamOrLogoImageUrl(targetUrl, page.title || '')) continue;
+        if (seenUrls.has(targetUrl)) continue;
+        seenUrls.add(targetUrl);
+
+        const rawTitle = (page.title || `Wikipedia Medical ${idx + 1}`).replace(/^(?:File|Ficheiro|Arquivo):/i, '');
+        const cleanName = rawTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9.]+/g, '_')
+          .replace(/^_|_$/g, '');
+        const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
+        const cleanDesc = descHtml
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 180);
+
+        results.push({
+          id: `wp-${lang}-${page.pageid || idx}`,
+          title: rawTitle.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').slice(0, 85),
+          thumbUrl: targetUrl,
+          fullUrl: info.url,
+          description: cleanDesc || `Imagem médica enciclopédica (${lang}.wikipedia.org).`,
+          suggestedFilename: /\.(jpg|jpeg|png|webp|gif)$/i.test(cleanName)
+            ? cleanName.slice(0, 60)
+            : `${cleanName.slice(0, 52)}.jpg`,
+          defaultLegend: cleanDesc
+            ? `Imagem clínica demonstrando ${cleanDesc.slice(0, 130)}.`
+            : `Imagem clínica real referente a ${query}.`,
+          source: `Wikipedia Medical (${lang.toUpperCase()})`,
+          isSvg: mime.includes('svg') || targetUrl.toLowerCase().endsWith('.svg'),
+        });
+      }
+    } catch {
+      // Continue to fallback query
+    }
   }
 
-  const data = (await resp.json()) as {
-    list?: Array<{
-      uid?: string;
-      title?: string;
-      imgLarge?: string;
-      imgThumb?: string;
-      image?: { caption?: string };
-      abstract?: string;
-    }>;
-  };
+  return results;
+}
 
-  const list = Array.isArray(data?.list) ? data.list : [];
-  return list
-    .map((item, idx) => {
-      const rawImgPath = item.imgLarge || item.imgThumb || '';
-      if (!rawImgPath) return null;
-      const fullImgUrl = rawImgPath.startsWith('http')
-        ? rawImgPath
-        : `https://openi.nlm.nih.gov${rawImgPath.startsWith('/') ? '' : '/'}${rawImgPath}`;
-      const thumbImgUrl = item.imgThumb
-        ? item.imgThumb.startsWith('http')
-          ? item.imgThumb
-          : `https://openi.nlm.nih.gov${item.imgThumb.startsWith('/') ? '' : '/'}${item.imgThumb}`
-        : fullImgUrl;
+async function searchWikimediaCommonsMedical(enQueries: string[]): Promise<MedicalImageCandidate[]> {
+  const results: MedicalImageCandidate[] = [];
+  const seenUrls = new Set<string>();
+  const baseWords = (enQueries[0] || '').split(/\s+/).filter(Boolean);
+  const candidateSearches = Array.from(
+    new Set([
+      baseWords.slice(0, 3).join(' '),
+      baseWords.slice(0, 2).join(' '),
+    ].filter((q) => q.length >= 3))
+  );
 
-      const rawCaption =
-        item.image?.caption || item.title || item.abstract || `Exame biomédico NLM Open-i ${idx + 1}`;
-      const cleanCaption = rawCaption
-        .replace(/<[^>]*>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 180);
-      const cleanUid = (item.uid || `openi_${idx + 1}`)
-        .toLowerCase()
-        .replace(/[^a-z0-9_]+/g, '_');
+  for (const enQuery of candidateSearches) {
+    if (results.length >= 4) break;
+    try {
+      const url = new URL('https://commons.wikimedia.org/w/api.php');
+      url.searchParams.set('action', 'query');
+      url.searchParams.set('generator', 'search');
+      url.searchParams.set('gsrsearch', enQuery);
+      url.searchParams.set('gsrnamespace', '6');
+      url.searchParams.set('gsrlimit', '10');
+      url.searchParams.set('prop', 'imageinfo');
+      url.searchParams.set('iiprop', 'url|mime|size|extmetadata');
+      url.searchParams.set('iiurlwidth', '900');
+      url.searchParams.set('format', 'json');
+      url.searchParams.set('origin', '*');
 
-      return {
-        id: `openi-${cleanUid}-${idx}`,
-        title: (item.title || cleanCaption).replace(/<[^>]*>/g, '').slice(0, 85),
-        thumbUrl: thumbImgUrl,
-        fullUrl: fullImgUrl,
-        description: cleanCaption,
-        suggestedFilename: `openi_${cleanUid}.png`,
-        defaultLegend: `Exame complementar (NLM Open-i) evidenciando ${cleanCaption.slice(0, 125)}.`,
-        source: 'NLM Open-i (NIH Biomedical Archive)',
+      const resp = await fetch(url.toString(), {
+        headers: { 'User-Agent': WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500),
+      });
+      if (!resp.ok) continue;
+
+      const data = (await resp.json()) as {
+        query?: {
+          pages?: Record<
+            string,
+            {
+              pageid?: number;
+              title?: string;
+              imageinfo?: Array<{
+                thumburl?: string;
+                url?: string;
+                mime?: string;
+                width?: number;
+                height?: number;
+                extmetadata?: {
+                  ImageDescription?: { value?: string };
+                };
+              }>;
+            }
+          >;
+        };
       };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
+
+      const pages = Object.values(data?.query?.pages || {}).sort((a, b) => {
+        const aAnn = /annotation|labeled|arrow/i.test(a.title || '') ? 1 : 0;
+        const bAnn = /annotation|labeled|arrow/i.test(b.title || '') ? 1 : 0;
+        return aAnn - bAnn;
+      });
+
+      for (const [idx, p] of pages.entries()) {
+        const info = p.imageinfo?.[0];
+        if (!info?.url) continue;
+        const mime = (info.mime || '').toLowerCase();
+        if (!mime.startsWith('image/')) continue;
+        if ((info.width || 0) < 220 || (info.height || 0) < 140) continue;
+
+        const targetUrl = info.thumburl || info.url;
+        const rawTitle = (p.title || `Imagem Médica ${idx + 1}`).replace(/^File:/i, '');
+        if (isSpamOrLogoImageUrl(targetUrl, rawTitle)) continue;
+        if (seenUrls.has(targetUrl)) continue;
+        seenUrls.add(targetUrl);
+
+        const cleanName = rawTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9.]+/g, '_')
+          .replace(/^_|_$/g, '');
+        const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
+        const cleanDesc = descHtml
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 180);
+
+        results.push({
+          id: `wiki-${p.pageid || idx}`,
+          title: rawTitle.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').slice(0, 85),
+          thumbUrl: targetUrl,
+          fullUrl: info.url,
+          description: cleanDesc || `Imagem médica real obtida no Wikimedia Commons.`,
+          suggestedFilename: /\.(jpg|jpeg|png|webp|gif)$/i.test(cleanName)
+            ? cleanName.slice(0, 60)
+            : `${cleanName.slice(0, 52)}.jpg`,
+          defaultLegend: cleanDesc
+            ? `Exame complementar demonstrando ${cleanDesc.slice(0, 130)}.`
+            : `Imagem diagnóstica demonstrando achado clínico real de ${enQuery}.`,
+          source: 'Wikimedia Commons Medical',
+          isSvg: mime.includes('svg') || targetUrl.toLowerCase().endsWith('.svg'),
+        });
+      }
+    } catch {
+      // Continue to shorter query fallback
+    }
+  }
+
+  return results;
 }
 
 /**
  * Validates that a candidate image URL responds with HTTP 200, Content-Type: image/*,
- * and a reasonable minimum byte size (discarding broken thumbnails, icons, or HTML error pages).
+ * and a reasonable minimum byte size (discarding broken thumbnails, icons, logos, or HTML error pages).
  */
 async function validateCandidateImageUrl(url: string): Promise<{
   ok: boolean;
   contentType: string;
   byteLength: number;
+  isSvg: boolean;
 }> {
   if (!url || (!url.startsWith('https://') && !url.startsWith('http://'))) {
-    return { ok: false, contentType: '', byteLength: 0 };
+    return { ok: false, contentType: '', byteLength: 0, isSvg: false };
+  }
+  if (isSpamOrLogoImageUrl(url)) {
+    return { ok: false, contentType: '', byteLength: 0, isSvg: false };
   }
   try {
     const resp = await fetch(url, {
       method: 'GET',
       headers: {
         'User-Agent':
-          'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          'Mozilla/5.0 (compatible; InternatoFirstCardArchitect/2.0; +https://github.com/wagmms/Cards-2.0)',
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
       },
-      signal: AbortSignal.timeout(2600),
+      signal: AbortSignal.timeout(4500),
     });
     if (!resp.ok) {
-      return { ok: false, contentType: '', byteLength: 0 };
+      return { ok: false, contentType: '', byteLength: 0, isSvg: false };
     }
     const contentType = (resp.headers.get('content-type') || '').toLowerCase();
     if (!contentType.startsWith('image/')) {
-      return { ok: false, contentType, byteLength: 0 };
+      return { ok: false, contentType, byteLength: 0, isSvg: false };
     }
+    const isSvg = contentType.includes('svg');
     const buf = Buffer.from(await resp.arrayBuffer());
-    const minBytes = contentType.includes('svg') ? 250 : 1800;
+    const minBytes = isSvg ? 1500 : 3000;
     if (buf.length < minBytes) {
-      return { ok: false, contentType, byteLength: buf.length };
+      return { ok: false, contentType, byteLength: buf.length, isSvg };
     }
-    return { ok: true, contentType, byteLength: buf.length };
+    return { ok: true, contentType, byteLength: buf.length, isSvg };
   } catch {
-    return { ok: false, contentType: '', byteLength: 0 };
+    return { ok: false, contentType: '', byteLength: 0, isSvg: false };
   }
 }
 
 /**
- * Searches Google/Web for clean medical images via Gemini Search Grounding (`tools: [{ googleSearch: {} }]`)
- * prioritizing trusted medical repositories (LITFL for ECG, Radiopaedia for RX/TC/RM/USG, DermNet, Wikimedia, SciELO, Open-i),
- * and validates every candidate URL via `validateCandidateImageUrl` before returning.
+ * Extracts real clinical `<img>` and OpenGraph (`og:image`, `twitter:image`) URLs from a grounded medical web page
+ * (e.g. LITFL, Radiopaedia, DermNet, Wikipedia, PMC, SciELO) without falling back to synthetic images or site logos.
+ */
+async function extractImagesFromMedicalWebPage(
+  pageUrl: string,
+  pageTitle = ''
+): Promise<Array<{ url: string; alt: string; pageUrl: string; pageTitle: string }>> {
+  if (!pageUrl || !pageUrl.startsWith('http')) return [];
+  try {
+    const resp = await fetch(pageUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+      },
+      signal: AbortSignal.timeout(3500),
+    });
+    if (!resp.ok) return [];
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (!ct.includes('text/html') && !ct.includes('application/xhtml')) return [];
+
+    const html = (await resp.text()).slice(0, 220000);
+    const extracted: Array<{ url: string; alt: string; pageUrl: string; pageTitle: string }> = [];
+    const seen = new Set<string>();
+
+    const addCandidate = (rawSrc: string, alt = '') => {
+      const trimmed = rawSrc.trim().replace(/&amp;/g, '&');
+      if (!trimmed || trimmed.startsWith('data:')) return;
+      try {
+        const resolved = new URL(trimmed, pageUrl).toString();
+        if (!resolved.startsWith('http')) return;
+        if (isSpamOrLogoImageUrl(resolved, alt)) return;
+        if (seen.has(resolved)) return;
+        seen.add(resolved);
+        extracted.push({ url: resolved, alt: alt.trim(), pageUrl, pageTitle });
+      } catch {
+        // Ignore malformed URLs
+      }
+    };
+
+    // 1) OpenGraph / Twitter meta images
+    const metaRegex =
+      /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = metaRegex.exec(html)) !== null) {
+      addCandidate(m[1], pageTitle);
+    }
+    const metaReverseRegex =
+      /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]*>/gi;
+    while ((m = metaReverseRegex.exec(html)) !== null) {
+      addCandidate(m[1], pageTitle);
+    }
+
+    // 2) Content <img> tags (src / data-src / data-lazy-src)
+    const imgRegex = /<img\b[^>]*>/gi;
+    while ((m = imgRegex.exec(html)) !== null && extracted.length < 10) {
+      const tag = m[0];
+      const srcMatch =
+        /\b(?:data-lazy-src|data-src|src)=["']([^"']+)["']/i.exec(tag);
+      if (!srcMatch) continue;
+      const altMatch = /\balt=["']([^"']*)["']/i.exec(tag);
+      const widthMatch = /\bwidth=["']?(\d+)/i.exec(tag);
+      if (widthMatch && Number(widthMatch[1]) > 0 && Number(widthMatch[1]) < 150) {
+        continue;
+      }
+      addCandidate(srcMatch[1], altMatch?.[1] || pageTitle);
+    }
+
+    return extracted;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Searches Google/Web via Gemini Search Grounding (`tools: [{ googleSearch: {} }]`),
+ * extracts BOTH grounded page images (`groundingChunks` + `og:image` / `<img>`) AND any validated direct URLs,
+ * strictly returning only verified real images available on the internet.
  */
 async function searchGoogleMedicalImagesViaGrounding(
+  ai: GoogleGenAI | null,
   searchQuery: string,
-  topic: string = '',
-  question: string = ''
-) {
-  const ai = getAiClient();
+  topic = '',
+  question = '',
+  enQueries: string[] = []
+): Promise<MedicalImageCandidate[]> {
   if (!ai) return [];
 
-  const enQuery = buildEnglishMedicalSearchQuery(`${searchQuery} ${topic}`);
-  const prompt = `Encontre de 4 a 6 URLs diretas de imagens médicas clínicas limpas (arquivos .jpg, .png, .webp ou .svg sem setas com spoiler da resposta e sem marca d'água pesada) para o exame/achado clínico:
-- Busca: "${searchQuery}" (${enQuery})
+  const enLabel = enQueries[0] || searchQuery;
+  const prompt = `Pesquise na Web páginas médicas reais (LITFL, Radiopaedia, Wikimedia Commons, Wikipedia, DermNet NZ, SciELO, PubMed Central) com exames de imagem, traçados (ECG/CTG) ou fotos clínicas reais disponíveis publicamente sobre:
+- Busca: "${searchQuery}" (${enLabel})
 - Tópico: "${topic}"
 - Contexto: "${question.slice(0, 180)}"
 
-Priorize fontes médicas confiáveis de acesso aberto:
-- Life in the Fast Lane (LITFL - litfl.com) para ECG e arritmias
-- Radiopaedia / Open-i (openi.nlm.nih.gov) / Wikimedia Commons (upload.wikimedia.org) para RX, TC, RM, USG, Cardiotocografia
-- DermNet NZ para dermatologia
-- SciELO / PubMed Central para imagens clínicas e obstétricas
-
-Retorne EXCLUSIVAMENTE um array JSON válido no formato:
+Retorne EXCLUSIVAMENTE um array JSON válido com até 5 referências encontradas no Google Search:
 [
   {
     "title": "Título conciso do achado visual",
-    "imageUrl": "https://... (URL direta do arquivo de imagem .jpg/.png/.webp/.svg)",
+    "imageUrl": "URL direta do arquivo de imagem (.jpg/.png/.webp) ou URL da página médica encontrada",
     "description": "Descrição clínica objetiva do exame sem entregar o diagnóstico final",
-    "source": "LITFL / Radiopaedia / Wikimedia / DermNet / SciELO",
+    "source": "LITFL / Radiopaedia / Wikimedia / Wikipedia / DermNet / SciELO",
     "suggestedFilename": "nome_limpo_exame.jpg",
     "defaultLegend": "Exame complementar evidenciando [descrição morfológica do achado]."
   }
@@ -695,35 +997,107 @@ Retorne EXCLUSIVAMENTE um array JSON válido no formato:
       },
     });
 
-    const rawText = response.text || '[]';
-    const cleaned = extractJsonBlock(rawText);
-    const parsed = JSON.parse(cleaned);
-    const candidates: Array<Record<string, unknown>> = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.images)
-      ? parsed.images
-      : [];
+    const directCandidates: Array<{
+      url: string;
+      title: string;
+      description: string;
+      source: string;
+      suggestedFilename: string;
+      defaultLegend: string;
+    }> = [];
+    const groundedPages: Array<{ url: string; title: string }> = [];
 
-    // Validate all candidate image URLs in parallel (HTTP 200, Content-Type: image/*, min byte size)
-    const validationChecks = await Promise.all(
-      candidates.slice(0, 8).map(async (item, idx) => {
+    // 1) Collect groundingChunks (verified Google Search web pages)
+    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    for (const chunk of chunks) {
+      const web = (chunk as { web?: { uri?: string; title?: string } }).web;
+      if (web?.uri && web.uri.startsWith('http')) {
+        groundedPages.push({
+          url: web.uri,
+          title: web.title || searchQuery,
+        });
+      }
+    }
+
+    // 2) Collect JSON candidates from model output
+    try {
+      const parsed = JSON.parse(extractJsonBlock(response.text || '[]'));
+      const arr: Array<Record<string, unknown>> = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.images)
+        ? parsed.images
+        : [];
+      for (const item of arr.slice(0, 6)) {
         const rawUrl = String(item.imageUrl || item.url || item.thumbUrl || '').trim();
-        const check = await validateCandidateImageUrl(rawUrl);
+        if (!rawUrl.startsWith('http')) continue;
+        if (/\.(jpg|jpeg|png|webp|gif)(?:\?|$)/i.test(rawUrl)) {
+          directCandidates.push({
+            url: rawUrl,
+            title: String(item.title || searchQuery).slice(0, 85),
+            description: String(item.description || `Exame referente a ${searchQuery}.`).slice(0, 180),
+            source: String(item.source || 'Google Search Grounding'),
+            suggestedFilename: String(item.suggestedFilename || 'google_med_img.jpg'),
+            defaultLegend: String(
+              item.defaultLegend || `Imagem clínica referente a ${searchQuery}.`
+            ),
+          });
+        } else {
+          groundedPages.push({ url: rawUrl, title: String(item.title || searchQuery) });
+        }
+      }
+    } catch {
+      // Model might not have emitted strict JSON alongside groundingChunks
+    }
+
+    // 3) Scrape real <img> / og:image tags from top 5 grounded web pages in parallel
+    const uniquePages = Array.from(
+      new Map(groundedPages.map((p) => [p.url, p])).values()
+    ).slice(0, 5);
+
+    const pageExtracts = await Promise.all(
+      uniquePages.map((page) => extractImagesFromMedicalWebPage(page.url, page.title))
+    );
+    for (const extractedList of pageExtracts) {
+      for (const item of extractedList.slice(0, 3)) {
+        let hostLabel = 'Medical Web (Google)';
+        try {
+          hostLabel = new URL(item.pageUrl).hostname.replace(/^www\./, '');
+        } catch {
+          // ignore
+        }
+        directCandidates.push({
+          url: item.url,
+          title: (item.alt || item.pageTitle || searchQuery).slice(0, 85),
+          description: `Imagem real extraída de ${hostLabel}: ${(item.alt || item.pageTitle).slice(0, 140)}`,
+          source: `${hostLabel} (via Google Search)`,
+          suggestedFilename: (item.alt || item.pageTitle || searchQuery)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '')
+            .slice(0, 44),
+          defaultLegend: `Imagem clínica real (${hostLabel}) demonstrando ${(item.alt || item.pageTitle).slice(0, 110)}.`,
+        });
+      }
+    }
+
+    // 4) Validate all candidate URLs in parallel (HTTP 200, real image/*, min byte size)
+    const uniqueDirect = Array.from(
+      new Map(directCandidates.map((c) => [c.url, c])).values()
+    ).slice(0, 12);
+
+    const validated = await Promise.all(
+      uniqueDirect.map(async (item, idx) => {
+        const check = await validateCandidateImageUrl(item.url);
         if (!check.ok) return null;
 
-        const title = String(item.title || `Imagem Médica Google #${idx + 1}`).slice(0, 85);
-        const desc = String(
-          item.description || `Exame complementar referente a ${searchQuery}.`
-        ).slice(0, 180);
-        const source = String(item.source || 'Google Search Grounding (Medical Web)');
         const ext = check.contentType.includes('png')
           ? '.png'
-          : check.contentType.includes('svg')
-          ? '.svg'
           : check.contentType.includes('webp')
           ? '.webp'
+          : check.contentType.includes('svg')
+          ? '.svg'
           : '.jpg';
-        const rawSuggested = String(item.suggestedFilename || title)
+        const cleanBase = item.suggestedFilename
           .toLowerCase()
           .replace(/\.[a-z0-9]+$/i, '')
           .replace(/[^a-z0-9_]+/g, '_')
@@ -731,21 +1105,20 @@ Retorne EXCLUSIVAMENTE um array JSON válido no formato:
           .slice(0, 48);
 
         return {
-          id: `google-grounding-${idx}-${Date.now()}`,
-          title,
-          thumbUrl: rawUrl,
-          fullUrl: rawUrl,
-          description: desc,
-          suggestedFilename: `${rawSuggested || `google_med_${idx + 1}`}${ext}`,
-          defaultLegend: String(
-            item.defaultLegend || `Exame complementar demonstrando ${desc.slice(0, 125)}.`
-          ),
-          source,
-        };
+          id: `google-web-${idx}-${Date.now()}`,
+          title: item.title,
+          thumbUrl: item.url,
+          fullUrl: item.url,
+          description: item.description,
+          suggestedFilename: `${cleanBase || `google_med_${idx + 1}`}${ext}`,
+          defaultLegend: item.defaultLegend,
+          source: item.source,
+          isSvg: check.isSvg,
+        } satisfies MedicalImageCandidate;
       })
     );
 
-    return validationChecks.filter((item): item is NonNullable<typeof item> => item !== null);
+    return validated.filter((item): item is NonNullable<typeof item> => item !== null);
   } catch {
     return [];
   }
@@ -1434,63 +1807,65 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
 
-  // Endpoint 0A: Buscar Imagens Médicas Fidedignas (Google Search Grounding + Wikimedia Commons Medical + NLM Open-i NIH)
+  // Endpoint 0A: Buscar Imagens Médicas Fidedignas na Internet (Google Search Grounding + Wikipedia Medical + Wikimedia Commons)
   app.post('/api/media/search-medical-images', async (req, res) => {
     try {
-      const { query = '', topic = '', question = '', preferGoogleGrounding = true } = req.body || {};
+      const {
+        query = '',
+        topic = '',
+        question = '',
+        hint = '',
+        preferGoogleGrounding = true,
+      } = req.body || {};
       const rawSearch = (query || topic || question || 'clinical diagnosis').trim();
+      const ai = getAiClient();
 
-      const [googleSettled, wikiSettled, openiSettled] = await Promise.allSettled([
+      const enQueries = await expandMedicalQueriesWithGemini(ai, rawSearch, topic, question, hint);
+
+      const [googleSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
         preferGoogleGrounding
-          ? searchGoogleMedicalImagesViaGrounding(rawSearch, topic, question)
+          ? searchGoogleMedicalImagesViaGrounding(ai, rawSearch, topic, question, enQueries)
           : Promise.resolve([]),
-        searchWikimediaCommonsMedical(rawSearch),
-        searchNlmOpenIMedical(rawSearch),
+        searchWikipediaMedicalImages(enQueries, rawSearch),
+        searchWikimediaCommonsMedical(enQueries),
       ]);
 
       const googleImages = googleSettled.status === 'fulfilled' ? googleSettled.value : [];
-      const wikiRaw = wikiSettled.status === 'fulfilled' ? wikiSettled.value : [];
-      const openiRaw = openiSettled.status === 'fulfilled' ? openiSettled.value : [];
+      // Wikipedia and Wikimedia Commons imageinfo APIs already verified MIME type (image/*) and dimensions (>= 220x140);
+      // skipping redundant bulk thumbnail downloads avoids Wikimedia 429 rate-limits.
+      const wpImages = wikipediaSettled.status === 'fulfilled' ? wikipediaSettled.value.slice(0, 8) : [];
+      const wmImages = wikimediaSettled.status === 'fulfilled' ? wikimediaSettled.value.slice(0, 8) : [];
 
-      // Validate Wikimedia & Open-i candidate URLs in parallel (HTTP 200, image/*, min size)
-      const [wikiValidated, openiValidated] = await Promise.all([
-        Promise.all(
-          wikiRaw.slice(0, 6).map(async (img) => {
-            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
-            return check.ok ? img : null;
-          })
-        ),
-        Promise.all(
-          openiRaw.slice(0, 6).map(async (img) => {
-            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
-            return check.ok ? img : null;
-          })
-        ),
-      ]);
-
-      const wikiImages = wikiValidated.filter((x): x is NonNullable<typeof x> => x !== null);
-      const openiImages = openiValidated.filter((x): x is NonNullable<typeof x> => x !== null);
-
-      // Interleave Google Search Grounding, Wikimedia Commons Medical, and NLM Open-i results without duplicates
-      const combined = [];
+      // Interleave Google Grounding, Wikipedia Medical, and Wikimedia Commons without duplicates
+      const interleaved: MedicalImageCandidate[] = [];
       const seenUrls = new Set<string>();
-      const maxLen = Math.max(googleImages.length, wikiImages.length, openiImages.length);
+      const maxLen = Math.max(googleImages.length, wpImages.length, wmImages.length);
       for (let i = 0; i < maxLen; i++) {
-        for (const candidate of [googleImages[i], wikiImages[i], openiImages[i]]) {
-          if (candidate && !seenUrls.has(candidate.thumbUrl)) {
-            seenUrls.add(candidate.thumbUrl);
-            combined.push(candidate);
+        for (const candidate of [googleImages[i], wpImages[i], wmImages[i]]) {
+          if (!candidate) continue;
+          const normalizedKey = candidate.thumbUrl.replace(/^http:\/\//i, 'https://').split('?')[0];
+          if (!seenUrls.has(normalizedKey)) {
+            seenUrls.add(normalizedKey);
+            interleaved.push(candidate);
           }
         }
       }
 
+      // Prefer real raster images (.jpg/.png/.webp) before any .svg schematic
+      const rasterFirst = [
+        ...interleaved.filter((img) => !img.isSvg),
+        ...interleaved.filter((img) => img.isSvg),
+      ].map(({ isSvg: _omit, ...rest }) => rest);
+
       return res.json({
         query: rawSearch,
-        images: combined.slice(0, 12),
+        translatedQueries: enQueries,
+        images: rasterFirst.slice(0, 12),
       });
     } catch {
       return res.json({
         query: 'atlas_clinico',
+        translatedQueries: [],
         images: [],
       });
     }
@@ -1725,11 +2100,32 @@ async function startServer() {
     }
   });
 
+  const resolveEffectiveDomainProfile = (
+    requestedProfile: unknown,
+    deckKey: string,
+    textHint = ''
+  ): DomainProfile => {
+    const validProfiles: DomainProfile[] = [
+      'emergencia',
+      'ambulatorio',
+      'cirurgico',
+      'preventiva_normativo',
+    ];
+    if (
+      typeof requestedProfile === 'string' &&
+      validProfiles.includes(requestedProfile as DomainProfile)
+    ) {
+      return requestedProfile as DomainProfile;
+    }
+    return inferDomainProfile(deckKey, textHint);
+  };
+
   // Endpoint 1: Passo 1 — Gerar Mapa Clínico (P1 a P4) + Atualizações de Diretrizes
   app.post('/api/gemini/clinical-map', async (req, res) => {
     try {
       const {
         deckKey = 'tema_clinico_internato',
+        profile = 'auto',
         pdfs = [],
         existingJsonSummary = '',
         useGoogleSearch = true,
@@ -1744,40 +2140,51 @@ async function startServer() {
         });
       }
 
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        profile,
+        deckKey,
+        existingJsonSummary
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
       const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs);
 
       const prompt = `Analise os documentos PDF anexados (se houver) e o tema médico indicado pela Deck Key "${deckKey}".
 ${existingJsonSummary ? `Resumo do deck atual enviado pelo usuário:\n${existingJsonSummary}\n` : ''}
 ${
   useGoogleSearch
-    ? 'Utilize o Google Search para verificar diretrizes atualizadas do Ministério da Saúde (MS), Sociedades Médicas Brasileiras (FEBRASGO, SBC, SBP, SBGG, CBC, etc.), consensos internacionais recentes e referências de exames de imagem/traçados clássicos sobre este tema.'
+    ? 'Utilize o Google Search para verificar diretrizes atualizadas do Ministério da Saúde (MS), Sociedades Médicas Brasileiras (FEBRASGO, SBC, SBP, SBGG, CBC, CFM, etc.), consensos internacionais recentes e referências de exames/normas aplicáveis a este tema.'
     : ''
 }
 
-Gere um Mapa Clínico estruturado segundo a Doutrina Internato-First (P1 a P4) para guiar a criação/recriação do deck.
-Inclua em P2 conceitos de Reconhecimento Visual de exames/imagens fidedignas (ECG, RX, TC, USG, CTG, lesões clássicas).
-Aplique o Filtro Negativo: exclua genética de bancada, história da medicina e epidemiologia percentual que não mude conduta.
+${profilePromptBlock}
+
+Gere um Mapa Clínico estruturado segundo a Doutrina Internato-First (P1 a P4) ADAPTADA ESTRITAMENTE AO PERFIL DE DOMÍNIO "${effectiveProfile}" acima para guiar a criação/recriação do deck.
+- Não force cenário de "Sala Vermelha" nem viés obstétrico/de emergência se o tema pertencer a outro perfil!
+- Inclua em P2 conceitos de Reconhecimento Visual de exames/imagens reais da internet APENAS quando exames complementares visuais fizerem sentido para o tema (ex.: ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, lâminas). Para temas normativos/ética/legais sem exame de imagem típico, foque P2 em documentação, prazos e interpretação de medidas/indicadores.
+- Aplique o Filtro Negativo: exclua genética de bancada, história da medicina e epidemiologia percentual que não mude conduta.
+
 Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no seguinte formato exato:
 {
   "themeTitle": "Nome Completo do Tema Médico",
-  "specialty": "Especialidade (Clínica / Cirurgia / GO / Pediatria / Preventiva)",
+  "specialty": "Especialidade (Clínica / Cirurgia / GO / Pediatria / Preventiva / Ética)",
   "deckKey": "${deckKey}",
+  "profile": "${effectiveProfile}",
   "guidelineUpdates": [
-    "Resumo objetivo de atualização de diretriz MS / Sociedade Brasileira / Internacional com pontos de corte e condutas"
+    "Resumo objetivo de atualização de diretriz MS / Sociedade Brasileira / Norma CFM / Consenso com pontos de corte e condutas"
   ],
   "items": [
     {
       "id": "p1-1",
       "priority": "P1",
       "subtopic": "Subtema clínico sem spoiler",
-      "concept": "Conceito clínico de alto impacto (doses em emergência, vias, red flags, conduta minuto zero, 2ª linha, antídotos)",
-      "guidelineNote": "Referência ou destaque USP/Unicamp/Diretriz",
+      "concept": "Conceito P1 adequado ao perfil ativo (decisão de maior impacto, critério crítico ou norma/sigilo obrigatório)",
+      "guidelineNote": "Referência ou destaque USP/Unicamp/Diretriz/Lei",
       "targetCardType": "basic",
       "checked": true
     }
   ]
 }
-Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
+Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
 
       parts.push({ text: prompt });
 
@@ -1832,6 +2239,7 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
       return res.json({
         ...parsed,
         deckKey: parsed.deckKey || deckKey,
+        profile: resolveEffectiveDomainProfile(parsed.profile || profile, deckKey, existingJsonSummary),
         groundingSources:
           result.groundingSources.length > 0
             ? result.groundingSources
@@ -1889,6 +2297,12 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
       const checkedMapItems = Array.isArray(clinicalMap?.items)
         ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
         : [];
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ''} ${clinicalMap?.specialty || ''}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
 
       const outlineText =
         Array.isArray(deckOutline) && deckOutline.length > 0
@@ -1926,6 +2340,8 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
 
         const prompt = `Reconstrua profundamente e lapide o baralho canônico para o tema "${deckKey}".
 
+${profilePromptBlock}
+
 ${batchInstruction}
 
 DADOS DO BARALHO ANTIGO (COMPLETO COM PERGUNTA, RESPOSTA E COMENTÁRIO ORIGINAL):
@@ -1962,7 +2378,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
       "type": "basic",
       "priority": "P1",
       "topic": "Tema - Subtema Sem Spoiler",
-      "question": "Na Sala Vermelha, paciente de 54 anos apresenta [clínica + sinais vitais]. Qual a conduta imediata de estabilização (minuto zero)?",
+      "question": "No contexto clínico/assistencial pertinente ao tema, paciente apresenta [achados/cenário sem spoiler]. Qual a conduta prioritária indicada neste perfil?",
       "answer": "Conduta atômica curta terminada em ponto.",
       "hint": "<b>Comentário:</b> Explicação concisa de 180 a 300 chars visíveis com <b>termos-chave</b> e contraste diferencial."
     }
@@ -2046,6 +2462,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
       const checkedMapItems = Array.isArray(clinicalMap?.items)
         ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
         : [];
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ''} ${clinicalMap?.specialty || ''}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
 
       if (checkedMapItems.length === 0) {
         return res.json({ deck_key: deckKey, notes: [] });
@@ -2069,7 +2491,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
             .join('\n')
         : '';
 
-      const prompt = `Audite a cobertura clínica do baralho reconstruído "${deckKey}" comparando-o com o Mapa Clínico P1–P4 aprovado.
+      const prompt = `Audite a cobertura clínica do baralho reconstruído "${deckKey}" comparando-o com o Mapa Clínico P1–P4 aprovado para o perfil "${effectiveProfile}".
+
+${profilePromptBlock}
 
 MAPA CLÍNICO APROVADO:
 ${JSON.stringify(checkedMapItems, null, 2)}

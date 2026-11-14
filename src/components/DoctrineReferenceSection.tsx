@@ -43,19 +43,21 @@ export const DoctrineReferenceSection: React.FC = () => {
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="font-semibold text-slate-100">2. Formato Fluido &amp; Doutrina P1–P4</h3>
+            <h3 className="font-semibold text-slate-100">2. Formato Fluido &amp; 4 Perfis P1–P4</h3>
             <p>
-              Sem cota rígida 50/50: usa-se <code className="font-mono text-sky-400">basic</code> para condutas, diferenciais, imagens e perguntas{' '}
-              <em>&ldquo;por que / como&rdquo;</em>; <code className="font-mono text-sky-400">cloze</code> para critérios numéricos, doses críticas e limiares em âncora.
-              Filtro negativo estrito contra trivia.
+              Os eixos P1–P4 se adaptam ao domínio do tema (<strong className="text-slate-100">Emergência</strong>,{' '}
+              <strong className="text-slate-100">Ambulatório/Híbridos</strong>, <strong className="text-slate-100">Cirúrgico</strong> ou{' '}
+              <strong className="text-slate-100">Preventiva/Ética</strong>). Sem cota rígida 50/50: usa-se{' '}
+              <code className="font-mono text-sky-400">basic</code> para condutas, diferenciais, imagens e perguntas{' '}
+              <em>&ldquo;por que / como&rdquo;</em>; <code className="font-mono text-sky-400">cloze</code> para critérios numéricos, doses e limiares.
             </p>
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="font-semibold text-slate-100">3. Imagens Web &amp; Export .apkg Nativo</h3>
+            <h3 className="font-semibold text-slate-100">3. Imagens Reais da Web &amp; Export .apkg</h3>
             <p>
-              Busca automática no Google/Web (Gemini Grounding, NLM Open-i e Wikimedia) para substituir mídias locais sem upload, galeria de troca rápida com{' '}
-              <code className="font-mono text-slate-200">Ctrl+V</code>, revisão estilo Anki e exportação direta em{' '}
+              Busca exclusivamente <strong className="text-slate-100">imagens reais disponíveis na internet</strong> (Google Grounding com extração de páginas médicas, Wikipedia, Wikimedia Commons, LITFL, Radiopaedia), sem desenhos sintéticos gerados. Galeria de troca rápida com{' '}
+              <code className="font-mono text-slate-200">Ctrl+V</code> e exportação direta em{' '}
               <code className="font-mono text-slate-200">.apkg</code> offline.
             </p>
           </div>

@@ -1,4 +1,9 @@
 export type PriorityLevel = 'P1' | 'P2' | 'P3' | 'P4';
+export type DomainProfile =
+  | 'emergencia'
+  | 'ambulatorio'
+  | 'cirurgico'
+  | 'preventiva_normativo';
 export type CardType = 'basic' | 'cloze';
 
 export interface ExamReference {
@@ -85,6 +90,7 @@ export interface ClinicalMapResponse {
   themeTitle: string;
   specialty: string;
   deckKey: string;
+  profile?: DomainProfile;
   items: ClinicalMapItem[];
   guidelineUpdates: string[];
   groundingSources: GroundingSource[];

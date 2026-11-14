@@ -12,7 +12,8 @@ import {
   Download,
   Plus,
 } from 'lucide-react';
-import { ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
+import { DomainProfile, ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
+import { DOMAIN_PROFILE_CONFIGS, DOMAIN_PROFILE_ORDER } from '../utils/domainProfiles';
 
 interface InputPanelProps {
   pdfs: UploadedPdfFile[];
@@ -25,6 +26,8 @@ interface InputPanelProps {
   extractedMeta: ExtractedDeckMetadata;
   deckKey: string;
   onDeckKeyChange: (val: string) => void;
+  selectedProfile: 'auto' | DomainProfile;
+  onProfileChange: (val: 'auto' | DomainProfile) => void;
   useGoogleSearch: boolean;
   onToggleGoogleSearch: (val: boolean) => void;
   onGenerateClinicalMap: () => void;
@@ -62,6 +65,8 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   extractedMeta,
   deckKey,
   onDeckKeyChange,
+  selectedProfile,
+  onProfileChange,
   useGoogleSearch,
   onToggleGoogleSearch,
   onGenerateClinicalMap,
@@ -177,9 +182,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         </button>
       </div>
 
-      {/* Row 1: Deck Key + Google Search Toggle */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
-        <div className="md:col-span-7">
+      {/* Row 1: Deck Key + Domain Profile + Google Search Toggle */}
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-end">
+        <div className="md:col-span-5">
           <label
             htmlFor="deck-key-input"
             className="block text-xs font-medium text-slate-300 mb-1.5"
@@ -191,22 +196,44 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             type="text"
             value={deckKey}
             onChange={(e) => onDeckKeyChange(e.target.value)}
-            placeholder="Digite qualquer tema (ex.: assistencia_ao_parto, insuficiencia_cardiaca, trauma_abdominal)"
+            placeholder="Ex.: etica_medica, abdome_agudo, diabetes_mellitus"
             className="w-full px-3.5 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none transition-colors"
           />
         </div>
 
-        <div className="md:col-span-5">
+        <div className="md:col-span-3">
+          <label
+            htmlFor="domain-profile-select"
+            className="block text-xs font-medium text-slate-300 mb-1.5"
+          >
+            Perfil P1–P4
+          </label>
+          <select
+            id="domain-profile-select"
+            value={selectedProfile}
+            onChange={(e) => onProfileChange(e.target.value as 'auto' | DomainProfile)}
+            className="w-full px-3 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 focus:border-sky-400 focus:outline-none transition-colors cursor-pointer"
+          >
+            <option value="auto">Automático (por tema)</option>
+            {DOMAIN_PROFILE_ORDER.map((prof) => (
+              <option key={prof} value={prof}>
+                {DOMAIN_PROFILE_CONFIGS[prof].label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="md:col-span-4">
           <label
             htmlFor="google-search-toggle"
             className="flex items-center justify-between gap-3 px-3.5 py-2 rounded-lg border border-slate-700/90 bg-[#0B0F17] cursor-pointer select-none"
           >
             <div className="min-w-0">
               <div className="text-xs font-medium text-slate-200 truncate">
-                Google Search Grounding + Imagens Web
+                Google Search + Imagens Web
               </div>
               <div className="text-[11px] text-slate-400 truncate">
-                Diretrizes MS / Sociedades + Imagens LITFL, Radiopaedia, Open-i
+                Diretrizes + Wikimedia, Wikipedia, LITFL
               </div>
             </div>
             <input

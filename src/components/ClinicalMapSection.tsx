@@ -4,8 +4,10 @@ import {
   CardType,
   ClinicalMapItem,
   ClinicalMapResponse,
+  DomainProfile,
   PriorityLevel,
 } from '../types/deck';
+import { DOMAIN_PROFILE_CONFIGS, inferDomainProfile } from '../utils/domainProfiles';
 
 interface ClinicalMapSectionProps {
   clinicalMap: ClinicalMapResponse | null;
@@ -20,13 +22,6 @@ interface ClinicalMapSectionProps {
   onRecreateCanonicalDeck: () => void;
   isGeneratingDeck: boolean;
 }
-
-const PRIORITY_LABELS: Record<PriorityLevel, string> = {
-  P1: 'P1 · Urgência / Minuto Zero',
-  P2: 'P2 · Decisão Diagnóstica',
-  P3: 'P3 · Ambulatório & Prevenção',
-  P4: 'P4 · Fisiopatologia Aplicada',
-};
 
 export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   clinicalMap,
@@ -62,6 +57,11 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
     );
   }
 
+  const activeProfile: DomainProfile =
+    clinicalMap.profile || inferDomainProfile(clinicalMap.deckKey, clinicalMap.themeTitle);
+  const profileConfig = DOMAIN_PROFILE_CONFIGS[activeProfile];
+  const priorityLabels = profileConfig.priorityLabels;
+
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSubtopic.trim() || !newConcept.trim()) return;
@@ -85,9 +85,14 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
       {/* Clean Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
         <div>
-          <h2 className="text-base font-bold text-slate-100 font-display">
-            2. Mapa Clínico: {clinicalMap.themeTitle}
-          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-bold text-slate-100 font-display">
+              2. Mapa Clínico: {clinicalMap.themeTitle}
+            </h2>
+            <span className="px-2 py-0.5 text-[11px] font-medium rounded-md bg-sky-950/70 border border-sky-700/60 text-sky-300">
+              {profileConfig.label}
+            </span>
+          </div>
           <p className="text-xs text-slate-400 mt-0.5 tabular-nums">
             {checkedCount} de {clinicalMap.items.length} conceitos selecionados para o baralho
           </p>
@@ -245,7 +250,7 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
               <div className="min-w-0 space-y-0.5">
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
                   <span className="font-mono font-semibold text-sky-400">
-                    {PRIORITY_LABELS[item.priority]}
+                    {priorityLabels[item.priority]}
                   </span>
                   <span aria-hidden="true">·</span>
                   <span className="font-medium text-slate-100">{item.subtopic}</span>

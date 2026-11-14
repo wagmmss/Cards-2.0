@@ -15,6 +15,15 @@ import {
   surgicalRepairCardLocal,
 } from './wozniakLinter';
 import { buildGenericClinicalMap } from '../data/demoDecks';
+import {
+  DOMAIN_PROFILE_CONFIGS,
+  formatProfilePromptBlock,
+  inferDomainProfile,
+} from './domainProfiles';
+import {
+  HIGH_PRECISION_MEDICAL_ATLAS,
+  matchMedicalAtlasImages,
+} from '../data/medicalDiagnosticAtlas';
 import { CanonicalCard, GuidRegistryData, MedicalImageResult } from '../types/deck';
 
 test('extractDeckMetadata extracts existing numeric FSRS IDs, records mediaTags, and automatically strips orphan <audio> from rawCards', () => {
@@ -551,4 +560,72 @@ test('reconcileDeckIdsAndMedia keeps hint-side images in hint and surgicalRepair
     lintCard(shortSingleAdjectiveTopicCard).warnings.some((w) => w.code === 'COMMENT_TOO_SHORT'),
     false
   );
+});
+
+test('inferDomainProfile classifies all 4 medical domain profiles accurately and avoids GO/emergency bias', () => {
+  assert.equal(
+    inferDomainProfile('etica_medica_bioetica_documentacao'),
+    'preventiva_normativo'
+  );
+  assert.equal(
+    inferDomainProfile('sus_legislacao_vigilancia_notificacao'),
+    'preventiva_normativo'
+  );
+  assert.equal(
+    inferDomainProfile('abdome_agudo_inflamatorio_apendicite'),
+    'cirurgico'
+  );
+  assert.equal(
+    inferDomainProfile('trauma_toracico_atls_drenagem'),
+    'cirurgico'
+  );
+  assert.equal(
+    inferDomainProfile('sindromes_coronarianas_agudas_iam'),
+    'emergencia'
+  );
+  assert.equal(
+    inferDomainProfile('sepse_choque_septico_minuto_zero'),
+    'emergencia'
+  );
+  assert.equal(
+    inferDomainProfile('diabetes_mellitus_tipo_2_ubs'),
+    'ambulatorio'
+  );
+  assert.equal(
+    inferDomainProfile('metodos_contraceptivos_criterios_elegibilidade'),
+    'ambulatorio'
+  );
+});
+
+test('buildGenericClinicalMap adapts P1-P4 priorities to active DomainProfile and removes synthetic atlas SVGs', () => {
+  const preventivaMap = buildGenericClinicalMap('etica_medica_sigilo_prontuario', []);
+  assert.equal(preventivaMap.profile, 'preventiva_normativo');
+  assert.equal(preventivaMap.items.length >= 4, true);
+  assert.equal(
+    preventivaMap.items.some((item) => /Sala Vermelha|gestante|parto/i.test(item.concept)),
+    false
+  );
+
+  const cirurgicoMap = buildGenericClinicalMap('colecistite_aguda_cirurgia', []);
+  assert.equal(cirurgicoMap.profile, 'cirurgico');
+
+  const ambulatorioOverride = buildGenericClinicalMap(
+    'tema_custom',
+    [],
+    'ambulatorio'
+  );
+  assert.equal(ambulatorioOverride.profile, 'ambulatorio');
+
+  assert.equal(
+    DOMAIN_PROFILE_CONFIGS.preventiva_normativo.priorityLabels.P1.length > 5,
+    true
+  );
+  assert.equal(
+    formatProfilePromptBlock('cirurgico').includes('PERFIL DE DOMÍNIO ATIVO'),
+    true
+  );
+
+  // Zero synthetic drawn SVGs in fallback atlas
+  assert.equal(HIGH_PRECISION_MEDICAL_ATLAS.length, 0);
+  assert.deepEqual(matchMedicalAtlasImages('ECG supradesnivelamento IAM'), []);
 });

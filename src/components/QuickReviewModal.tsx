@@ -15,7 +15,6 @@ import {
   resolveLocalMediaFilename,
   stripHtml,
 } from '../utils/wozniakLinter';
-import { matchMedicalAtlasImages } from '../data/medicalDiagnosticAtlas';
 
 interface QuickReviewModalProps {
   isOpen: boolean;
@@ -104,16 +103,12 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   const alternatives: MedicalImageResult[] =
     currentCard.imageAlternatives && currentCard.imageAlternatives.length > 0
       ? currentCard.imageAlternatives
-      : matchMedicalAtlasImages(`${currentCard.topic} ${stripHtml(currentCard.question)}`).slice(
-          0,
-          6
-        );
+      : [];
 
   const handleSearchAlternativeImages = async (customQuery?: string) => {
     const q = (customQuery ?? galleryQuery).trim() || currentCard.topic;
     setIsSearchingGallery(true);
     try {
-      const localMatches = matchMedicalAtlasImages(`${q} ${currentCard.topic}`);
       const res = await fetch('/api/media/search-medical-images', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -121,17 +116,17 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           query: q,
           topic: currentCard.topic,
           question: stripHtml(currentCard.question),
+          hint: stripHtml(currentCard.hint),
           preferGoogleGrounding: true,
         }),
       });
       if (res.ok) {
         const data = await res.json();
         const webImgs: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
-        const merged = [...webImgs, ...localMatches].slice(0, 6);
-        if (merged.length > 0) {
+        if (webImgs.length > 0) {
           onUpdateCard({
             ...currentCard,
-            imageAlternatives: merged,
+            imageAlternatives: webImgs.slice(0, 6),
           });
         }
       }

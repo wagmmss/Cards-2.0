@@ -1,5 +1,8 @@
-import { CanonicalCard, ClinicalMapResponse } from '../types/deck';
-import { HIGH_PRECISION_MEDICAL_ATLAS, matchMedicalAtlasImages } from './medicalDiagnosticAtlas';
+import { CanonicalCard, ClinicalMapResponse, DomainProfile } from '../types/deck';
+import {
+  DOMAIN_PROFILE_CONFIGS,
+  inferDomainProfile,
+} from '../utils/domainProfiles';
 
 /**
  * Formats a snake_case deckKey into a clean human-readable title.
@@ -13,39 +16,33 @@ export function formatThemeTitle(deckKey: string): string {
 }
 
 /**
- * Picks a high-fidelity diagnostic medical image matching a topic or theme.
- */
-export function pickFidedignaWebMedicalImage(text: string): {
-  url: string;
-  legend: string;
-  filename: string;
-} {
-  const matched = matchMedicalAtlasImages(text)[0] || HIGH_PRECISION_MEDICAL_ATLAS[0];
-  return {
-    url: matched.thumbUrl,
-    legend: matched.defaultLegend,
-    filename: matched.suggestedFilename,
-  };
-}
-
-/**
- * Builds a dynamic, theme-agnostic Clinical Map (P1 to P4) for any medical topic
- * when offline or when testing without a live API response.
+ * Builds a dynamic, profile-aware Clinical Map (P1 to P4) for any medical specialty
+ * when offline or while waiting for the live Gemini response.
  */
 export function buildGenericClinicalMap(
   deckKey: string,
-  existingCards: CanonicalCard[] = []
+  existingCards: CanonicalCard[] = [],
+  profileOverride?: DomainProfile
 ): ClinicalMapResponse {
   const title = formatThemeTitle(deckKey);
   const safeKey = (deckKey || 'tema_clinico').trim().toLowerCase().replace(/\s+/g, '_');
 
-  // Extract distinct subtopics across the entire existing deck (not just the first 4 cards)
+  const existingHint = existingCards
+    .slice(0, 12)
+    .map((c) => `${c.topic} ${c.question}`)
+    .join(' ');
+  const activeProfile: DomainProfile =
+    profileOverride || inferDomainProfile(safeKey, existingHint);
+  const cfg = DOMAIN_PROFILE_CONFIGS[activeProfile];
+
+  // Extract distinct subtopics across the existing deck
   const seenSubtopics = new Set<string>();
   const sampledExisting: CanonicalCard[] = [];
   for (const card of existingCards) {
-    const rawSub = card.topic && card.topic.includes(' - ')
-      ? card.topic.split(' - ').slice(1).join(' - ').trim()
-      : (card.topic || '').trim();
+    const rawSub =
+      card.topic && card.topic.includes(' - ')
+        ? card.topic.split(' - ').slice(1).join(' - ').trim()
+        : (card.topic || '').trim();
     const normSub = rawSub.toLowerCase();
     if (normSub && !seenSubtopics.has(normSub)) {
       seenSubtopics.add(normSub);
@@ -64,121 +61,195 @@ export function buildGenericClinicalMap(
       priority: card.priority || priorities[idx % 4],
       subtopic,
       concept: card.question.replace(/<[^>]*>/g, '').slice(0, 140),
-      guidelineNote: 'Auditado do deck original segundo Matuschak & Nielsen (formato fluido sem cota fixa)',
-      targetCardType: (idx % 2 === 0 ? 'basic' : 'cloze') as 'basic' | 'cloze',
+      guidelineNote: `Auditado do deck original (${cfg.shortLabel}) segundo Matuschak & Nielsen`,
+      targetCardType: (card.type || (idx % 2 === 0 ? 'basic' : 'cloze')) as 'basic' | 'cloze',
       checked: true,
     };
   });
 
-  const isPartoOrObstetricia = /parto|obstetr|gesta|puerp|cardiotoco|distocia|bishop/i.test(
-    `${safeKey} ${existingCards.slice(0, 10).map((c) => c.topic).join(' ')}`
-  );
+  const defaultByProfile: Record<DomainProfile, ClinicalMapResponse['items']> = {
+    emergencia: [
+      {
+        id: 'map-p1-1',
+        priority: 'P1',
+        subtopic: 'Estabilização Inicial e Droga de Minuto Zero',
+        concept: `Sinais de alarme, estabilização imediata e fármaco de 1ª linha (dose/via) em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P1}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p1-2',
+        priority: 'P1',
+        subtopic: 'Refratariedade, 2ª Linha e Contraindicações',
+        concept: `Conduta escalonada após falha da 1ª escolha e contraindicações absolutas em ${title}.`,
+        guidelineNote: 'P1 · Duplo Salto Cognitivo na Refratariedade',
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p2-1',
+        priority: 'P2',
+        subtopic: 'Reconhecimento Visual e Exame Padrão-Ouro',
+        concept: `Exame inicial à beira-leito vs. padrão-ouro e interpretação de imagem real em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P2}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p3-1',
+        priority: 'P3',
+        subtopic: 'Pós-Estabilização e Critérios de Internação/Alta',
+        concept: `Transição terapêutica, profilaxia secundária e critérios de UTI ou alta em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P3}`,
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p4-1',
+        priority: 'P4',
+        subtopic: 'Mecanismo Aplicado e Diagnóstico Diferencial',
+        concept: `Fisiopatologia que justifica a conduta aguda e diferencial prioritário em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P4}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+    ],
+    ambulatorio: [
+      {
+        id: 'map-p1-1',
+        priority: 'P1',
+        subtopic: 'Contraindicações Absolutas e Sinais de Alarme',
+        concept: `Fármacos/condutas proscritas, red flags para internação e descompensações agudas em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P1}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p2-1',
+        priority: 'P2',
+        subtopic: 'Critérios Diagnósticos e Pontos de Corte',
+        concept: `Exame inicial vs. confirmatório, rastreio e limiares diagnósticos exatos em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P2}`,
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p3-1',
+        priority: 'P3',
+        subtopic: 'Terapia de 1ª Linha e Metas de Controle',
+        concept: `Prescrição inicial padrão, escalonamento e metas terapêuticas de seguimento em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P3}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p3-2',
+        priority: 'P3',
+        subtopic: 'Ajuste em Populações Especiais e Restrições',
+        concept: `Conduta diferenciada em crianças, idosos, gestantes, DRC, hepatopatas ou alérgicos em ${title}.`,
+        guidelineNote: 'P3 · Segurança e Individualização Terapêutica',
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p4-1',
+        priority: 'P4',
+        subtopic: 'Fisiopatologia Aplicada e Diferenciais',
+        concept: `Mecanismo que explica sintomas/efeitos adversos e diagnóstico diferencial gêmeo em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P4}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+    ],
+    cirurgico: [
+      {
+        id: 'map-p1-1',
+        priority: 'P1',
+        subtopic: 'Critérios de Indicação Cirúrgica Imediata',
+        concept: `Achados que impõem laparotomia/toracotomia/drenagem imediata vs. manejo conservador em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P1}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p2-1',
+        priority: 'P2',
+        subtopic: 'Propedêutica Armada e Estadiamento',
+        concept: `Exame de imagem de escolha (e-FAST/TC/USG/RX) e classificação operatória em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P2}`,
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p3-1',
+        priority: 'P3',
+        subtopic: 'Pré-Operatório, Profilaxias e Complicações',
+        concept: `Antibioticoprofilaxia, preparo, princípio técnico e manejo de complicação pós-op em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P3}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p4-1',
+        priority: 'P4',
+        subtopic: 'Anatomia Cirúrgica Aplicada e Diferenciais',
+        concept: `Reparo anatômico crítico para evitar iatrogenia e diferencial cirúrgico em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P4}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+    ],
+    preventiva_normativo: [
+      {
+        id: 'map-p1-1',
+        priority: 'P1',
+        subtopic: 'Atribuições Legais, Ética e Notificação Imediata',
+        concept: `Deveres ético-legais inegociáveis, responsabilidade documental e notificação urgente em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P1}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+      {
+        id: 'map-p2-1',
+        priority: 'P2',
+        subtopic: 'Fórmulas, Critérios e Desenhos Epidemiológicos',
+        concept: `Definições operacionais, métricas diagnósticas/epidemiológicas e vieses em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P2}`,
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p3-1',
+        priority: 'P3',
+        subtopic: 'Fluxos do SUS, Prazos e Exceções Normativas',
+        concept: `Regras práticas, calendários, prazos e exceções clássicas cobradas em prova sobre ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P3}`,
+        targetCardType: 'cloze',
+        checked: true,
+      },
+      {
+        id: 'map-p4-1',
+        priority: 'P4',
+        subtopic: 'Interpretação Crítica e Armadilhas de Banca',
+        concept: `Fundamentos conceituais, interpretação de resultados e pegadinhas das bancas em ${title}.`,
+        guidelineNote: `${cfg.priorityLabels.P4}`,
+        targetCardType: 'basic',
+        checked: true,
+      },
+    ],
+  };
 
-  const defaultItems: ClinicalMapResponse['items'] = isPartoOrObstetricia
-    ? [
-        {
-          id: 'map-p1-1',
-          priority: 'P1',
-          subtopic: 'Manejo Ativo do 3º Período (Secundamento)',
-          concept: 'Ocitocina 10 UI IM imediata após o desprendimento do ombro anterior e tração controlada do cordão.',
-          guidelineNote: 'P1 · Prevenção de Hemorragia Pós-Parto (Diretriz OMS / FEBRASGO)',
-          targetCardType: 'basic',
-          checked: true,
-        },
-        {
-          id: 'map-p1-2',
-          priority: 'P1',
-          subtopic: 'Distocia de Ombro e Manobra de 1ª Linha',
-          concept: 'Manobra de McRoberts associada à pressão suprapúbica (Rubin I), sendo proscrita a manobra de Kristeller.',
-          guidelineNote: 'P1 · Emergência Obstétrica no Período Expulsivo',
-          targetCardType: 'cloze',
-          checked: true,
-        },
-        {
-          id: 'map-p2-1',
-          priority: 'P2',
-          subtopic: 'Critério de Fase Ativa do Trabalho de Parto (OMS)',
-          concept: 'Dilatação cervical a partir de 5 cm associada a contrações uterinas regulares na abertura do partograma.',
-          guidelineNote: 'P2 · Labor Care Guide OMS / Ministério da Saúde',
-          targetCardType: 'cloze',
-          checked: true,
-        },
-        {
-          id: 'map-p3-1',
-          priority: 'P3',
-          subtopic: 'Ausculta Cardiofetal Intermitente no Período Expulsivo',
-          concept: 'Ausculta de BCF a cada 15 minutos no risco habitual e a cada 5 minutos no alto risco durante o 2º período.',
-          guidelineNote: 'P3 · Vigilância Fetal Intraparto (MS / FEBRASGO)',
-          targetCardType: 'basic',
-          checked: true,
-        },
-        {
-          id: 'map-p4-1',
-          priority: 'P4',
-          subtopic: 'Estática Fetal, Planos de DeLee e Mecanismo de Parto',
-          concept: 'Insinuação definida pela passagem do diâmetro biparietal pelo estreito superior (Plano 0 de DeLee nas espinhas isquiáticas).',
-          guidelineNote: 'P4 · Obstetrícia Paulista (USP / Unicamp)',
-          targetCardType: 'cloze',
-          checked: true,
-        },
-      ]
-    : [
-        {
-          id: 'map-p1-1',
-          priority: 'P1',
-          subtopic: 'Sinais de Alarme e Estabilização Imediata',
-          concept: `Estabilização hemodinâmica e conduta salvadora de 1ª linha no minuto zero em ${title}.`,
-          guidelineNote: 'P1 · Urgência / Emergência / Minuto Zero (Tripla Ancoragem)',
-          targetCardType: 'basic',
-          checked: true,
-        },
-        {
-          id: 'map-p1-2',
-          priority: 'P1',
-          subtopic: 'Refratariedade, 2ª Linha e Contraindicações',
-          concept: `Intervenção dirigida de segunda linha diante de refratariedade em ${title}.`,
-          guidelineNote: 'P1 · Duplo Salto Cognitivo na Refratariedade',
-          targetCardType: 'cloze',
-          checked: true,
-        },
-        {
-          id: 'map-p2-1',
-          priority: 'P2',
-          subtopic: 'Reconhecimento Visual e Exame Padrão-Ouro',
-          concept: `Interpretação de imagem diagnóstica fidedigna e conduta imediata em ${title}.`,
-          guidelineNote: 'P2 · Imagem Médica Fidedigna (Offline em collection.media)',
-          targetCardType: 'basic',
-          checked: true,
-        },
-        {
-          id: 'map-p3-1',
-          priority: 'P3',
-          subtopic: 'Manejo Ambulatorial, Profilaxia e Populações Especiais',
-          concept: `Terapia de manutenção, profilaxia específica e ajuste em populações especiais em ${title}.`,
-          guidelineNote: 'P3 · Enfermaria / UBS / Prevenção',
-          targetCardType: 'cloze',
-          checked: true,
-        },
-        {
-          id: 'map-p4-1',
-          priority: 'P4',
-          subtopic: 'Mecanismo Clínico Aplicado e Diagnóstico Diferencial',
-          concept: `Correlação fisiopatológica e diagnóstico diferencial prioritário em ${title}.`,
-          guidelineNote: 'P4 · Fisiopatologia Aplicada e Radar Paulista',
-          targetCardType: 'basic',
-          checked: true,
-        },
-      ];
+  const defaultItems = defaultByProfile[activeProfile];
 
   return {
     themeTitle: title,
-    specialty: isPartoOrObstetricia
-      ? 'Ginecologia e Obstetrícia (Internato · Diretrizes OMS / FEBRASGO / MS)'
-      : 'Qualquer Especialidade (Clínica · Cirurgia · GO · Pediatria · Preventiva)',
+    specialty: `Perfil: ${cfg.label} (Clínica · Cirurgia · GO · Pediatria · Preventiva)`,
     deckKey: safeKey,
+    profile: activeProfile,
     guidelineUpdates: [
-      `Diretrizes atualizadas aplicadas a ${title}: priorizar pontos de corte diagnósticos exatos, estratificação de gravidade e fármacos de 1ª escolha.`,
-      'Liberdade total de curadoria: poda de cards redundantes (excluindo IDs fracos), adição de novos IDs para lacunas P1–P4 e escolha fluida basic/cloze conforme a tarefa cognitiva.',
+      `Perfil ativo (${cfg.label}): ${cfg.description}`,
+      'Curadoria Matuschak & Nielsen: preservação estrita de IDs FSRS, formato fluido basic/cloze e imagens reais da web.',
     ],
     groundingSources: [],
     items: fromExisting.length > 0 ? [...fromExisting, ...defaultItems] : defaultItems,
@@ -186,8 +257,8 @@ export function buildGenericClinicalMap(
 }
 
 /**
- * Builds generic, theme-matched canonical cards following Tripla Ancoragem
- * and desktop lint.py rules when testing offline or without an API key.
+ * Builds generic, profile-matched canonical cards when testing offline.
+ * Does NOT generate synthetic SVG images.
  */
 export function buildGenericCanonicalCards(
   deckKey: string,
@@ -196,7 +267,6 @@ export function buildGenericCanonicalCards(
   const title = formatThemeTitle(deckKey);
   const safeKey = (deckKey || 'tema_clinico').trim().toLowerCase().replace(/\s+/g, '_');
   const checked = map.items.filter((i) => i.checked);
-  const webImg = pickFidedignaWebMedicalImage(deckKey);
 
   return checked.map((item, idx) => {
     const id = 171000101 + idx;
@@ -207,26 +277,10 @@ export function buildGenericCanonicalCards(
         priority: item.priority,
         deck_key: safeKey,
         topic: `${title} - ${item.subtopic}`,
-        question: `No manejo de ${title.toLowerCase()} em casos refratários à terapia inicial, a conduta escalonada de escolha é {{c1::intervenção dirigida de segunda linha}}.`,
+        question: `Em ${title.toLowerCase()}, o parâmetro decisório prioritário referente a ${item.subtopic.toLowerCase()} fundamenta-se em {{c1::critério de primeira linha}}.`,
         answer: '',
-        hint: `<b>Comentário:</b> Em <b>${title.toLowerCase()}</b>, a <b>intervenção de 2ª linha</b> é reservada à refratariedade documentada, diferentemente da <b>estabilização inicial</b> indicada no minuto zero.`,
+        hint: `<b>Comentário:</b> Em <b>${title.toLowerCase()}</b>, prioriza-se o critério de <b>primeira linha</b> para reduzir erro diagnóstico, diferentemente das <b>condutas de exceção</b>.`,
         tags: [safeKey, item.priority.toLowerCase()],
-      };
-    }
-
-    // Make P2 cards use image_mode: "recognition" with an embedded offline medical image
-    if (item.priority === 'P2') {
-      return {
-        id,
-        type: 'basic',
-        priority: 'P2',
-        deck_key: safeKey,
-        image_mode: 'recognition',
-        topic: `${title} - ${item.subtopic}`,
-        question: `No Pronto-Socorro, paciente adulto com suspeita de ${title.toLowerCase()} realiza o exame complementar abaixo. Diante deste achado visual, qual a conduta imediata de primeira escolha?<br><img src="${webImg.url}" data-anki-file="${webImg.filename}">`,
-        answer: 'Intervenção específica imediata guiada pelo achado de imagem.',
-        hint: `<i>${webImg.legend}</i><br><br><b>Comentário:</b> O <b>reconhecimento imediato do padrão de imagem</b> em <b>${title.toLowerCase()}</b> autoriza conduta definitiva precoce, superando a <b>conduta expectante</b>.`,
-        tags: [safeKey, 'p2', 'recognition'],
       };
     }
 
@@ -236,17 +290,17 @@ export function buildGenericCanonicalCards(
       priority: item.priority,
       deck_key: safeKey,
       topic: `${title} - ${item.subtopic}`,
-      question: `Na Sala de Emergência, paciente adulto apresenta quadro agudo de ${title.toLowerCase()} associado a sinais vitais de instabilidade clínica. Qual a conduta imediata de estabilização (minuto zero)?`,
-      answer: 'Estabilização hemodinâmica imediata e terapia específica de primeira linha.',
-      hint: `<b>Comentário:</b> No manejo agudo de <b>${title.toLowerCase()}</b>, a <b>intervenção no minuto zero</b> reduz mortalidade precoce, superando a <b>conduta expectante</b> restrita aos pacientes estáveis.`,
+      question: `Diante de caso clínico ou normativo envolvendo ${item.subtopic.toLowerCase()} em ${title.toLowerCase()}, qual é a conduta imediata de primeira escolha?`,
+      answer: 'Conduta prioritária baseada nas diretrizes vigentes.',
+      hint: `<b>Comentário:</b> Em <b>${title.toLowerCase()}</b>, a <b>conduta de primeira escolha</b> previne complicações e iatrogenias, superando o <b>manejo expectante</b> inadequado.`,
       tags: [safeKey, item.priority.toLowerCase()],
     };
   });
 }
 
 /**
- * Generic multi-specialty sample deck used only when the user clicks "Carregar exemplo de teste".
- * Includes a clean diagnostic plate (zero text spoilers) with local Anki filename binding.
+ * Generic sample deck used only when the user clicks "Carregar exemplo de teste".
+ * Uses an unresolved local filename so real web image search fetches a real ECG automatically.
  */
 export const GENERIC_SAMPLE_DECK_JSON = JSON.stringify(
   [
@@ -254,21 +308,21 @@ export const GENERIC_SAMPLE_DECK_JSON = JSON.stringify(
       id: 171000101,
       type: 'basic',
       image_mode: 'recognition',
-      topic: 'Emergência Clínica - Estabilização Inicial e Droga',
-      question: `Na Sala de Emergência, paciente de 58 anos admitido com dor torácica típica e sudorese fria realiza o exame abaixo (iniciar droga de primeira linha). Qual a hipótese e a conduta? <img src="${HIGH_PRECISION_MEDICAL_ATLAS[0].thumbUrl}" data-anki-file="${HIGH_PRECISION_MEDICAL_ATLAS[0].suggestedFilename}">`,
-      answer:
-        'Instabilidade aguda; realizar dupla antiagregação plaquetária e reperfusão coronariana imediata por angioplastia primária.',
-      hint: '<i>ECG de 12 derivações evidenciando supradesnivelamento de ST em parede anterior.</i><br><br>Iniciar reperfusão rápida no minuto zero.',
+      topic: 'Emergência Clínica - Traçado Eletrocardiográfico',
+      question:
+        'Na Sala de Emergência, paciente de 58 anos admitido com dor torácica típica e sudorese fria realiza o exame abaixo. Qual é a conduta imediata de primeira escolha?<br><img src="ecg_anterior_stemi.jpg">',
+      answer: 'Dupla antiagregação plaquetária e angioplastia primária imediata.',
+      hint: '<i>ECG de 12 derivações evidenciando supradesnivelamento de ST em parede anterior.</i><br><br><b>Comentário:</b> O <b>supradesnivelamento convexo de ST</b> indica oclusão coronariana aguda e exige <b>reperfusão imediata</b>, ao contrário do IAM sem supra em que a estratificação guia o tempo invasivo.',
       tags: ['manejo_clinico_emergencia'],
     },
     {
       id: 171000102,
       type: 'cloze',
-      topic: 'Decisão Diagnóstica - Critério Confirmatório',
+      topic: 'Decisão Diagnóstica - Propedêutica Inicial',
       question:
-        'Na investigação diagnóstica inicial à beira-leito no trauma abdominal fechado instável, o exame de escolha na urgência é {{c1::avaliação ultrassonográfica point-of-care realizada imediatamente::exame rápido}} associada a {{c2::gasometria arterial}}.',
-      answer: 'Ultrassonografia point-of-care.',
-      hint: '<b>Comentário:</b> O <b>exame FAST à beira-leito</b> permite decisão cirúrgica rápida em pacientes instáveis, ao passo que a <b>tomografia computadorizada</b> exige estabilidade hemodinâmica para transporte.',
+        'Na avaliação inicial à beira-leito do trauma abdominal fechado instável, o exame de imagem imediato de escolha é a {{c1::ultrassonografia point-of-care (e-FAST)}}.',
+      answer: '',
+      hint: '<b>Comentário:</b> O <b>e-FAST à beira-leito</b> identifica líquido livre rapidamente no paciente instável, ao passo que a <b>tomografia computadorizada</b> exige estabilidade hemodinâmica para transporte.',
       tags: ['manejo_clinico_emergencia'],
     },
     {
@@ -276,9 +330,9 @@ export const GENERIC_SAMPLE_DECK_JSON = JSON.stringify(
       type: 'basic',
       topic: 'Manejo Ambulatorial - Prevenção Secundária',
       question:
-        'No Ambulatório, após compensação clínica e alta hospitalar, qual o tratamento medicamentoso de primeira escolha para prevenção de recorrência?',
-      answer: 'Terapia de manutenção contínua e controle estrito de fatores de risco.',
-      hint: '<b>Comentário:</b> O <b>seguimento ambulatorial estruturado</b> reduz taxas de readmissão precoce, diferenciando-se do <b>manejo exclusivamente sintomático</b> que não altera a história natural da condição.',
+        'No Ambulatório, após alta por síndrome coronariana aguda sem contraindicações, qual classe farmacológica reduz mortalidade a longo prazo e deve ser mantida continuamente?',
+      answer: 'Estatina de alta potência associada a antiagregante plaquetário.',
+      hint: '<b>Comentário:</b> A <b>prevenção secundária intensiva</b> estabiliza a placa aterosclerótica e reduz reinfarto, diferindo do <b>manejo exclusivamente sintomático</b> com nitratos.',
       tags: ['manejo_clinico_emergencia'],
     },
   ],

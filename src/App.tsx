@@ -10,6 +10,7 @@ import {
   CardType,
   ClinicalMapResponse,
   DeckCurationStats,
+  DomainProfile,
   ExtractedDeckMetadata,
   GuidRegistryData,
   MedicalImageResult,
@@ -35,7 +36,6 @@ import {
   buildGenericClinicalMap,
   GENERIC_SAMPLE_DECK_JSON,
 } from './data/demoDecks';
-import { matchMedicalAtlasImages } from './data/medicalDiagnosticAtlas';
 
 const EMPTY_META: ExtractedDeckMetadata = {
   existingIds: [],
@@ -69,6 +69,7 @@ export default function App() {
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [extractedMeta, setExtractedMeta] = useState<ExtractedDeckMetadata>(EMPTY_META);
   const [deckKey, setDeckKey] = useState<string>('');
+  const [selectedProfile, setSelectedProfile] = useState<'auto' | DomainProfile>('auto');
   const [useGoogleSearch, setUseGoogleSearch] = useState<boolean>(true);
 
   const [clinicalMap, setClinicalMap] = useState<ClinicalMapResponse | null>(null);
@@ -116,9 +117,6 @@ export default function App() {
         if (unresolvedList.length === 0) continue;
 
         const targetRef = unresolvedList[0];
-        const localAtlasFallback = matchMedicalAtlasImages(
-          `${targetRef.searchQuery} ${card.topic} ${stripHtml(card.question)}`
-        );
 
         let webImages: MedicalImageResult[] = [];
         try {
@@ -129,6 +127,7 @@ export default function App() {
               query: targetRef.searchQuery,
               topic: card.topic,
               question: stripHtml(card.question),
+              hint: stripHtml(card.hint),
               preferGoogleGrounding: true,
             }),
           });
@@ -139,10 +138,10 @@ export default function App() {
             }
           }
         } catch {
-          // Use local diagnostic atlas fallback if network fails
+          // Leave unresolved if network fails (never inject synthetic SVGs)
         }
 
-        const mergedCandidates = [...webImages, ...localAtlasFallback].slice(0, 6);
+        const mergedCandidates = webImages.slice(0, 6);
         if (mergedCandidates.length > 0) {
           resolvedCount++;
           const bestImage = mergedCandidates[0];
@@ -441,14 +440,19 @@ export default function App() {
       setDeckKey(effectiveKey);
     }
 
+    const profileOverride = selectedProfile === 'auto' ? undefined : selectedProfile;
     setIsGeneratingMap(true);
-    const optimisticMap = buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards);
+    const optimisticMap = buildGenericClinicalMap(
+      effectiveKey,
+      extractedMeta.rawCards,
+      profileOverride
+    );
     setClinicalMap(optimisticMap);
-    showStatus('Mapeando prioridades clínicas P1→P4 e consultando diretrizes...', 'info');
+    showStatus('Mapeando prioridades P1→P4 e consultando diretrizes...', 'info');
 
     try {
       const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs);
-      showStatus('Mapeando prioridades clínicas P1→P4 e consultando diretrizes...', 'info');
+      showStatus('Mapeando prioridades P1→P4 e consultando diretrizes...', 'info');
 
       const existingSummary = extractedMeta.rawCards
         .slice(0, 30)
@@ -460,6 +464,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           deckKey: effectiveKey,
+          profile: selectedProfile,
           pdfs: serializePdfsForApi(preparedPdfs),
           existingJsonSummary: existingSummary,
           useGoogleSearch,
@@ -506,11 +511,13 @@ export default function App() {
   // Curadoria local determinística: Poda de redundâncias + Adição P1-P4 preservando IDs FSRS e formato fluido
   const handleCurateAndRebalance = () => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
+    const profileOverride = selectedProfile === 'auto' ? undefined : selectedProfile;
     const activeMap =
       clinicalMap ||
       buildGenericClinicalMap(
         effectiveKey,
-        extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards
+        extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards,
+        profileOverride
       );
     if (!clinicalMap) {
       setClinicalMap(activeMap);
@@ -540,8 +547,11 @@ export default function App() {
       setDeckKey(effectiveKey);
     }
 
+    const profileOverride = selectedProfile === 'auto' ? undefined : selectedProfile;
     const activeMap =
-      mapOverride || clinicalMap || buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards);
+      mapOverride ||
+      clinicalMap ||
+      buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards, profileOverride);
     if (!clinicalMap) {
       setClinicalMap(activeMap);
     }
@@ -1181,6 +1191,15 @@ export default function App() {
           extractedMeta={extractedMeta}
           deckKey={deckKey}
           onDeckKeyChange={setDeckKey}
+          selectedProfile={selectedProfile}
+          onProfileChange={(val) => {
+            setSelectedProfile(val);
+            if (clinicalMap) {
+              const effKey = deckKey.trim() || clinicalMap.deckKey || 'tema_clinico_internato';
+              const nextProf = val === 'auto' ? undefined : val;
+              setClinicalMap(buildGenericClinicalMap(effKey, cards, nextProf));
+            }
+          }}
           useGoogleSearch={useGoogleSearch}
           onToggleGoogleSearch={setUseGoogleSearch}
           onGenerateClinicalMap={handleGenerateClinicalMap}

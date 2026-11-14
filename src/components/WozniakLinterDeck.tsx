@@ -40,7 +40,6 @@ import {
   resolveLocalMediaFilename,
   stripHtml,
 } from '../utils/wozniakLinter';
-import { matchMedicalAtlasImages } from '../data/medicalDiagnosticAtlas';
 
 interface WozniakLinterDeckProps {
   cards: CanonicalCard[];
@@ -266,17 +265,17 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     setImageSearchTerm(defaultQuery);
     setCustomImageUrl('');
     setCustomImageLegend('');
-    await triggerMedicalImageSearch(card, defaultQuery, card.topic, card.question);
+    await triggerMedicalImageSearch(card, defaultQuery, card.topic, card.question, card.hint);
   };
 
   const triggerMedicalImageSearch = async (
     targetCard: CanonicalCard,
     queryText: string,
     topicText: string = '',
-    questionText: string = ''
+    questionText: string = '',
+    hintText: string = ''
   ) => {
-    const localMatches = matchMedicalAtlasImages(`${queryText} ${topicText}`);
-    setImageResults(localMatches);
+    setImageResults([]);
     setIsSearchingImages(true);
     try {
       const res = await fetch('/api/media/search-medical-images', {
@@ -286,23 +285,23 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           query: queryText,
           topic: topicText,
           question: stripHtml(questionText),
+          hint: stripHtml(hintText),
           preferGoogleGrounding: true,
         }),
       });
       if (res.ok) {
         const data = await res.json();
         const webImages: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
+        setImageResults(webImages);
         if (webImages.length > 0) {
-          const combined = [...webImages.slice(0, 6), ...localMatches.slice(0, 3)];
-          setImageResults(combined);
           onUpdateCard({
             ...targetCard,
-            imageAlternatives: combined.slice(0, 6),
+            imageAlternatives: webImages.slice(0, 6),
           });
         }
       }
     } catch {
-      // Keep local high-precision diagnostic atlas matches
+      setImageResults([]);
     } finally {
       setIsSearchingImages(false);
     }
@@ -314,7 +313,6 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
       const legend = italicMatch?.[1] ? stripHtml(italicMatch[1]) : '';
       const q = `${legend} ${card.topic}`.trim();
-      const localMatches = matchMedicalAtlasImages(q);
       const res = await fetch('/api/media/search-medical-images', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -322,17 +320,17 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           query: q,
           topic: card.topic,
           question: stripHtml(card.question),
+          hint: stripHtml(card.hint),
           preferGoogleGrounding: true,
         }),
       });
       if (res.ok) {
         const data = await res.json();
         const webImages: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
-        const combined = [...webImages, ...localMatches].slice(0, 6);
-        if (combined.length > 0) {
+        if (webImages.length > 0) {
           onUpdateCard({
             ...card,
-            imageAlternatives: combined,
+            imageAlternatives: webImages.slice(0, 6),
           });
         }
       }
@@ -813,8 +811,6 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             const cardAlternatives: MedicalImageResult[] =
               card.imageAlternatives && card.imageAlternatives.length > 0
                 ? card.imageAlternatives
-                : hasAnyImage
-                ? matchMedicalAtlasImages(`${card.topic} ${stripHtml(card.question)}`).slice(0, 6)
                 : [];
 
             return (
@@ -1037,7 +1033,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                           card,
                           imageSearchTerm,
                           card.topic,
-                          card.question
+                          card.question,
+                          card.hint
                         );
                       }}
                       className="flex items-center gap-2"
@@ -1046,7 +1043,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                         type="text"
                         value={imageSearchTerm}
                         onChange={(e) => setImageSearchTerm(e.target.value)}
-                        placeholder="Ex.: apendicite aguda TC, IAM supra ST ECG LITFL, pneumotórax RX, partograma..."
+                        placeholder="Ex.: apendicite aguda TC, IAM supra ST ECG, taquissistolia cardiotocografia..."
                         className="flex-1 px-3 py-1.5 text-xs bg-slate-900 border border-slate-700 rounded-md text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
                       />
                       <button
@@ -1056,34 +1053,55 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                       >
                         <Search className="w-3.5 h-3.5" />
                         <span>
-                          {isSearchingImages ? 'Pesquisando no Google...' : 'Pesquisar no Google/Web'}
+                          {isSearchingImages ? 'Pesquisando imagens reais...' : 'Pesquisar no Google/Web'}
                         </span>
                       </button>
                     </form>
 
-                    {/* Image Grid */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-80 overflow-y-auto pr-1">
-                      {imageResults.map((img) => (
-                        <div
-                          key={img.id}
-                          className="flex flex-col justify-between p-2.5 rounded-lg bg-[#111827] border border-slate-800 gap-2"
-                        >
-                          <div className="space-y-1.5">
-                            <div className="h-28 w-full bg-slate-950 rounded overflow-hidden flex items-center justify-center border border-slate-800/80">
-                              <img
-                                src={img.thumbUrl}
-                                alt={img.title}
-                                loading="lazy"
-                                className="max-h-full max-w-full object-contain"
-                              />
+                    {/* Image Grid (Real Web Images Only) */}
+                    {isSearchingImages && imageResults.length === 0 ? (
+                      <div className="py-8 text-center text-xs text-slate-400">
+                        Buscando imagens médicas reais disponíveis na internet (Google Search, Wikipedia, Wikimedia Commons, LITFL, Radiopaedia)...
+                      </div>
+                    ) : imageResults.length === 0 ? (
+                      <div className="py-6 px-4 rounded-lg border border-slate-800 bg-[#111827] text-center space-y-1">
+                        <p className="text-xs font-medium text-slate-300">
+                          Nenhuma imagem real encontrada para &ldquo;{imageSearchTerm}&rdquo;.
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          Tente termos mais específicos (ex.: nome do exame ou sinal clássico em inglês como{' '}
+                          <code className="font-mono text-sky-400">cardiotocography late deceleration</code> ou{' '}
+                          <code className="font-mono text-sky-400">acute appendicitis CT</code>) ou cole a URL direta abaixo.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-80 overflow-y-auto pr-1">
+                        {imageResults.map((img) => (
+                          <div
+                            key={img.id}
+                            className="flex flex-col justify-between p-2.5 rounded-lg bg-[#111827] border border-slate-800 gap-2"
+                          >
+                            <div className="space-y-1.5">
+                              <div className="h-28 w-full bg-slate-950 rounded overflow-hidden flex items-center justify-center border border-slate-800/80">
+                                <img
+                                  src={img.thumbUrl}
+                                  alt={img.title}
+                                  loading="lazy"
+                                  className="max-h-full max-w-full object-contain"
+                                />
+                              </div>
+                              <div className="flex items-center justify-between gap-1.5">
+                                <div className="text-[11px] font-semibold text-slate-200 line-clamp-1">
+                                  {img.title}
+                                </div>
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-sky-300 font-mono shrink-0">
+                                  {img.source.split(' ')[0]}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-slate-400 line-clamp-2 leading-snug">
+                                {img.description}
+                              </p>
                             </div>
-                            <div className="text-[11px] font-semibold text-slate-200 line-clamp-1">
-                              {img.title}
-                            </div>
-                            <p className="text-[10px] text-slate-400 line-clamp-2 leading-snug">
-                              {img.description}
-                            </p>
-                          </div>
 
                           <div className="flex items-center gap-1.5 pt-1">
                             <button
@@ -1118,8 +1136,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                             </button>
                           </div>
                         </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    )}
 
                     {/* Direct Custom Google Image URL input */}
                     <div className="pt-2 border-t border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">

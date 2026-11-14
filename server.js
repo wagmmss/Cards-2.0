@@ -30,10 +30,149 @@ var import_url = require("url");
 var import_vite = require("vite");
 var import_genai = require("@google/genai");
 var import_sql = __toESM(require("sql.js"), 1);
+
+// src/utils/domainProfiles.ts
+var DOMAIN_PROFILE_CONFIGS = {
+  emergencia: {
+    id: "emergencia",
+    label: "Urg\xEAncia & Emerg\xEAncia",
+    shortLabel: "Emerg\xEAncia",
+    description: "Sala Vermelha, minuto zero, estabiliza\xE7\xE3o hemodin\xE2mica, drogas de emerg\xEAncia, p\xF3s-estabiliza\xE7\xE3o e fisiopatologia aplicada.",
+    priorityLabels: {
+      P1: "P1 \xB7 Sala Vermelha / Minuto Zero",
+      P2: "P2 \xB7 Diagn\xF3stico & Reconhecimento",
+      P3: "P3 \xB7 P\xF3s-Estabiliza\xE7\xE3o & Alta/UTI",
+      P4: "P4 \xB7 Fisiopatologia & Diferenciais"
+    },
+    priorityPrompts: {
+      P1: "Sala Vermelha / Minuto Zero: sinais de alarme (red flags), crit\xE9rios de instabilidade, estabiliza\xE7\xE3o imediata, manobras salvadoras, 1\xAA droga (dose/via), conduta na refratariedade (2\xAA linha), ant\xEDdotos e contraindica\xE7\xF5es fatais.",
+      P2: 'Decis\xE3o Diagn\xF3stica & Reconhecimento Visual: exame inicial \xE0 beira-leito vs. padr\xE3o-ouro confirmat\xF3rio, interpreta\xE7\xE3o de exames reais em image_mode: "recognition" (ECG, RX, TC, USG, CTG) e escores/cortes de gravidade.',
+      P3: "P\xF3s-Estabiliza\xE7\xE3o, Enfermaria & Preven\xE7\xE3o Secund\xE1ria: transi\xE7\xE3o de via, terapias de manuten\xE7\xE3o p\xF3s-alta, profilaxias, popula\xE7\xF5es especiais e crit\xE9rios de interna\xE7\xE3o em UTI ou alta segura.",
+      P4: "Fisiopatologia Aplicada & Diferenciais: mecanismos causais que explicam sinais cl\xEDnicos/condutas agudas e armadilhas cl\xE1ssicas das bancas."
+    },
+    scenarioGuidance: "[CEN\xC1RIO (Sala Vermelha / Pronto-Socorro / UTI / Centro Obst\xE9trico) + PERFIL (idade, sexo, comorbidades ou IG se aplic\xE1vel)] + [CL\xCDNICA + SINAIS VITAIS] + [COMANDO TEMPORAL INEQU\xCDVOCO].",
+    closedCommands: [
+      "Qual \xE9 a conduta imediata de minuto zero \xE0 beira do leito antes de exames complementares?",
+      "Qual \xE9 o primeiro exame a ser solicitado na sala de emerg\xEAncia (ou o exame padr\xE3o-ouro confirmat\xF3rio)?",
+      "Qual \xE9 a prescri\xE7\xE3o farmacol\xF3gica imediata de primeira escolha (f\xE1rmaco, dose e via)?",
+      "Ap\xF3s falha da primeira linha ou estabiliza\xE7\xE3o inicial, qual \xE9 o pr\xF3ximo passo terap\xEAutico indicado?"
+    ]
+  },
+  ambulatorio: {
+    id: "ambulatorio",
+    label: "Ambulat\xF3rio, Cr\xF4nicos & H\xEDbridos",
+    shortLabel: "Ambulat\xF3rio",
+    description: "UBS/ambulat\xF3rio, rastreio, diagn\xF3stico, metas terap\xEAuticas, popula\xE7\xF5es especiais e eventuais descompensa\xE7\xF5es agudas.",
+    priorityLabels: {
+      P1: "P1 \xB7 Seguran\xE7a, Red Flags & Descompensa\xE7\xF5es",
+      P2: "P2 \xB7 Diagn\xF3stico, Rastreio & Estratifica\xE7\xE3o",
+      P3: "P3 \xB7 1\xAA Linha, Metas & Popula\xE7\xF5es Especiais",
+      P4: "P4 \xB7 Fisiopatologia & Diferenciais"
+    },
+    priorityPrompts: {
+      P1: "Seguran\xE7a do Paciente, Contraindica\xE7\xF5es Absolutas & Descompensa\xE7\xF5es: erros iatrog\xEAnicos graves (ex.: f\xE1rmacos proscritos, categoria 4, teratog\xEAnicos), sinais de alarme para encaminhamento/interna\xE7\xE3o e manejo de descompensa\xE7\xF5es agudas do tema quando presentes no material (ex.: crise hipertensiva, CAD/EHH, crise asm\xE1tica, pr\xE9-ecl\xE2mpsia grave).",
+      P2: 'Diagn\xF3stico, Rastreamento & Estratifica\xE7\xE3o: crit\xE9rios diagn\xF3sticos exatos, exames iniciais vs. confirmat\xF3rios, fluxogramas de rastreio/seguimento, interpreta\xE7\xE3o visual de exames (image_mode: "recognition") e pontos de corte num\xE9ricos.',
+      P3: "Manejo de 1\xAA Linha, Metas & Popula\xE7\xF5es Especiais: terapia inicial, escalonamento/2\xAA linha, metas cl\xEDnicas/laboratoriais, preven\xE7\xE3o/profilaxias e ajustes em popula\xE7\xF5es especiais (crian\xE7as/peso, idosos, gestantes, nefropatas, hepatopatas, al\xE9rgicos).",
+      P4: "Fisiopatologia Aplicada & Diferenciais: mecanismos que explicam sinais, efeitos adversos ou escolhas terap\xEAuticas e diagn\xF3sticos diferenciais g\xEAmeos."
+    },
+    scenarioGuidance: "[CEN\xC1RIO (UBS / Ambulat\xF3rio / Enfermaria / Pronto-Atendimento se descompensado) + PERFIL DO PACIENTE (idade, sexo, comorbidades, peso ou IG apenas se aplic\xE1vel)] + [DADOS CL\xCDNICOS/EXAMES] + [COMANDO INEQU\xCDVOCO].",
+    closedCommands: [
+      "Qual \xE9 a contraindica\xE7\xE3o absoluta (ou sinal de alarme que indica interna\xE7\xE3o imediata) neste cen\xE1rio?",
+      "Qual \xE9 o exame confirmat\xF3rio padr\xE3o-ouro (ou crit\xE9rio diagn\xF3stico) indicado para este caso?",
+      "Qual \xE9 a terapia de primeira linha (ou ajuste em popula\xE7\xE3o especial) indicada para controle e seguimento?",
+      "Ap\xF3s falha ou intoler\xE2ncia ao esquema inicial, qual \xE9 a conduta de segunda linha recomendada?"
+    ]
+  },
+  cirurgico: {
+    id: "cirurgico",
+    label: "Cir\xFArgico & Trauma",
+    shortLabel: "Cir\xFArgico",
+    description: "Indica\xE7\xE3o cir\xFArgica vs. conservadora, ATLS, proped\xEAutica armada, estadiamento, pr\xE9/p\xF3s-operat\xF3rio e complica\xE7\xF5es.",
+    priorityLabels: {
+      P1: "P1 \xB7 Indica\xE7\xE3o Cir\xFArgica & Trauma",
+      P2: "P2 \xB7 Proped\xEAutica Armada & Estadiamento",
+      P3: "P3 \xB7 Pr\xE9/P\xF3s-Op, T\xE9cnica & Complica\xE7\xF5es",
+      P4: "P4 \xB7 Anatomia Cir\xFArgica & Diferenciais"
+    },
+    priorityPrompts: {
+      P1: "Indica\xE7\xE3o Cir\xFArgica Imediata vs. Manejo Conservador & Sala de Trauma: crit\xE9rios de laparotomia/toracotomia/drenagem imediata, sequ\xEAncia ABCDE/ATLS, choque hemorr\xE1gico, abdome agudo perfurativo/isqu\xEAmico e medidas salvadoras no minuto zero.",
+      P2: 'Proped\xEAutica Armada & Estadiamento: indica\xE7\xE3o de e-FAST, TC, USG ou RX (incluindo image_mode: "recognition"), classifica\xE7\xF5es e escores cir\xFArgicos (Hinchey, T\xF3quio, AAST, Alvarado, risco cir\xFArgico).',
+      P3: "Pr\xE9-Operat\xF3rio, T\xE9cnica Essencial, P\xF3s-Operat\xF3rio & Complica\xE7\xF5es: jejum/preparo, antibioticoprofilaxia e profilaxia de TEV, via de acesso/princ\xEDpio cir\xFArgico e manejo de complica\xE7\xF5es (f\xEDstulas, deisc\xEAncia, infec\xE7\xE3o de s\xEDtio, \xEDleo).",
+      P4: "Anatomia Cir\xFArgica Aplicada, Fisiopatologia & Diferenciais: rela\xE7\xF5es anat\xF4micas que evitam les\xE3o iatrog\xEAnica, mecanismos fisiopatol\xF3gicos e diferenciais cir\xFArgicos."
+    },
+    scenarioGuidance: "[CEN\xC1RIO (Sala de Trauma / Pronto-Socorro Cir\xFArgico / Enfermaria P\xF3s-Op / Ambulat\xF3rio Cir\xFArgico) + PERFIL DO PACIENTE] + [EXAME F\xCDSICO / SINAIS VITAIS / IMAGEM] + [COMANDO CIR\xDARGICO INEQU\xCDVOCO].",
+    closedCommands: [
+      "Qual \xE9 a indica\xE7\xE3o cir\xFArgica imediata (ou medida invasiva priorit\xE1ria) diante destes achados?",
+      "Qual \xE9 o exame de imagem inicial (ou padr\xE3o-ouro para estadiamento) indicado ap\xF3s a estabiliza\xE7\xE3o?",
+      "Qual \xE9 a conduta padronizada no pr\xE9-operat\xF3rio (ou no manejo da complica\xE7\xE3o p\xF3s-operat\xF3ria apresentada)?",
+      "Qual \xE9 o crit\xE9rio que contraindica o manejo conservador e imp\xF5e abordagem cir\xFArgica?"
+    ]
+  },
+  preventiva_normativo: {
+    id: "preventiva_normativo",
+    label: "Preventiva, \xC9tica, SUS & Conceitual",
+    shortLabel: "Preventiva / \xC9tica",
+    description: "\xC9tica m\xE9dica, documenta\xE7\xE3o (DO/CAT), SUS/PNAB, epidemiologia, bioestat\xEDstica, vigil\xE2ncia e calend\xE1rio vacinal.",
+    priorityLabels: {
+      P1: "P1 \xB7 Deveres Legais, \xC9tica & Notifica\xE7\xE3o",
+      P2: "P2 \xB7 Crit\xE9rios, F\xF3rmulas & Epidemiologia",
+      P3: "P3 \xB7 Regras Pr\xE1ticas, Fluxos & Exce\xE7\xF5es",
+      P4: "P4 \xB7 Fundamentos & Armadilhas de Banca"
+    },
+    priorityPrompts: {
+      P1: "Deveres \xC9tico-Legais Inegoci\xE1veis, Documenta\xE7\xE3o & Notifica\xE7\xE3o Urgente: quem preenche Declara\xE7\xE3o de \xD3bito (DO) vs. SVO vs. IML, emiss\xE3o de CAT, hip\xF3teses taxativas de quebra de sigilo, notifica\xE7\xE3o compuls\xF3ria imediata (\u2264 24h) e proibi\xE7\xF5es \xE9ticas graves.",
+      P2: "Crit\xE9rios, F\xF3rmulas, Desenhos de Estudo & M\xE9tricas: sensibilidade, especificidade, VPP/VPN, raz\xE3o de verossimilhan\xE7a, RR vs. OR vs. NNT, desenhos epidemiol\xF3gicos e seus vieses principais, n\xEDveis de preven\xE7\xE3o e testes estat\xEDsticos.",
+      P3: "Regras Pr\xE1ticas, Fluxos do SUS, Prazos & Exce\xE7\xF5es: princ\xEDpios e diretrizes do SUS/PNAB, calend\xE1rio vacinal e bloqueios p\xF3s-exposi\xE7\xE3o, rastreamentos populacionais, prazos legais e exce\xE7\xF5es cl\xE1ssicas.",
+      P4: "Fundamentos Conceituais, Interpreta\xE7\xE3o Cr\xEDtica & Armadilhas de Banca: interpreta\xE7\xE3o correta de p-valor/intervalo de confian\xE7a, confus\xE3o vs. modifica\xE7\xE3o de efeito e pegadinhas conceituais das bancas."
+    },
+    scenarioGuidance: "[CEN\xC1RIO INSTITUCIONAL OU EPIDEMIOL\xD3GICO (UBS / Plant\xE3o / IML / Estudo / Gest\xE3o SUS)] + [FATOS OBJETIVOS OU DADOS NUM\xC9RICOS] + [COMANDO NORMATIVO OU ANAL\xCDTICO INEQU\xCDVOCO].",
+    closedCommands: [
+      "A qual m\xE9dico ou \xF3rg\xE3o compete legalmente a emiss\xE3o do documento (ou a notifica\xE7\xE3o imediata) neste caso?",
+      "Qual \xE9 a medida epidemiol\xF3gica (ou desenho de estudo / teste diagn\xF3stico) mais adequada para esta situa\xE7\xE3o?",
+      "Qual \xE9 a conduta \xE9tica/normativa correta (ou exce\xE7\xE3o legal aplic\xE1vel) segundo o CFM / Minist\xE9rio da Sa\xFAde?",
+      "Por que o par\xE2metro ou vi\xE9s citado altera a validade (ou interpreta\xE7\xE3o) dos resultados apresentados?"
+    ]
+  }
+};
+function inferDomainProfile(deckKey, textHint = "") {
+  const combined = `${deckKey} ${textHint}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[_-]+/g, " ");
+  if (/\b(etica|bioetica|declaracao de obito|sigilo|prontuario|cfm|cat|sus|pnab|saude coletiva|preventiva|epidemiolog[a-z]*|bioestatistica|sensibilidade|especificidade|coorte|caso controle|ensaio clinico|vigilancia|notificacao compulsoria|calendario vacinal|imunizac[a-z]*|saude do trabalhador|financiamento sus|atencao primaria)\b/.test(
+    combined
+  )) {
+    return "preventiva_normativo";
+  }
+  if (/\b(cirurg[a-z]*|abdome agudo|apendicite|colecistite|diverticulite|pancreatite|hernia|trauma|atls|pneumotorax|hemotorax|obstrucao intestinal|queimadura|vias biliares|pos operatorio|laparotom[a-z]*|urologia|ortopedia|fratura|traumatologia)\b/.test(
+    combined
+  )) {
+    return "cirurgico";
+  }
+  if (/\b(emergencia|emergencias|urgencia|urgencias|sala vermelha|pcr|acls|pals|arritmia|arritmias|coronariana|coronarianas|sca|iam|choque|sepse|anafilaxia|avc|intoxicacao|cetoacidose|hemorragia pos parto|hpp|eclampsia|crise hipertensiva|parada cardiorrespiratoria)\b/.test(
+    combined
+  )) {
+    return "emergencia";
+  }
+  return "ambulatorio";
+}
+function formatProfilePromptBlock(profile) {
+  const cfg = DOMAIN_PROFILE_CONFIGS[profile];
+  return `PERFIL DE DOM\xCDNIO ATIVO: ${cfg.label.toUpperCase()} (${cfg.id})
+Estrutura de Prioriza\xE7\xE3o P1 \u2192 P4 espec\xEDfica para este perfil:
+- P1 (${cfg.priorityLabels.P1}): ${cfg.priorityPrompts.P1}
+- P2 (${cfg.priorityLabels.P2}): ${cfg.priorityPrompts.P2}
+- P3 (${cfg.priorityLabels.P3}): ${cfg.priorityPrompts.P3}
+- P4 (${cfg.priorityLabels.P4}): ${cfg.priorityPrompts.P4}
+
+Molde de Salience Prompt para este perfil:
+- ${cfg.scenarioGuidance}
+- Comandos fechados recomendados (use ou adapte com a mesma precis\xE3o temporal/decis\xF3ria; proibido perguntar apenas "Qual a conduta?"):
+${cfg.closedCommands.map((c) => `  * "${c}"`).join("\n")}`;
+}
+
+// server.ts
 var import_meta = {};
 var __filename = (0, import_url.fileURLToPath)(import_meta.url);
 var __dirname = import_path.default.dirname(__filename);
-var PORT = 3e3;
+var PORT = Number(process.env.PORT) || 3e3;
 function getAiClient() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
@@ -42,6 +181,7 @@ function getAiClient() {
   return new import_genai.GoogleGenAI({
     apiKey,
     httpOptions: {
+      timeout: 24e4,
       headers: {
         "User-Agent": "aistudio-build"
       }
@@ -65,7 +205,7 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
 - **Proibi\xE7\xE3o de Defini\xE7\xF5es Inertes e Prompts Bin\xE1rios:** NUNCA crie perguntas passivas de dicion\xE1rio ("O que \xE9 X?", "Defina X") nem prompts bin\xE1rios ("Sim/N\xE3o", "Verdadeiro/Falso").
 - **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Al\xE9m de condutas em vinhetas cl\xEDnicas, crie prompts que cobrem **o porqu\xEA fisiopatol\xF3gico/mecan\xEDstico** ("Por que X ocorre?", "Como diferenciar A de B \xE0 beira-leito?", "Por que droga Y \xE9 contraindicada no contexto Z?"), construindo uma rede densa de compreens\xE3o em vez de decoreba isolada.
 - **Regra "More Than You Think" (Matuschak):** Quando um conceito P1/P2 for central para o Internato, ataque-o por m\xFAltiplos \xE2ngulos complementares (ex.: reconhecimento \u2192 conduta imediata \u2192 mecanismo/armadilha diferencial), cada um em seu pr\xF3prio card focado.
-- **Prompts de Sali\xEAncia Cl\xEDnica (Salience Prompts):** Em casos cl\xEDnicos, apresente a situa\xE7\xE3o concreta ([CEN\xC1RIO + IDADE/IG] + [CL\xCDNICA/SINAIS VITAIS]) para treinar o c\xE9rebro a reconhecer **quando** ativar aquele conhecimento \xE0 beira do leito.
+- **Prompts de Sali\xEAncia Cl\xEDnica (Salience Prompts):** Em cen\xE1rios aplicados, apresente a situa\xE7\xE3o concreta ([CEN\xC1RIO + PERFIL/CONTEXTO] + [ACHADOS/SINAIS/DADOS]) para treinar o c\xE9rebro a reconhecer **quando** ativar aquele conhecimento na pr\xE1tica m\xE9dica.
 
 3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
 - A quantidade final de cards deve refletir a cobertura cl\xEDnica completa (P1 a P4) sem encher lingui\xE7a e **sem amputar conceitos essenciais**:
@@ -74,11 +214,12 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
   c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais "por que/como") ou "cloze" (crit\xE9rios num\xE9ricos, limiares, doses cr\xEDticas e alvos em \xE2ncora cl\xEDnica enxuta com 1 \xFAnica lacuna {{c1::...}}). Em "cloze" de regra geral, N\xC3O force vinheta artificial com idade/tempo de uso quando isso n\xE3o altera a conduta.
 - N\xC3O inclua o campo "sources" nos cards.
 
-4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4), IMAGENS FIDEDIGNAS E FORMATA\xC7\xC3O:
-- P1 (Urg\xEAncia / Emerg\xEAncia / Minuto Zero): Sinais de alarme (red flags), crit\xE9rios de instabilidade/gravidade, conduta imediata de estabiliza\xE7\xE3o, manobras salvadoras, cirurgia/parto de emerg\xEAncia, 1\xAA droga (com dose e via), conduta na refratariedade (2\xAA linha), ant\xEDdotos e contraindica\xE7\xF5es fatais.
-- P2 (Decis\xE3o Diagn\xF3stica e Reconhecimento Visual): Exame inicial de 1\xAA linha vs. Padr\xE3o-Ouro confirmat\xF3rio, interpreta\xE7\xE3o de exames/imagens fidedignas em image_mode: "recognition", escores e pontos de corte num\xE9ricos exatos.
-- P3 (Manejo Ambulatorial / UBS / Enfermaria / Preven\xE7\xE3o): Tratamento de 1\xAA escolha, popula\xE7\xF5es especiais (gestantes, crian\xE7as, idosos, comorbidades), rastreamento, profilaxias, vacinas, crit\xE9rios de interna\xE7\xE3o e controle de cura.
-- P4 (Fisiopatologia Aplicada e Diferenciais): Mecanismos causais que explicam sinais cl\xEDnicos/tratamentos e contrastes diferenciais.
+4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4 ADAPT\xC1VEL POR PERFIL DE DOM\xCDNIO), IMAGENS FIDEDIGNAS E FORMATA\xC7\xC3O:
+- A matriz P1\u2013P4 adapta-se dinamicamente ao **Perfil de Dom\xEDnio** ativo do tema ("emergencia", "ambulatorio", "cirurgico", "preventiva_normativo"), conforme bloco de perfil fornecido em cada requisi\xE7\xE3o:
+  * **P1** = Prioridade M\xE1xima / Conduta Cr\xEDtica do Perfil (emerg\xEAncia/minuto zero no perfil Emerg\xEAncia; indica\xE7\xE3o cir\xFArgica/choque/dano no Cir\xFArgico; indica\xE7\xE3o/contraindica\xE7\xE3o/crit\xE9rio diagn\xF3stico no Ambulatorial; lei/sigilo/notifica\xE7\xE3o/princ\xEDpio \xE9tico-SUS no Preventiva/Normativo).
+  * **P2** = Decis\xE3o Diagn\xF3stica, Estadiamento, Escores e Reconhecimento Visual (exames reais em image_mode: "recognition", pontos de corte num\xE9ricos exatos, interpreta\xE7\xE3o de medidas/\xEDndices).
+  * **P3** = Manejo Longitudinal / Seguimento / Preven\xE7\xE3o / Fluxo Operacional (tratamento de 1\xAA linha, popula\xE7\xF5es especiais, rastreamento, vacinas, reabilita\xE7\xE3o, prazos/fluxos documentais).
+  * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Cl\xE1ssicas de Banca (mecanismos causais, pares confund\xEDveis, exce\xE7\xF5es normativas).
 - FILTRO NEGATIVO ESTRITO: ZERO gen\xE9tica/biologia molecular de bancada sem impacto terap\xEAutico imediato, ZERO hist\xF3ria da medicina/datas e ZERO epidemiologia percentual solta que n\xE3o mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>).
 - PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X").
@@ -152,8 +293,28 @@ function parseOrRecoverNotesJsonWithMeta(rawText) {
   }
   return { notes: [], wasTruncated: false };
 }
+function extractErrorDetails(error) {
+  const parts = [];
+  let current = error;
+  const seen = /* @__PURE__ */ new Set();
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const rec = current;
+    const codeStr = rec.code ? `[${String(rec.code)}]` : "";
+    const msgStr = typeof rec.message === "string" ? rec.message.trim() : "";
+    const combined = [codeStr, msgStr].filter(Boolean).join(" ");
+    if (combined && !parts.includes(combined)) {
+      parts.push(combined);
+    }
+    current = rec.cause;
+  }
+  if (parts.length === 0 && error != null) {
+    parts.push(String(error));
+  }
+  return parts.join(" \u2192 ");
+}
 function formatGeminiError(error, fallbackMessage) {
-  const raw = error instanceof Error ? error.message : fallbackMessage;
+  const raw = extractErrorDetails(error) || fallbackMessage;
   if (/402|prepayment credits are depleted|billing#prepay/i.test(raw)) {
     return "Cr\xE9ditos pr\xE9-pagos da chave Gemini esgotados (402 RESOURCE_EXHAUSTED). Troque a chave ou adicione cr\xE9ditos em AI Studio.";
   }
@@ -164,209 +325,539 @@ function formatGeminiError(error, fallbackMessage) {
     const isDaily = /per day|PerDay|limit:\s*20/i.test(raw);
     return isDaily ? "Cota di\xE1ria da API Gemini esgotada (429 RESOURCE_EXHAUSTED \u2014 Free Tier: 20 req/dia no gemini-4-hydrogen). Aguarde a renova\xE7\xE3o da cota ou configure uma chave com faturamento." : "Limite de requisi\xE7\xF5es por minuto da API Gemini atingido (429 RESOURCE_EXHAUSTED). Aguarde alguns segundos e tente novamente.";
   }
+  if (/fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|socket hang up|other side closed|AbortError|TimeoutError/i.test(raw)) {
+    return `Falha de conex\xE3o com a API Gemini ap\xF3s novas tentativas (${raw}). Tente novamente ou reduza a quantidade de PDFs simult\xE2neos.`;
+  }
   return raw || fallbackMessage;
 }
+function isRetryableGeminiError(error) {
+  const raw = extractErrorDetails(error);
+  if (/402|prepayment credits|PerDay|limit:\s*20|API_KEY_INVALID|PERMISSION_DENIED/i.test(raw)) {
+    return false;
+  }
+  return /fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|socket hang up|other side closed|network|terminated|503|502|504|500|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|429|RESOURCE_EXHAUSTED/i.test(
+    raw
+  );
+}
 async function generateContentWithRetry(ai, params) {
-  try {
-    return await ai.models.generateContent(params);
-  } catch (error) {
-    const raw = error instanceof Error ? error.message : String(error || "");
-    if (/503|UNAVAILABLE|high demand/i.test(raw)) {
-      await new Promise((resolve) => setTimeout(resolve, 3e3));
-      return await ai.models.generateContent(params);
+  const maxAttempts = 3;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const stream = await ai.models.generateContentStream(params);
+      let fullText = "";
+      let finishReason;
+      const groundingChunks = [];
+      for await (const chunk of stream) {
+        const c = chunk;
+        if (c.text) {
+          fullText += c.text;
+        }
+        const cand = c.candidates?.[0];
+        if (cand?.finishReason) {
+          finishReason = String(cand.finishReason);
+        }
+        const chunks = cand?.groundingMetadata?.groundingChunks;
+        if (Array.isArray(chunks) && chunks.length > 0) {
+          groundingChunks.push(...chunks);
+        }
+      }
+      const seen = /* @__PURE__ */ new Set();
+      const groundingSources = [];
+      for (const ch of groundingChunks) {
+        const uri = ch?.web?.uri;
+        const title = ch?.web?.title || uri || "Diretriz / Fonte M\xE9dica";
+        if (uri && !seen.has(uri)) {
+          seen.add(uri);
+          groundingSources.push({ title, uri });
+        }
+      }
+      return { text: fullText, finishReason, groundingSources };
+    } catch (error) {
+      lastError = error;
+      console.error(`[gemini] attempt ${attempt}/${maxAttempts} failed:`, extractErrorDetails(error));
+      if (attempt < maxAttempts && isRetryableGeminiError(error)) {
+        const delayMs = attempt === 1 ? 2e3 : 5e3;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw error;
     }
-    throw error;
+  }
+  throw lastError;
+}
+var GEMINI_FILE_CACHE_TTL_MS = 1e3 * 60 * 60 * 24;
+var geminiUploadedFileCache = /* @__PURE__ */ new Map();
+var geminiUploadInFlight = /* @__PURE__ */ new Map();
+async function uploadSinglePdfToGeminiFiles(ai, doc) {
+  const base64Data = String(doc.base64Data || "");
+  const mimeType = doc.mimeType || "application/pdf";
+  const hash = import_crypto.default.createHash("sha256").update(base64Data).digest("hex");
+  const cached = geminiUploadedFileCache.get(hash);
+  if (cached && Date.now() - cached.uploadedAt < GEMINI_FILE_CACHE_TTL_MS) {
+    return cached;
+  }
+  const existingPromise = geminiUploadInFlight.get(hash);
+  if (existingPromise) {
+    return existingPromise;
+  }
+  const uploadTask = (async () => {
+    const buffer = Buffer.from(base64Data, "base64");
+    const blob = new Blob([buffer], { type: mimeType });
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        let uploaded = await ai.files.upload({
+          file: blob,
+          config: {
+            mimeType,
+            displayName: doc.name || `documento_${hash.slice(0, 8)}.pdf`
+          }
+        });
+        let polls = 0;
+        while (uploaded.state === "PROCESSING" && uploaded.name && polls < 15) {
+          await new Promise((resolve) => setTimeout(resolve, 1e3));
+          uploaded = await ai.files.get({ name: uploaded.name });
+          polls++;
+        }
+        if (uploaded.state === "FAILED" || !uploaded.uri) {
+          throw new Error(`Falha ao processar arquivo "${doc.name || "PDF"}" na Gemini Files API.`);
+        }
+        const entry = {
+          uri: uploaded.uri,
+          mimeType: uploaded.mimeType || mimeType,
+          name: uploaded.name || "",
+          uploadedAt: Date.now()
+        };
+        geminiUploadedFileCache.set(hash, entry);
+        return entry;
+      } catch (err) {
+        lastErr = err;
+        console.error(
+          `[gemini-files-upload] attempt ${attempt}/3 failed for ${doc.name || "PDF"}:`,
+          extractErrorDetails(err)
+        );
+        if (attempt < 3 && isRetryableGeminiError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  })();
+  geminiUploadInFlight.set(hash, uploadTask);
+  try {
+    return await uploadTask;
+  } finally {
+    geminiUploadInFlight.delete(hash);
   }
 }
-function extractGroundingSources(response) {
-  const resObj = response;
-  const chunks = resObj?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-  const seen = /* @__PURE__ */ new Set();
-  const out = [];
-  for (const ch of chunks) {
-    const uri = ch?.web?.uri;
-    const title = ch?.web?.title || uri || "Diretriz / Fonte M\xE9dica";
-    if (uri && !seen.has(uri)) {
-      seen.add(uri);
-      out.push({ title, uri });
+async function resolveDocumentPartsForGemini(ai, pdfs) {
+  const parts = [];
+  if (!Array.isArray(pdfs)) return parts;
+  for (const pdf of pdfs) {
+    if (pdf?.textContent && typeof pdf.textContent === "string") {
+      parts.push({
+        text: `DOCUMENTO ANEXADO (${pdf.name || "Texto/Quest\xF5es"}):
+${pdf.textContent.slice(0, 6e4)}`
+      });
+    } else if (pdf?.fileUri && typeof pdf.fileUri === "string") {
+      parts.push((0, import_genai.createPartFromUri)(pdf.fileUri, pdf.mimeType || "application/pdf"));
+    } else if (pdf?.base64Data && typeof pdf.base64Data === "string") {
+      const mimeType = pdf.mimeType || "application/pdf";
+      try {
+        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf);
+        parts.push((0, import_genai.createPartFromUri)(uploaded.uri, uploaded.mimeType));
+      } catch (uploadErr) {
+        if (pdf.base64Data.length < 135e5) {
+          console.warn(
+            `[gemini] Falling back to inlineData for ${pdf.name || "PDF"}:`,
+            extractErrorDetails(uploadErr)
+          );
+          parts.push({
+            inlineData: {
+              mimeType,
+              data: pdf.base64Data
+            }
+          });
+        } else {
+          throw uploadErr;
+        }
+      }
     }
   }
-  return out;
+  return parts;
 }
 var PT_TO_EN_MEDICAL_TERMS = [
-  [/\bapendicite(?:\s+aguda)?\b/gi, "acute appendicitis CT"],
-  [/\bdiverticulite(?:\s+aguda)?\b/gi, "acute diverticulitis CT"],
-  [/\bcolecistite(?:\s+aguda)?\b/gi, "acute cholecystitis ultrasound"],
-  [/\bpancreatite(?:\s+aguda)?\b/gi, "acute pancreatitis CT"],
-  [/\bpneumot[oó]rax(?:\s+hipertensivo)?\b/gi, "tension pneumothorax chest xray"],
-  [/\bpneumoperit[oô]nio\b/gi, "pneumoperitoneum chest xray"],
-  [/\bedema\s+agudo\s+de\s+pulm[aã]o\b/gi, "pulmonary edema chest xray"],
-  [/\binsufici[eê]ncia\s+card[ií]aca\b/gi, "heart failure cardiomegaly chest xray"],
-  [/\binfarto|iam|supradesnivelamento\b/gi, "ST elevation myocardial infarction ECG"],
-  [/\bfibrila[cç][aã]o\s+atrial\b/gi, "atrial fibrillation ECG"],
+  [/\bapendicite(?:\s+aguda)?\b/gi, "acute appendicitis CT ultrasound"],
+  [/\bdiverticulite(?:\s+aguda)?\b/gi, "acute diverticulitis abdominal CT"],
+  [/\bcolecistite(?:\s+aguda)?\b/gi, "acute cholecystitis gallbladder ultrasound"],
+  [/\bpancreatite(?:\s+aguda)?\b/gi, "acute pancreatitis abdominal CT"],
+  [/\bpneumot[oó]rax(?:\s+hipertensivo)?\b/gi, "tension pneumothorax chest x-ray"],
+  [/\bpneumoperit[oô]nio\b/gi, "pneumoperitoneum upright chest x-ray"],
+  [/\bedema\s+agudo\s+de\s+pulm[aã]o\b/gi, "acute pulmonary edema chest x-ray"],
+  [/\binsufici[eê]ncia\s+card[ií]aca\b/gi, "congestive heart failure cardiomegaly chest x-ray"],
+  [/\binfarto|iam|supradesnivelamento\b/gi, "ST elevation myocardial infarction ECG LITFL"],
+  [/\bfibrila[cç][aã]o\s+atrial\b/gi, "atrial fibrillation ECG rhythm strip"],
   [/\btaquicardia\s+ventricular\b/gi, "ventricular tachycardia ECG"],
-  [/\bflutter\s+atrial\b/gi, "atrial flutter ECG"],
-  [/\bbloqueio\s+atrioventricular\b/gi, "third degree heart block ECG"],
-  [/\bcardiotocografia|dip\s+ii|sofrimento\s+fetal\b/gi, "cardiotocography fetal heart rate"],
-  [/\bpr[eé][-\s]?ecl[aâ]mpsia|ecl[aâ]mpsia|síndrome\s+hellp\b/gi, "preeclampsia schistocytes blood smear"],
-  [/\bhemorragia\s+p[oó]s[-\s]?parto|bal[aã]o\s+de\s+bakri\b/gi, "postpartum hemorrhage uterus"],
-  [/\bgravidez\s+ect[oó]pica\b/gi, "ectopic pregnancy ultrasound"],
-  [/\bpneumonia\b/gi, "lobar pneumonia chest xray"],
-  [/\btuberculose\b/gi, "pulmonary tuberculosis cavitation chest xray"],
-  [/\bderrame\s+pleural\b/gi, "pleural effusion chest xray"],
-  [/\btromboembolismo\s+pulmonar|\btep\b/gi, "pulmonary embolism CT angiography"],
+  [/\bflutter\s+atrial\b/gi, "atrial flutter sawtooth ECG"],
+  [/\bbloqueio\s+atrioventricular\b/gi, "third degree AV block complete heart block ECG"],
+  [/\bcardiotocografia|dip\s+ii|desacelera[cç][aã]o|sofrimento\s+fetal|taquissistolia|uterot[oô]nic/gi, "cardiotocography fetal heart rate deceleration uterine tachysystole"],
+  [/\bindu[cç][aã]o\s+do\s+parto|misoprostol|ocitocina\b/gi, "cardiotocography uterine tachysystole labor induction"],
+  [/\bpr[eé][-\s]?ecl[aâ]mpsia|ecl[aâ]mpsia|s[ií]ndrome\s+hellp\b/gi, "HELLP syndrome schistocytes peripheral blood smear"],
+  [/\bhemorragia\s+p[oó]s[-\s]?parto|bal[aã]o\s+de\s+bakri|atonia\s+uterina\b/gi, "postpartum hemorrhage Bakri balloon tamponade"],
+  [/\bgravidez\s+ect[oó]pica\b/gi, "ectopic pregnancy transvaginal ultrasound"],
+  [/\bdescolamento\s+prematuro\s+de\s+placenta|placenta\s+pr[eé]via\b/gi, "placental abruption placenta previa ultrasound"],
+  [/\bpartograma\b/gi, "partogram labor progression WHO curve"],
+  [/\bpneumonia\b/gi, "lobar pneumonia consolidation chest x-ray"],
+  [/\btuberculose\b/gi, "pulmonary tuberculosis cavitation chest x-ray"],
+  [/\bderrame\s+pleural\b/gi, "pleural effusion chest x-ray meniscus sign"],
+  [/\btromboembolismo\s+pulmonar|\btep\b/gi, "pulmonary embolism CT pulmonary angiography"],
   [/\bavc\s+isqu[eê]mico\b/gi, "ischemic stroke brain CT"],
-  [/\bavc\s+hemorr[aá]gico|hemorragia\s+subaracn[oó]idea\b/gi, "subarachnoid hemorrhage brain CT"],
-  [/\bhematoma\s+epidural\b/gi, "epidural hematoma brain CT"],
-  [/\bhematoma\s+subdural\b/gi, "subdural hematoma brain CT"],
-  [/\bobstru[cç][aã]o\s+intestinal|volvo\b/gi, "bowel obstruction sigmoid volvulus xray"],
-  [/\bintussuscep[cç][aã]o\b/gi, "intussusception target sign ultrasound"],
-  [/\bretinopatia\s+hipertensiva|retinopatia\s+diab[eé]tica|fundoscopia\b/gi, "hypertensive retinopathy fundus"],
-  [/\bmelanoma|carcinoma\s+basocelular|dermatoscopia\b/gi, "melanoma dermoscopy skin lesion"]
+  [/\bavc\s+hemorr[aá]gico|hemorragia\s+subaracn[oó]idea\b/gi, "subarachnoid hemorrhage head CT"],
+  [/\bhematoma\s+epidural\b/gi, "epidural hematoma lens shaped head CT"],
+  [/\bhematoma\s+subdural\b/gi, "subdural hematoma crescent head CT"],
+  [/\bobstru[cç][aã]o\s+intestinal|volvo\b/gi, "bowel obstruction sigmoid volvulus coffee bean x-ray"],
+  [/\bintussuscep[cç][aã]o\b/gi, "intussusception target sign pediatric ultrasound"],
+  [/\bestenose\s+hipertr[oó]fica\s+de\s+piloro\b/gi, "hypertrophic pyloric stenosis ultrasound"],
+  [/\bepigloti(?:te|tis)|crupe|laringotraque[ií]te\b/gi, "croup steeple sign epiglottitis thumbprint neck x-ray"],
+  [/\bbronquiolite\b/gi, "bronchiolitis chest x-ray hyperinflation pediatric"],
+  [/\bdoen[cç]a\s+da\s+membrana\s+hialina|s[ií]ndrome\s+do\s+desconforto\b/gi, "neonatal respiratory distress syndrome ground glass chest x-ray"],
+  [/\bretinopatia\s+hipertensiva|retinopatia\s+diab[eé]tica|fundoscopia\b/gi, "hypertensive diabetic retinopathy fundus photography"],
+  [/\bpapiledema\b/gi, "papilledema optic disc fundoscopy"],
+  [/\bmelanoma|carcinoma\s+basocelular|dermatoscopia\b/gi, "melanoma basal cell carcinoma dermoscopy"],
+  [/\bherpes\s+zoster|varicela|impetigo|celulite|erisipela\b/gi, "herpes zoster dermatome skin rash clinical photo"],
+  [/\bs[ií]filis|cancro|linfogranuloma\b/gi, "secondary syphilis palmar plantar rash clinical photo"],
+  [/\bcirrose|ascite|varizes\s+esof[aá]gicas\b/gi, "esophageal varices endoscopy liver cirrhosis"],
+  [/\bfratura|luxa[cç][aã]o|osteomielite\b/gi, "bone fracture dislocation radiograph x-ray"]
 ];
-function buildEnglishMedicalSearchQuery(rawQuery) {
-  let translated = rawQuery;
+var BLOCKED_IMAGE_URL_PATTERN = /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_)/i;
+function isSpamOrLogoImageUrl(url, title = "") {
+  const combined = `${url} ${title}`;
+  if (!url || BLOCKED_IMAGE_URL_PATTERN.test(combined)) return true;
+  if (/\.(?:tif|tiff|pdf|djvu|ogg|ogv|webm|mp4|mp3|wav)$/i.test(url.split("?")[0])) {
+    return true;
+  }
+  return false;
+}
+function buildEnglishMedicalSearchQueries(rawQuery, topic = "", question = "") {
+  const queries = [];
+  const combined = `${rawQuery} ${topic} ${question}`;
   for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
-    if (regex.test(translated)) {
-      return enTerm;
+    if (regex.test(combined) && !queries.includes(enTerm)) {
+      queries.push(enTerm);
+      if (queries.length >= 2) break;
     }
   }
-  translated = translated.replace(/\b(?:na|no|em|de|do|da|dos|das|para|com|sem|qual|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente)\b/gi, " ").replace(/\s+/g, " ").trim();
-  return translated || "medical radiology diagnosis";
-}
-async function searchWikimediaCommonsMedical(searchQuery) {
-  const enQuery = buildEnglishMedicalSearchQuery(searchQuery);
-  const url = new URL("https://commons.wikimedia.org/w/api.php");
-  url.searchParams.set("action", "query");
-  url.searchParams.set("generator", "search");
-  url.searchParams.set("gsrsearch", `filetype:bitmap ${enQuery}`);
-  url.searchParams.set("gsrnamespace", "6");
-  url.searchParams.set("gsrlimit", "6");
-  url.searchParams.set("prop", "imageinfo");
-  url.searchParams.set("iiprop", "url|extmetadata");
-  url.searchParams.set("iiurlwidth", "800");
-  url.searchParams.set("format", "json");
-  url.searchParams.set("origin", "*");
-  const resp = await fetch(url.toString(), {
-    headers: {
-      "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)"
-    },
-    signal: AbortSignal.timeout(2500)
-  });
-  if (!resp.ok) {
-    throw new Error(`Wikimedia HTTP ${resp.status}`);
+  const stripped = rawQuery.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(
+    /\b(?:na|no|nos|nas|em|de|do|da|dos|das|para|com|sem|qual|quais|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente|gestante|evolui|apresenta|reacao|adversa|exame|achado)\b/gi,
+    " "
+  ).replace(/\s+/g, " ").trim();
+  if (stripped && !queries.includes(stripped)) {
+    queries.push(stripped);
   }
-  const data = await resp.json();
-  const pages = Object.values(data?.query?.pages || {});
-  return pages.map((p, idx) => {
-    const info = p.imageinfo?.[0];
-    if (!info?.url) return null;
-    const rawTitle = (p.title || `Imagem M\xE9dica ${idx + 1}`).replace(/^File:/i, "");
-    const cleanName = rawTitle.toLowerCase().replace(/[^a-z0-9.]+/g, "_").replace(/^_|_$/g, "");
-    const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
-    const cleanDesc = descHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-    return {
-      id: `wiki-${p.pageid || idx}`,
-      title: rawTitle.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
-      thumbUrl: info.thumburl || info.url,
-      fullUrl: info.url,
-      description: cleanDesc || `Imagem m\xE9dica de refer\xEAncia para ${searchQuery}.`,
-      suggestedFilename: cleanName.endsWith(".jpg") || cleanName.endsWith(".png") ? cleanName : `${cleanName}.jpg`,
-      defaultLegend: cleanDesc ? `Exame complementar demonstrando ${cleanDesc.slice(0, 130)}.` : `Imagem diagn\xF3stica demonstrando achado cl\xE1ssico de ${searchQuery}.`,
-      source: "Wikimedia Commons Medical"
-    };
-  }).filter((item) => item !== null);
-}
-async function searchNlmOpenIMedical(searchQuery) {
-  const enQuery = buildEnglishMedicalSearchQuery(searchQuery);
-  const url = new URL("https://openi.nlm.nih.gov/api/search");
-  url.searchParams.set("query", enQuery);
-  url.searchParams.set("m", "1");
-  url.searchParams.set("n", "6");
-  const resp = await fetch(url.toString(), {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)"
-    },
-    signal: AbortSignal.timeout(2800)
-  });
-  if (!resp.ok) {
-    throw new Error(`NLM Open-i HTTP ${resp.status}`);
+  if (queries.length === 0) {
+    queries.push("clinical medical imaging diagnosis");
   }
-  const data = await resp.json();
-  const list = Array.isArray(data?.list) ? data.list : [];
-  return list.map((item, idx) => {
-    const rawImgPath = item.imgLarge || item.imgThumb || "";
-    if (!rawImgPath) return null;
-    const fullImgUrl = rawImgPath.startsWith("http") ? rawImgPath : `https://openi.nlm.nih.gov${rawImgPath.startsWith("/") ? "" : "/"}${rawImgPath}`;
-    const thumbImgUrl = item.imgThumb ? item.imgThumb.startsWith("http") ? item.imgThumb : `https://openi.nlm.nih.gov${item.imgThumb.startsWith("/") ? "" : "/"}${item.imgThumb}` : fullImgUrl;
-    const rawCaption = item.image?.caption || item.title || item.abstract || `Exame biom\xE9dico NLM Open-i ${idx + 1}`;
-    const cleanCaption = rawCaption.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-    const cleanUid = (item.uid || `openi_${idx + 1}`).toLowerCase().replace(/[^a-z0-9_]+/g, "_");
-    return {
-      id: `openi-${cleanUid}-${idx}`,
-      title: (item.title || cleanCaption).replace(/<[^>]*>/g, "").slice(0, 85),
-      thumbUrl: thumbImgUrl,
-      fullUrl: fullImgUrl,
-      description: cleanCaption,
-      suggestedFilename: `openi_${cleanUid}.png`,
-      defaultLegend: `Exame complementar (NLM Open-i) evidenciando ${cleanCaption.slice(0, 125)}.`,
-      source: "NLM Open-i (NIH Biomedical Archive)"
-    };
-  }).filter((item) => item !== null);
+  return queries.slice(0, 3);
+}
+async function expandMedicalQueriesWithGemini(ai, rawQuery, topic = "", question = "", hint = "") {
+  const fallbackQueries = buildEnglishMedicalSearchQueries(rawQuery, topic, question);
+  if (!ai) return fallbackQueries;
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-4-hydrogen",
+      contents: `Traduza e expanda esta busca cl\xEDnica para encontrar IMAGENS M\xC9DICAS REAIS na internet (Wikimedia Commons, Wikipedia, Radiopaedia, LITFL, DermNet, PubMed).
+Retorne EXCLUSIVAMENTE um JSON array com 2 a 3 termos curtos em INGL\xCAS (2 a 5 palavras cada, focados no exame/foto/tra\xE7ado cl\xEDnico real):
+- Busca: "${rawQuery}"
+- T\xF3pico: "${topic}"
+- Pergunta: "${question.slice(0, 220)}"
+- Coment\xE1rio: "${hint.slice(0, 180)}"
+Exemplo de sa\xEDda: ["cardiotocography late decelerations", "uterine tachysystole CTG"]`,
+      config: {
+        responseMimeType: "application/json",
+        maxOutputTokens: 200
+      }
+    });
+    const parsed = JSON.parse(extractJsonBlock(response.text || "[]"));
+    if (Array.isArray(parsed)) {
+      const llmQueries = parsed.map((q) => String(q || "").trim()).filter((q) => q.length >= 3 && q.length <= 70);
+      if (llmQueries.length > 0) {
+        return Array.from(/* @__PURE__ */ new Set([...llmQueries, ...fallbackQueries])).slice(0, 3);
+      }
+    }
+  } catch {
+  }
+  return fallbackQueries;
+}
+var WIKIMEDIA_USER_AGENT = "Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)";
+async function searchWikipediaMedicalImages(enQueries, ptQuery) {
+  const primaryEn = (enQueries[0] || "").split(/\s+/).slice(0, 4).join(" ");
+  const searches = [
+    ...primaryEn ? [{ lang: "en", query: primaryEn }] : [],
+    ...ptQuery ? [{ lang: "pt", query: ptQuery }] : []
+  ];
+  const results = [];
+  const seenUrls = /* @__PURE__ */ new Set();
+  for (const { lang, query } of searches) {
+    if (results.length >= 6) break;
+    try {
+      const searchUrl = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+      searchUrl.searchParams.set("action", "query");
+      searchUrl.searchParams.set("list", "search");
+      searchUrl.searchParams.set("srsearch", query);
+      searchUrl.searchParams.set("srlimit", "3");
+      searchUrl.searchParams.set("format", "json");
+      searchUrl.searchParams.set("origin", "*");
+      const sResp = await fetch(searchUrl.toString(), {
+        headers: { "User-Agent": WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500)
+      });
+      if (!sResp.ok) continue;
+      const sData = await sResp.json();
+      const titles = (sData.query?.search || []).map((item) => item.title).filter((t) => Boolean(t));
+      if (titles.length === 0) continue;
+      const pagesUrl = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+      pagesUrl.searchParams.set("action", "query");
+      pagesUrl.searchParams.set("titles", titles.join("|"));
+      pagesUrl.searchParams.set("prop", "pageimages|images");
+      pagesUrl.searchParams.set("piprop", "original|thumbnail");
+      pagesUrl.searchParams.set("pithumbsize", "900");
+      pagesUrl.searchParams.set("imlimit", "20");
+      pagesUrl.searchParams.set("format", "json");
+      pagesUrl.searchParams.set("origin", "*");
+      const pResp = await fetch(pagesUrl.toString(), {
+        headers: { "User-Agent": WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500)
+      });
+      if (!pResp.ok) continue;
+      const pData = await pResp.json();
+      const fileTitles = /* @__PURE__ */ new Set();
+      for (const page of Object.values(pData.query?.pages || {})) {
+        for (const img of page.images || []) {
+          if (img.title && !isSpamOrLogoImageUrl(img.title, img.title)) {
+            fileTitles.add(img.title);
+          }
+        }
+      }
+      if (fileTitles.size === 0) continue;
+      const fileList = Array.from(fileTitles).slice(0, 10);
+      const infoUrl = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+      infoUrl.searchParams.set("action", "query");
+      infoUrl.searchParams.set("titles", fileList.join("|"));
+      infoUrl.searchParams.set("prop", "imageinfo");
+      infoUrl.searchParams.set("iiprop", "url|mime|size|extmetadata");
+      infoUrl.searchParams.set("iiurlwidth", "900");
+      infoUrl.searchParams.set("format", "json");
+      infoUrl.searchParams.set("origin", "*");
+      const iResp = await fetch(infoUrl.toString(), {
+        headers: { "User-Agent": WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500)
+      });
+      if (!iResp.ok) continue;
+      const iData = await iResp.json();
+      for (const [idx, page] of Object.values(iData.query?.pages || {}).entries()) {
+        const info = page.imageinfo?.[0];
+        if (!info?.url) continue;
+        const mime = (info.mime || "").toLowerCase();
+        if (!mime.startsWith("image/")) continue;
+        if ((info.width || 0) < 220 || (info.height || 0) < 140) continue;
+        const targetUrl = info.thumburl || info.url;
+        if (isSpamOrLogoImageUrl(targetUrl, page.title || "")) continue;
+        if (seenUrls.has(targetUrl)) continue;
+        seenUrls.add(targetUrl);
+        const rawTitle = (page.title || `Wikipedia Medical ${idx + 1}`).replace(/^(?:File|Ficheiro|Arquivo):/i, "");
+        const cleanName = rawTitle.toLowerCase().replace(/[^a-z0-9.]+/g, "_").replace(/^_|_$/g, "");
+        const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
+        const cleanDesc = descHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+        results.push({
+          id: `wp-${lang}-${page.pageid || idx}`,
+          title: rawTitle.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").slice(0, 85),
+          thumbUrl: targetUrl,
+          fullUrl: info.url,
+          description: cleanDesc || `Imagem m\xE9dica enciclop\xE9dica (${lang}.wikipedia.org).`,
+          suggestedFilename: /\.(jpg|jpeg|png|webp|gif)$/i.test(cleanName) ? cleanName.slice(0, 60) : `${cleanName.slice(0, 52)}.jpg`,
+          defaultLegend: cleanDesc ? `Imagem cl\xEDnica demonstrando ${cleanDesc.slice(0, 130)}.` : `Imagem cl\xEDnica real referente a ${query}.`,
+          source: `Wikipedia Medical (${lang.toUpperCase()})`,
+          isSvg: mime.includes("svg") || targetUrl.toLowerCase().endsWith(".svg")
+        });
+      }
+    } catch {
+    }
+  }
+  return results;
+}
+async function searchWikimediaCommonsMedical(enQueries) {
+  const results = [];
+  const seenUrls = /* @__PURE__ */ new Set();
+  const baseWords = (enQueries[0] || "").split(/\s+/).filter(Boolean);
+  const candidateSearches = Array.from(
+    new Set([
+      baseWords.slice(0, 3).join(" "),
+      baseWords.slice(0, 2).join(" ")
+    ].filter((q) => q.length >= 3))
+  );
+  for (const enQuery of candidateSearches) {
+    if (results.length >= 4) break;
+    try {
+      const url = new URL("https://commons.wikimedia.org/w/api.php");
+      url.searchParams.set("action", "query");
+      url.searchParams.set("generator", "search");
+      url.searchParams.set("gsrsearch", enQuery);
+      url.searchParams.set("gsrnamespace", "6");
+      url.searchParams.set("gsrlimit", "10");
+      url.searchParams.set("prop", "imageinfo");
+      url.searchParams.set("iiprop", "url|mime|size|extmetadata");
+      url.searchParams.set("iiurlwidth", "900");
+      url.searchParams.set("format", "json");
+      url.searchParams.set("origin", "*");
+      const resp = await fetch(url.toString(), {
+        headers: { "User-Agent": WIKIMEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(3500)
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const pages = Object.values(data?.query?.pages || {}).sort((a, b) => {
+        const aAnn = /annotation|labeled|arrow/i.test(a.title || "") ? 1 : 0;
+        const bAnn = /annotation|labeled|arrow/i.test(b.title || "") ? 1 : 0;
+        return aAnn - bAnn;
+      });
+      for (const [idx, p] of pages.entries()) {
+        const info = p.imageinfo?.[0];
+        if (!info?.url) continue;
+        const mime = (info.mime || "").toLowerCase();
+        if (!mime.startsWith("image/")) continue;
+        if ((info.width || 0) < 220 || (info.height || 0) < 140) continue;
+        const targetUrl = info.thumburl || info.url;
+        const rawTitle = (p.title || `Imagem M\xE9dica ${idx + 1}`).replace(/^File:/i, "");
+        if (isSpamOrLogoImageUrl(targetUrl, rawTitle)) continue;
+        if (seenUrls.has(targetUrl)) continue;
+        seenUrls.add(targetUrl);
+        const cleanName = rawTitle.toLowerCase().replace(/[^a-z0-9.]+/g, "_").replace(/^_|_$/g, "");
+        const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
+        const cleanDesc = descHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+        results.push({
+          id: `wiki-${p.pageid || idx}`,
+          title: rawTitle.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").slice(0, 85),
+          thumbUrl: targetUrl,
+          fullUrl: info.url,
+          description: cleanDesc || `Imagem m\xE9dica real obtida no Wikimedia Commons.`,
+          suggestedFilename: /\.(jpg|jpeg|png|webp|gif)$/i.test(cleanName) ? cleanName.slice(0, 60) : `${cleanName.slice(0, 52)}.jpg`,
+          defaultLegend: cleanDesc ? `Exame complementar demonstrando ${cleanDesc.slice(0, 130)}.` : `Imagem diagn\xF3stica demonstrando achado cl\xEDnico real de ${enQuery}.`,
+          source: "Wikimedia Commons Medical",
+          isSvg: mime.includes("svg") || targetUrl.toLowerCase().endsWith(".svg")
+        });
+      }
+    } catch {
+    }
+  }
+  return results;
 }
 async function validateCandidateImageUrl(url) {
   if (!url || !url.startsWith("https://") && !url.startsWith("http://")) {
-    return { ok: false, contentType: "", byteLength: 0 };
+    return { ok: false, contentType: "", byteLength: 0, isSvg: false };
+  }
+  if (isSpamOrLogoImageUrl(url)) {
+    return { ok: false, contentType: "", byteLength: 0, isSvg: false };
   }
   try {
     const resp = await fetch(url, {
       method: "GET",
       headers: {
-        "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)",
-        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        "User-Agent": "Mozilla/5.0 (compatible; InternatoFirstCardArchitect/2.0; +https://github.com/wagmms/Cards-2.0)",
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
       },
-      signal: AbortSignal.timeout(2600)
+      signal: AbortSignal.timeout(4500)
     });
     if (!resp.ok) {
-      return { ok: false, contentType: "", byteLength: 0 };
+      return { ok: false, contentType: "", byteLength: 0, isSvg: false };
     }
     const contentType = (resp.headers.get("content-type") || "").toLowerCase();
     if (!contentType.startsWith("image/")) {
-      return { ok: false, contentType, byteLength: 0 };
+      return { ok: false, contentType, byteLength: 0, isSvg: false };
     }
+    const isSvg = contentType.includes("svg");
     const buf = Buffer.from(await resp.arrayBuffer());
-    const minBytes = contentType.includes("svg") ? 250 : 1800;
+    const minBytes = isSvg ? 1500 : 3e3;
     if (buf.length < minBytes) {
-      return { ok: false, contentType, byteLength: buf.length };
+      return { ok: false, contentType, byteLength: buf.length, isSvg };
     }
-    return { ok: true, contentType, byteLength: buf.length };
+    return { ok: true, contentType, byteLength: buf.length, isSvg };
   } catch {
-    return { ok: false, contentType: "", byteLength: 0 };
+    return { ok: false, contentType: "", byteLength: 0, isSvg: false };
   }
 }
-async function searchGoogleMedicalImagesViaGrounding(searchQuery, topic = "", question = "") {
-  const ai = getAiClient();
+async function extractImagesFromMedicalWebPage(pageUrl, pageTitle = "") {
+  if (!pageUrl || !pageUrl.startsWith("http")) return [];
+  try {
+    const resp = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,*/*;q=0.8"
+      },
+      signal: AbortSignal.timeout(3500)
+    });
+    if (!resp.ok) return [];
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
+    if (!ct.includes("text/html") && !ct.includes("application/xhtml")) return [];
+    const html = (await resp.text()).slice(0, 22e4);
+    const extracted = [];
+    const seen = /* @__PURE__ */ new Set();
+    const addCandidate = (rawSrc, alt = "") => {
+      const trimmed = rawSrc.trim().replace(/&amp;/g, "&");
+      if (!trimmed || trimmed.startsWith("data:")) return;
+      try {
+        const resolved = new URL(trimmed, pageUrl).toString();
+        if (!resolved.startsWith("http")) return;
+        if (isSpamOrLogoImageUrl(resolved, alt)) return;
+        if (seen.has(resolved)) return;
+        seen.add(resolved);
+        extracted.push({ url: resolved, alt: alt.trim(), pageUrl, pageTitle });
+      } catch {
+      }
+    };
+    const metaRegex = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
+    let m;
+    while ((m = metaRegex.exec(html)) !== null) {
+      addCandidate(m[1], pageTitle);
+    }
+    const metaReverseRegex = /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]*>/gi;
+    while ((m = metaReverseRegex.exec(html)) !== null) {
+      addCandidate(m[1], pageTitle);
+    }
+    const imgRegex = /<img\b[^>]*>/gi;
+    while ((m = imgRegex.exec(html)) !== null && extracted.length < 10) {
+      const tag = m[0];
+      const srcMatch = /\b(?:data-lazy-src|data-src|src)=["']([^"']+)["']/i.exec(tag);
+      if (!srcMatch) continue;
+      const altMatch = /\balt=["']([^"']*)["']/i.exec(tag);
+      const widthMatch = /\bwidth=["']?(\d+)/i.exec(tag);
+      if (widthMatch && Number(widthMatch[1]) > 0 && Number(widthMatch[1]) < 150) {
+        continue;
+      }
+      addCandidate(srcMatch[1], altMatch?.[1] || pageTitle);
+    }
+    return extracted;
+  } catch {
+    return [];
+  }
+}
+async function searchGoogleMedicalImagesViaGrounding(ai, searchQuery, topic = "", question = "", enQueries = []) {
   if (!ai) return [];
-  const enQuery = buildEnglishMedicalSearchQuery(`${searchQuery} ${topic}`);
-  const prompt = `Encontre de 4 a 6 URLs diretas de imagens m\xE9dicas cl\xEDnicas limpas (arquivos .jpg, .png, .webp ou .svg sem setas com spoiler da resposta e sem marca d'\xE1gua pesada) para o exame/achado cl\xEDnico:
-- Busca: "${searchQuery}" (${enQuery})
+  const enLabel = enQueries[0] || searchQuery;
+  const prompt = `Pesquise na Web p\xE1ginas m\xE9dicas reais (LITFL, Radiopaedia, Wikimedia Commons, Wikipedia, DermNet NZ, SciELO, PubMed Central) com exames de imagem, tra\xE7ados (ECG/CTG) ou fotos cl\xEDnicas reais dispon\xEDveis publicamente sobre:
+- Busca: "${searchQuery}" (${enLabel})
 - T\xF3pico: "${topic}"
 - Contexto: "${question.slice(0, 180)}"
 
-Priorize fontes m\xE9dicas confi\xE1veis de acesso aberto:
-- Life in the Fast Lane (LITFL - litfl.com) para ECG e arritmias
-- Radiopaedia / Open-i (openi.nlm.nih.gov) / Wikimedia Commons (upload.wikimedia.org) para RX, TC, RM, USG, Cardiotocografia
-- DermNet NZ para dermatologia
-- SciELO / PubMed Central para imagens cl\xEDnicas e obst\xE9tricas
-
-Retorne EXCLUSIVAMENTE um array JSON v\xE1lido no formato:
+Retorne EXCLUSIVAMENTE um array JSON v\xE1lido com at\xE9 5 refer\xEAncias encontradas no Google Search:
 [
   {
     "title": "T\xEDtulo conciso do achado visual",
-    "imageUrl": "https://... (URL direta do arquivo de imagem .jpg/.png/.webp/.svg)",
+    "imageUrl": "URL direta do arquivo de imagem (.jpg/.png/.webp) ou URL da p\xE1gina m\xE9dica encontrada",
     "description": "Descri\xE7\xE3o cl\xEDnica objetiva do exame sem entregar o diagn\xF3stico final",
-    "source": "LITFL / Radiopaedia / Wikimedia / DermNet / SciELO",
+    "source": "LITFL / Radiopaedia / Wikimedia / Wikipedia / DermNet / SciELO",
     "suggestedFilename": "nome_limpo_exame.jpg",
     "defaultLegend": "Exame complementar evidenciando [descri\xE7\xE3o morfol\xF3gica do achado]."
   }
@@ -379,37 +870,87 @@ Retorne EXCLUSIVAMENTE um array JSON v\xE1lido no formato:
         tools: [{ googleSearch: {} }]
       }
     });
-    const rawText = response.text || "[]";
-    const cleaned = extractJsonBlock(rawText);
-    const parsed = JSON.parse(cleaned);
-    const candidates = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.images) ? parsed.images : [];
-    const validationChecks = await Promise.all(
-      candidates.slice(0, 8).map(async (item, idx) => {
+    const directCandidates = [];
+    const groundedPages = [];
+    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    for (const chunk of chunks) {
+      const web = chunk.web;
+      if (web?.uri && web.uri.startsWith("http")) {
+        groundedPages.push({
+          url: web.uri,
+          title: web.title || searchQuery
+        });
+      }
+    }
+    try {
+      const parsed = JSON.parse(extractJsonBlock(response.text || "[]"));
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.images) ? parsed.images : [];
+      for (const item of arr.slice(0, 6)) {
         const rawUrl = String(item.imageUrl || item.url || item.thumbUrl || "").trim();
-        const check = await validateCandidateImageUrl(rawUrl);
+        if (!rawUrl.startsWith("http")) continue;
+        if (/\.(jpg|jpeg|png|webp|gif)(?:\?|$)/i.test(rawUrl)) {
+          directCandidates.push({
+            url: rawUrl,
+            title: String(item.title || searchQuery).slice(0, 85),
+            description: String(item.description || `Exame referente a ${searchQuery}.`).slice(0, 180),
+            source: String(item.source || "Google Search Grounding"),
+            suggestedFilename: String(item.suggestedFilename || "google_med_img.jpg"),
+            defaultLegend: String(
+              item.defaultLegend || `Imagem cl\xEDnica referente a ${searchQuery}.`
+            )
+          });
+        } else {
+          groundedPages.push({ url: rawUrl, title: String(item.title || searchQuery) });
+        }
+      }
+    } catch {
+    }
+    const uniquePages = Array.from(
+      new Map(groundedPages.map((p) => [p.url, p])).values()
+    ).slice(0, 5);
+    const pageExtracts = await Promise.all(
+      uniquePages.map((page) => extractImagesFromMedicalWebPage(page.url, page.title))
+    );
+    for (const extractedList of pageExtracts) {
+      for (const item of extractedList.slice(0, 3)) {
+        let hostLabel = "Medical Web (Google)";
+        try {
+          hostLabel = new URL(item.pageUrl).hostname.replace(/^www\./, "");
+        } catch {
+        }
+        directCandidates.push({
+          url: item.url,
+          title: (item.alt || item.pageTitle || searchQuery).slice(0, 85),
+          description: `Imagem real extra\xEDda de ${hostLabel}: ${(item.alt || item.pageTitle).slice(0, 140)}`,
+          source: `${hostLabel} (via Google Search)`,
+          suggestedFilename: (item.alt || item.pageTitle || searchQuery).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 44),
+          defaultLegend: `Imagem cl\xEDnica real (${hostLabel}) demonstrando ${(item.alt || item.pageTitle).slice(0, 110)}.`
+        });
+      }
+    }
+    const uniqueDirect = Array.from(
+      new Map(directCandidates.map((c) => [c.url, c])).values()
+    ).slice(0, 12);
+    const validated = await Promise.all(
+      uniqueDirect.map(async (item, idx) => {
+        const check = await validateCandidateImageUrl(item.url);
         if (!check.ok) return null;
-        const title = String(item.title || `Imagem M\xE9dica Google #${idx + 1}`).slice(0, 85);
-        const desc = String(
-          item.description || `Exame complementar referente a ${searchQuery}.`
-        ).slice(0, 180);
-        const source = String(item.source || "Google Search Grounding (Medical Web)");
-        const ext = check.contentType.includes("png") ? ".png" : check.contentType.includes("svg") ? ".svg" : check.contentType.includes("webp") ? ".webp" : ".jpg";
-        const rawSuggested = String(item.suggestedFilename || title).toLowerCase().replace(/\.[a-z0-9]+$/i, "").replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+        const ext = check.contentType.includes("png") ? ".png" : check.contentType.includes("webp") ? ".webp" : check.contentType.includes("svg") ? ".svg" : ".jpg";
+        const cleanBase = item.suggestedFilename.toLowerCase().replace(/\.[a-z0-9]+$/i, "").replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
         return {
-          id: `google-grounding-${idx}-${Date.now()}`,
-          title,
-          thumbUrl: rawUrl,
-          fullUrl: rawUrl,
-          description: desc,
-          suggestedFilename: `${rawSuggested || `google_med_${idx + 1}`}${ext}`,
-          defaultLegend: String(
-            item.defaultLegend || `Exame complementar demonstrando ${desc.slice(0, 125)}.`
-          ),
-          source
+          id: `google-web-${idx}-${Date.now()}`,
+          title: item.title,
+          thumbUrl: item.url,
+          fullUrl: item.url,
+          description: item.description,
+          suggestedFilename: `${cleanBase || `google_med_${idx + 1}`}${ext}`,
+          defaultLegend: item.defaultLegend,
+          source: item.source,
+          isSvg: check.isSvg
         };
       })
     );
-    return validationChecks.filter((item) => item !== null);
+    return validated.filter((item) => item !== null);
   } catch {
     return [];
   }
@@ -1001,50 +1542,50 @@ async function startServer() {
   app.use(import_express.default.json({ limit: "50mb" }));
   app.post("/api/media/search-medical-images", async (req, res) => {
     try {
-      const { query = "", topic = "", question = "", preferGoogleGrounding = true } = req.body || {};
+      const {
+        query = "",
+        topic = "",
+        question = "",
+        hint = "",
+        preferGoogleGrounding = true
+      } = req.body || {};
       const rawSearch = (query || topic || question || "clinical diagnosis").trim();
-      const [googleSettled, wikiSettled, openiSettled] = await Promise.allSettled([
-        preferGoogleGrounding ? searchGoogleMedicalImagesViaGrounding(rawSearch, topic, question) : Promise.resolve([]),
-        searchWikimediaCommonsMedical(rawSearch),
-        searchNlmOpenIMedical(rawSearch)
+      const ai = getAiClient();
+      const enQueries = await expandMedicalQueriesWithGemini(ai, rawSearch, topic, question, hint);
+      const [googleSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
+        preferGoogleGrounding ? searchGoogleMedicalImagesViaGrounding(ai, rawSearch, topic, question, enQueries) : Promise.resolve([]),
+        searchWikipediaMedicalImages(enQueries, rawSearch),
+        searchWikimediaCommonsMedical(enQueries)
       ]);
       const googleImages = googleSettled.status === "fulfilled" ? googleSettled.value : [];
-      const wikiRaw = wikiSettled.status === "fulfilled" ? wikiSettled.value : [];
-      const openiRaw = openiSettled.status === "fulfilled" ? openiSettled.value : [];
-      const [wikiValidated, openiValidated] = await Promise.all([
-        Promise.all(
-          wikiRaw.slice(0, 6).map(async (img) => {
-            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
-            return check.ok ? img : null;
-          })
-        ),
-        Promise.all(
-          openiRaw.slice(0, 6).map(async (img) => {
-            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
-            return check.ok ? img : null;
-          })
-        )
-      ]);
-      const wikiImages = wikiValidated.filter((x) => x !== null);
-      const openiImages = openiValidated.filter((x) => x !== null);
-      const combined = [];
+      const wpImages = wikipediaSettled.status === "fulfilled" ? wikipediaSettled.value.slice(0, 8) : [];
+      const wmImages = wikimediaSettled.status === "fulfilled" ? wikimediaSettled.value.slice(0, 8) : [];
+      const interleaved = [];
       const seenUrls = /* @__PURE__ */ new Set();
-      const maxLen = Math.max(googleImages.length, wikiImages.length, openiImages.length);
+      const maxLen = Math.max(googleImages.length, wpImages.length, wmImages.length);
       for (let i = 0; i < maxLen; i++) {
-        for (const candidate of [googleImages[i], wikiImages[i], openiImages[i]]) {
-          if (candidate && !seenUrls.has(candidate.thumbUrl)) {
-            seenUrls.add(candidate.thumbUrl);
-            combined.push(candidate);
+        for (const candidate of [googleImages[i], wpImages[i], wmImages[i]]) {
+          if (!candidate) continue;
+          const normalizedKey = candidate.thumbUrl.replace(/^http:\/\//i, "https://").split("?")[0];
+          if (!seenUrls.has(normalizedKey)) {
+            seenUrls.add(normalizedKey);
+            interleaved.push(candidate);
           }
         }
       }
+      const rasterFirst = [
+        ...interleaved.filter((img) => !img.isSvg),
+        ...interleaved.filter((img) => img.isSvg)
+      ].map(({ isSvg: _omit, ...rest }) => rest);
       return res.json({
         query: rawSearch,
-        images: combined.slice(0, 12)
+        translatedQueries: enQueries,
+        images: rasterFirst.slice(0, 12)
       });
     } catch {
       return res.json({
         query: "atlas_clinico",
+        translatedQueries: [],
         images: []
       });
     }
@@ -1215,10 +1756,53 @@ async function startServer() {
       return res.status(500).json({ error: msg });
     }
   });
+  app.post("/api/gemini/upload-file", async (req, res) => {
+    try {
+      const { name = "documento.pdf", mimeType = "application/pdf", base64Data = "" } = req.body || {};
+      if (!base64Data || typeof base64Data !== "string") {
+        return res.status(400).json({ error: "Arquivo base64Data ausente." });
+      }
+      const ai = getAiClient();
+      if (!ai) {
+        return res.status(200).json({
+          fallback: true,
+          error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
+        });
+      }
+      const uploaded = await uploadSinglePdfToGeminiFiles(ai, {
+        name,
+        mimeType,
+        base64Data
+      });
+      return res.json({
+        fileUri: uploaded.uri,
+        fileName: uploaded.name,
+        mimeType: uploaded.mimeType
+      });
+    } catch (error) {
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, "Erro ao enviar PDF para a Gemini Files API.")
+      });
+    }
+  });
+  const resolveEffectiveDomainProfile = (requestedProfile, deckKey, textHint = "") => {
+    const validProfiles = [
+      "emergencia",
+      "ambulatorio",
+      "cirurgico",
+      "preventiva_normativo"
+    ];
+    if (typeof requestedProfile === "string" && validProfiles.includes(requestedProfile)) {
+      return requestedProfile;
+    }
+    return inferDomainProfile(deckKey, textHint);
+  };
   app.post("/api/gemini/clinical-map", async (req, res) => {
     try {
       const {
         deckKey = "tema_clinico_internato",
+        profile = "auto",
         pdfs = [],
         existingJsonSummary = "",
         useGoogleSearch = true
@@ -1230,73 +1814,93 @@ async function startServer() {
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
         });
       }
-      const parts = [];
-      for (const pdf of pdfs) {
-        if (pdf?.textContent && typeof pdf.textContent === "string") {
-          parts.push({
-            text: `DOCUMENTO ANEXADO (${pdf.name || "Texto/Quest\xF5es"}):
-${pdf.textContent.slice(0, 6e4)}`
-          });
-        } else if (pdf?.base64Data) {
-          parts.push({
-            inlineData: {
-              mimeType: pdf.mimeType || "application/pdf",
-              data: pdf.base64Data
-            }
-          });
-        }
-      }
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        profile,
+        deckKey,
+        existingJsonSummary
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
+      const parts = await resolveDocumentPartsForGemini(ai, pdfs);
       const prompt = `Analise os documentos PDF anexados (se houver) e o tema m\xE9dico indicado pela Deck Key "${deckKey}".
 ${existingJsonSummary ? `Resumo do deck atual enviado pelo usu\xE1rio:
 ${existingJsonSummary}
 ` : ""}
-${useGoogleSearch ? "Utilize o Google Search para verificar diretrizes atualizadas do Minist\xE9rio da Sa\xFAde (MS), Sociedades M\xE9dicas Brasileiras (FEBRASGO, SBC, SBP, SBGG, CBC, etc.), consensos internacionais recentes e refer\xEAncias de exames de imagem/tra\xE7ados cl\xE1ssicos sobre este tema." : ""}
+${useGoogleSearch ? "Utilize o Google Search para verificar diretrizes atualizadas do Minist\xE9rio da Sa\xFAde (MS), Sociedades M\xE9dicas Brasileiras (FEBRASGO, SBC, SBP, SBGG, CBC, CFM, etc.), consensos internacionais recentes e refer\xEAncias de exames/normas aplic\xE1veis a este tema." : ""}
 
-Gere um Mapa Cl\xEDnico estruturado segundo a Doutrina Internato-First (P1 a P4) para guiar a cria\xE7\xE3o/recria\xE7\xE3o do deck.
-Inclua em P2 conceitos de Reconhecimento Visual de exames/imagens fidedignas (ECG, RX, TC, USG, CTG, les\xF5es cl\xE1ssicas).
-Aplique o Filtro Negativo: exclua gen\xE9tica de bancada, hist\xF3ria da medicina e epidemiologia percentual que n\xE3o mude conduta.
+${profilePromptBlock}
+
+Gere um Mapa Cl\xEDnico estruturado segundo a Doutrina Internato-First (P1 a P4) ADAPTADA ESTRITAMENTE AO PERFIL DE DOM\xCDNIO "${effectiveProfile}" acima para guiar a cria\xE7\xE3o/recria\xE7\xE3o do deck.
+- N\xE3o force cen\xE1rio de "Sala Vermelha" nem vi\xE9s obst\xE9trico/de emerg\xEAncia se o tema pertencer a outro perfil!
+- Inclua em P2 conceitos de Reconhecimento Visual de exames/imagens reais da internet APENAS quando exames complementares visuais fizerem sentido para o tema (ex.: ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, l\xE2minas). Para temas normativos/\xE9tica/legais sem exame de imagem t\xEDpico, foque P2 em documenta\xE7\xE3o, prazos e interpreta\xE7\xE3o de medidas/indicadores.
+- Aplique o Filtro Negativo: exclua gen\xE9tica de bancada, hist\xF3ria da medicina e epidemiologia percentual que n\xE3o mude conduta.
+
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON) no seguinte formato exato:
 {
   "themeTitle": "Nome Completo do Tema M\xE9dico",
-  "specialty": "Especialidade (Cl\xEDnica / Cirurgia / GO / Pediatria / Preventiva)",
+  "specialty": "Especialidade (Cl\xEDnica / Cirurgia / GO / Pediatria / Preventiva / \xC9tica)",
   "deckKey": "${deckKey}",
+  "profile": "${effectiveProfile}",
   "guidelineUpdates": [
-    "Resumo objetivo de atualiza\xE7\xE3o de diretriz MS / Sociedade Brasileira / Internacional com pontos de corte e condutas"
+    "Resumo objetivo de atualiza\xE7\xE3o de diretriz MS / Sociedade Brasileira / Norma CFM / Consenso com pontos de corte e condutas"
   ],
   "items": [
     {
       "id": "p1-1",
       "priority": "P1",
       "subtopic": "Subtema cl\xEDnico sem spoiler",
-      "concept": "Conceito cl\xEDnico de alto impacto (doses em emerg\xEAncia, vias, red flags, conduta minuto zero, 2\xAA linha, ant\xEDdotos)",
-      "guidelineNote": "Refer\xEAncia ou destaque USP/Unicamp/Diretriz",
+      "concept": "Conceito P1 adequado ao perfil ativo (decis\xE3o de maior impacto, crit\xE9rio cr\xEDtico ou norma/sigilo obrigat\xF3rio)",
+      "guidelineNote": "Refer\xEAncia ou destaque USP/Unicamp/Diretriz/Lei",
       "targetCardType": "basic",
       "checked": true
     }
   ]
 }
-Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4, escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
+Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
       parts.push({ text: prompt });
-      const response = await generateContentWithRetry(ai, {
-        model: "gemini-4-hydrogen",
-        contents: { parts },
-        config: {
-          systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-          maxOutputTokens: 32768,
-          thinkingConfig: {
-            thinkingLevel: import_genai.ThinkingLevel.HIGH
-          },
-          ...useGoogleSearch ? { tools: [{ googleSearch: {} }] } : { responseMimeType: "application/json" }
+      let result;
+      try {
+        result = await generateContentWithRetry(ai, {
+          model: "gemini-4-hydrogen",
+          contents: { parts },
+          config: {
+            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+            maxOutputTokens: 32768,
+            thinkingConfig: {
+              thinkingLevel: import_genai.ThinkingLevel.HIGH
+            },
+            ...useGoogleSearch ? { tools: [{ googleSearch: {} }] } : { responseMimeType: "application/json" }
+          }
+        });
+      } catch (primaryErr) {
+        if (useGoogleSearch && isRetryableGeminiError(primaryErr)) {
+          console.warn(
+            "[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:",
+            extractErrorDetails(primaryErr)
+          );
+          result = await generateContentWithRetry(ai, {
+            model: "gemini-4-hydrogen",
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              maxOutputTokens: 32768,
+              responseMimeType: "application/json",
+              thinkingConfig: {
+                thinkingLevel: import_genai.ThinkingLevel.MEDIUM
+              }
+            }
+          });
+        } else {
+          throw primaryErr;
         }
-      });
-      const rawText = response.text || "{}";
+      }
+      const rawText = result.text || "{}";
       const cleanedJson = extractJsonBlock(rawText);
       const parsed = JSON.parse(cleanedJson);
-      const groundingSources = extractGroundingSources(response);
       return res.json({
         ...parsed,
         deckKey: parsed.deckKey || deckKey,
-        groundingSources: groundingSources.length > 0 ? groundingSources : parsed.groundingSources || []
+        profile: resolveEffectiveDomainProfile(parsed.profile || profile, deckKey, existingJsonSummary),
+        groundingSources: result.groundingSources.length > 0 ? result.groundingSources : parsed.groundingSources || []
       });
     } catch (error) {
       return res.status(200).json({
@@ -1325,22 +1929,7 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4, escolhendo fluidamen
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
         });
       }
-      const parts = [];
-      for (const pdf of pdfs) {
-        if (pdf?.textContent && typeof pdf.textContent === "string") {
-          parts.push({
-            text: `DOCUMENTO ANEXADO (${pdf.name || "Texto/Quest\xF5es"}):
-${pdf.textContent.slice(0, 6e4)}`
-          });
-        } else if (pdf?.base64Data) {
-          parts.push({
-            inlineData: {
-              mimeType: pdf.mimeType || "application/pdf",
-              data: pdf.base64Data
-            }
-          });
-        }
-      }
+      const parts = await resolveDocumentPartsForGemini(ai, pdfs);
       const existingIds = existingMetadata?.existingIds || [];
       const maxExistingId = existingIds.length > 0 ? Math.max(...existingIds) : 171000100;
       const effectiveNewIdStart = typeof nextNewIdStart === "number" && nextNewIdStart > maxExistingId ? nextNewIdStart : maxExistingId + 1;
@@ -1348,6 +1937,12 @@ ${pdf.textContent.slice(0, 6e4)}`
       const isBatchMode = Array.isArray(batchCards) && batchCards.length > 0;
       const cardsForPrompt = isBatchMode ? batchCards : Array.isArray(existingMetadata?.rawCards) ? existingMetadata.rawCards : [];
       const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ""} ${clinicalMap?.specialty || ""}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
       const outlineText = Array.isArray(deckOutline) && deckOutline.length > 0 ? deckOutline.slice(0, 140).map(
         (item) => `  * Lote ${item.batch ?? "?"} | ID:${item.id ?? "?"} \u2014 ${sanitizeCardTextForPrompt(item.summary, 95)}`
       ).join("\n") : "";
@@ -1368,6 +1963,8 @@ ${pdf.textContent.slice(0, 6e4)}`
   * PODA ATIVA DE DUPLICATAS: Se dois cards neste lote ou no \xCDNDICE GLOBAL DE TODOS OS LOTES testarem exatamente a MESMA conduta/alvo redundante (ex.: m\xFAltiplos cards fechando "{{c1::48 a 72 horas}}" para retorno, ou dois cards distintos cobrando a mesma prescri\xE7\xE3o de alta de autoinjetor de adrenalina), **EXCLUA o ID duplicado** neste lote ou diferencie explicitamente o alvo cl\xEDnico. Tamb\xE9m exclua cards reprovados pelo Filtro Negativo.` : `MODO DE GERA\xC7\xC3O INTEGRAL DO BARALHO (${subsetCards.length} cards originais fornecidos):
 - Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos cl\xEDnicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Cl\xEDnico P1\u2013P4.`;
         const prompt = `Reconstrua profundamente e lapide o baralho can\xF4nico para o tema "${deckKey}".
+
+${profilePromptBlock}
 
 ${batchInstruction}
 
@@ -1407,7 +2004,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
       "type": "basic",
       "priority": "P1",
       "topic": "Tema - Subtema Sem Spoiler",
-      "question": "Na Sala Vermelha, paciente de 54 anos apresenta [cl\xEDnica + sinais vitais]. Qual a conduta imediata de estabiliza\xE7\xE3o (minuto zero)?",
+      "question": "No contexto cl\xEDnico/assistencial pertinente ao tema, paciente apresenta [achados/cen\xE1rio sem spoiler]. Qual a conduta priorit\xE1ria indicada neste perfil?",
       "answer": "Conduta at\xF4mica curta terminada em ponto.",
       "hint": "<b>Coment\xE1rio:</b> Explica\xE7\xE3o concisa de 180 a 300 chars vis\xEDveis com <b>termos-chave</b> e contraste diferencial."
     }
@@ -1426,7 +2023,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
           }
         });
         const rawText = response.text || "{}";
-        const finishReason = response.candidates?.[0]?.finishReason;
+        const finishReason = response.finishReason;
         let parsedNotes = [];
         let wasTruncated = false;
         try {
@@ -1477,6 +2074,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
         nextNewIdStart = 171000200
       } = req.body || {};
       const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ""} ${clinicalMap?.specialty || ""}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
       if (checkedMapItems.length === 0) {
         return res.json({ deck_key: deckKey, notes: [] });
       }
@@ -1490,7 +2093,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
       const existingDigest = Array.isArray(rebuiltCards) ? rebuiltCards.slice(0, 160).map(
         (c) => `- ID:${c.id ?? "?"} | ${sanitizeCardTextForPrompt(c.topic, 80)} | Q: "${sanitizeCardTextForPrompt(c.question, 180)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 90)}"` : ""}`
       ).join("\n") : "";
-      const prompt = `Audite a cobertura cl\xEDnica do baralho reconstru\xEDdo "${deckKey}" comparando-o com o Mapa Cl\xEDnico P1\u2013P4 aprovado.
+      const prompt = `Audite a cobertura cl\xEDnica do baralho reconstru\xEDdo "${deckKey}" comparando-o com o Mapa Cl\xEDnico P1\u2013P4 aprovado para o perfil "${effectiveProfile}".
+
+${profilePromptBlock}
 
 MAPA CL\xCDNICO APROVADO:
 ${JSON.stringify(checkedMapItems, null, 2)}
@@ -1615,8 +2220,11 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no formato:
       res.sendFile(import_path.default.join(distPath, "index.html"));
     });
   }
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Internato-First Card Architect server running at http://localhost:${PORT}`);
   });
+  server.requestTimeout = 10 * 60 * 1e3;
+  server.headersTimeout = 120 * 1e3;
+  server.keepAliveTimeout = 65 * 1e3;
 }
 startServer();
