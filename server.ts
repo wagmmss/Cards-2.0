@@ -4,7 +4,13 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import {
+  createPartFromUri,
+  GenerateContentResponse,
+  GoogleGenAI,
+  Part,
+  ThinkingLevel,
+} from '@google/genai';
 import initSqlJs from 'sql.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,6 +26,7 @@ function getAiClient(): GoogleGenAI | null {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      timeout: 240_000,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -152,8 +159,29 @@ function parseOrRecoverNotesJson(rawText: string): Array<Record<string, unknown>
   return parseOrRecoverNotesJsonWithMeta(rawText).notes;
 }
 
+function extractErrorDetails(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const rec = current as { message?: unknown; code?: unknown; status?: unknown; cause?: unknown };
+    const codeStr = rec.code ? `[${String(rec.code)}]` : '';
+    const msgStr = typeof rec.message === 'string' ? rec.message.trim() : '';
+    const combined = [codeStr, msgStr].filter(Boolean).join(' ');
+    if (combined && !parts.includes(combined)) {
+      parts.push(combined);
+    }
+    current = rec.cause;
+  }
+  if (parts.length === 0 && error != null) {
+    parts.push(String(error));
+  }
+  return parts.join(' → ');
+}
+
 function formatGeminiError(error: unknown, fallbackMessage: string): string {
-  const raw = error instanceof Error ? error.message : fallbackMessage;
+  const raw = extractErrorDetails(error) || fallbackMessage;
   if (/402|prepayment credits are depleted|billing#prepay/i.test(raw)) {
     return 'Créditos pré-pagos da chave Gemini esgotados (402 RESOURCE_EXHAUSTED). Troque a chave ou adicione créditos em AI Studio.';
   }
@@ -166,47 +194,221 @@ function formatGeminiError(error: unknown, fallbackMessage: string): string {
       ? 'Cota diária da API Gemini esgotada (429 RESOURCE_EXHAUSTED — Free Tier: 20 req/dia no gemini-4-hydrogen). Aguarde a renovação da cota ou configure uma chave com faturamento.'
       : 'Limite de requisições por minuto da API Gemini atingido (429 RESOURCE_EXHAUSTED). Aguarde alguns segundos e tente novamente.';
   }
+  if (/fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|socket hang up|other side closed|AbortError|TimeoutError/i.test(raw)) {
+    return `Falha de conexão com a API Gemini após novas tentativas (${raw}). Tente novamente ou reduza a quantidade de PDFs simultâneos.`;
+  }
   return raw || fallbackMessage;
+}
+
+function isRetryableGeminiError(error: unknown): boolean {
+  const raw = extractErrorDetails(error);
+  if (/402|prepayment credits|PerDay|limit:\s*20|API_KEY_INVALID|PERMISSION_DENIED/i.test(raw)) {
+    return false;
+  }
+  return /fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|socket hang up|other side closed|network|terminated|503|502|504|500|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|429|RESOURCE_EXHAUSTED/i.test(
+    raw
+  );
 }
 
 async function generateContentWithRetry(
   ai: GoogleGenAI,
   params: Parameters<GoogleGenAI['models']['generateContent']>[0]
-) {
-  try {
-    return await ai.models.generateContent(params);
-  } catch (error: unknown) {
-    const raw = error instanceof Error ? error.message : String(error || '');
-    if (/503|UNAVAILABLE|high demand/i.test(raw)) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      return await ai.models.generateContent(params);
+): Promise<{
+  text: string;
+  finishReason?: string;
+  groundingSources: Array<{ title: string; uri: string }>;
+}> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Stream chunks so TCP traffic stays active during long multi-PDF reasoning
+      const stream = await ai.models.generateContentStream(params);
+      let fullText = '';
+      let finishReason: string | undefined;
+      const groundingChunks: Array<{ web?: { uri?: string; title?: string } }> = [];
+
+      for await (const chunk of stream) {
+        const c = chunk as GenerateContentResponse;
+        if (c.text) {
+          fullText += c.text;
+        }
+        const cand = c.candidates?.[0];
+        if (cand?.finishReason) {
+          finishReason = String(cand.finishReason);
+        }
+        const chunks = cand?.groundingMetadata?.groundingChunks;
+        if (Array.isArray(chunks) && chunks.length > 0) {
+          groundingChunks.push(...chunks);
+        }
+      }
+
+      const seen = new Set<string>();
+      const groundingSources: Array<{ title: string; uri: string }> = [];
+      for (const ch of groundingChunks) {
+        const uri = ch?.web?.uri;
+        const title = ch?.web?.title || uri || 'Diretriz / Fonte Médica';
+        if (uri && !seen.has(uri)) {
+          seen.add(uri);
+          groundingSources.push({ title, uri });
+        }
+      }
+
+      return { text: fullText, finishReason, groundingSources };
+    } catch (error: unknown) {
+      lastError = error;
+      console.error(`[gemini] attempt ${attempt}/${maxAttempts} failed:`, extractErrorDetails(error));
+      if (attempt < maxAttempts && isRetryableGeminiError(error)) {
+        const delayMs = attempt === 1 ? 2000 : 5000;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw error;
     }
-    throw error;
+  }
+
+  throw lastError;
+}
+
+interface UploadedFileCacheEntry {
+  uri: string;
+  mimeType: string;
+  name: string;
+  uploadedAt: number;
+}
+
+const GEMINI_FILE_CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24h (Files API retains 48h)
+const geminiUploadedFileCache = new Map<string, UploadedFileCacheEntry>();
+const geminiUploadInFlight = new Map<string, Promise<UploadedFileCacheEntry>>();
+
+interface InputDocumentPayload {
+  name?: string;
+  mimeType?: string;
+  base64Data?: string;
+  fileUri?: string;
+  fileName?: string;
+  textContent?: string;
+  docRole?: string;
+}
+
+async function uploadSinglePdfToGeminiFiles(
+  ai: GoogleGenAI,
+  doc: InputDocumentPayload
+): Promise<UploadedFileCacheEntry> {
+  const base64Data = String(doc.base64Data || '');
+  const mimeType = doc.mimeType || 'application/pdf';
+  const hash = crypto.createHash('sha256').update(base64Data).digest('hex');
+
+  const cached = geminiUploadedFileCache.get(hash);
+  if (cached && Date.now() - cached.uploadedAt < GEMINI_FILE_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  const existingPromise = geminiUploadInFlight.get(hash);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const uploadTask = (async (): Promise<UploadedFileCacheEntry> => {
+    const buffer = Buffer.from(base64Data, 'base64');
+    const blob = new Blob([buffer], { type: mimeType });
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        let uploaded = await ai.files.upload({
+          file: blob,
+          config: {
+            mimeType,
+            displayName: doc.name || `documento_${hash.slice(0, 8)}.pdf`,
+          },
+        });
+
+        let polls = 0;
+        while (uploaded.state === 'PROCESSING' && uploaded.name && polls < 15) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          uploaded = await ai.files.get({ name: uploaded.name });
+          polls++;
+        }
+
+        if (uploaded.state === 'FAILED' || !uploaded.uri) {
+          throw new Error(`Falha ao processar arquivo "${doc.name || 'PDF'}" na Gemini Files API.`);
+        }
+
+        const entry: UploadedFileCacheEntry = {
+          uri: uploaded.uri,
+          mimeType: uploaded.mimeType || mimeType,
+          name: uploaded.name || '',
+          uploadedAt: Date.now(),
+        };
+        geminiUploadedFileCache.set(hash, entry);
+        return entry;
+      } catch (err: unknown) {
+        lastErr = err;
+        console.error(
+          `[gemini-files-upload] attempt ${attempt}/3 failed for ${doc.name || 'PDF'}:`,
+          extractErrorDetails(err)
+        );
+        if (attempt < 3 && isRetryableGeminiError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw lastErr;
+  })();
+
+  geminiUploadInFlight.set(hash, uploadTask);
+  try {
+    return await uploadTask;
+  } finally {
+    geminiUploadInFlight.delete(hash);
   }
 }
 
-function extractGroundingSources(response: unknown): Array<{ title: string; uri: string }> {
-  const resObj = response as {
-    candidates?: Array<{
-      groundingMetadata?: {
-        groundingChunks?: Array<{
-          web?: { uri?: string; title?: string };
-        }>;
-      };
-    }>;
-  };
-  const chunks = resObj?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-  const seen = new Set<string>();
-  const out: Array<{ title: string; uri: string }> = [];
-  for (const ch of chunks) {
-    const uri = ch?.web?.uri;
-    const title = ch?.web?.title || uri || 'Diretriz / Fonte Médica';
-    if (uri && !seen.has(uri)) {
-      seen.add(uri);
-      out.push({ title, uri });
+async function resolveDocumentPartsForGemini(
+  ai: GoogleGenAI,
+  pdfs: InputDocumentPayload[]
+): Promise<Part[]> {
+  const parts: Part[] = [];
+  if (!Array.isArray(pdfs)) return parts;
+
+  for (const pdf of pdfs) {
+    if (pdf?.textContent && typeof pdf.textContent === 'string') {
+      parts.push({
+        text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
+      });
+    } else if (pdf?.fileUri && typeof pdf.fileUri === 'string') {
+      parts.push(createPartFromUri(pdf.fileUri, pdf.mimeType || 'application/pdf'));
+    } else if (pdf?.base64Data && typeof pdf.base64Data === 'string') {
+      const mimeType = pdf.mimeType || 'application/pdf';
+      try {
+        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf);
+        parts.push(createPartFromUri(uploaded.uri, uploaded.mimeType));
+      } catch (uploadErr) {
+        // Fallback to inlineData only when total inline size is safe (< ~10 MB binary)
+        if (pdf.base64Data.length < 13_500_000) {
+          console.warn(
+            `[gemini] Falling back to inlineData for ${pdf.name || 'PDF'}:`,
+            extractErrorDetails(uploadErr)
+          );
+          parts.push({
+            inlineData: {
+              mimeType,
+              data: pdf.base64Data,
+            },
+          });
+        } else {
+          throw uploadErr;
+        }
+      }
     }
   }
-  return out;
+
+  return parts;
 }
 
 // PT -> EN medical translation dictionary for high-recall medical image retrieval on Wikimedia Commons & NLM Open-i
@@ -1490,6 +1692,39 @@ async function startServer() {
     }
   });
 
+  // Endpoint 0E: Pré-upload individual de PDF para a Gemini Files API (evita reenviar MBs de base64 em cada chamada)
+  app.post('/api/gemini/upload-file', async (req, res) => {
+    try {
+      const { name = 'documento.pdf', mimeType = 'application/pdf', base64Data = '' } = req.body || {};
+      if (!base64Data || typeof base64Data !== 'string') {
+        return res.status(400).json({ error: 'Arquivo base64Data ausente.' });
+      }
+      const ai = getAiClient();
+      if (!ai) {
+        return res.status(200).json({
+          fallback: true,
+          error:
+            'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
+        });
+      }
+      const uploaded = await uploadSinglePdfToGeminiFiles(ai, {
+        name,
+        mimeType,
+        base64Data,
+      });
+      return res.json({
+        fileUri: uploaded.uri,
+        fileName: uploaded.name,
+        mimeType: uploaded.mimeType,
+      });
+    } catch (error: unknown) {
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao enviar PDF para a Gemini Files API.'),
+      });
+    }
+  });
+
   // Endpoint 1: Passo 1 — Gerar Mapa Clínico (P1 a P4) + Atualizações de Diretrizes
   app.post('/api/gemini/clinical-map', async (req, res) => {
     try {
@@ -1509,25 +1744,7 @@ async function startServer() {
         });
       }
 
-      const parts: Array<
-        | { text: string }
-        | { inlineData: { mimeType: string; data: string } }
-      > = [];
-
-      for (const pdf of pdfs) {
-        if (pdf?.textContent && typeof pdf.textContent === 'string') {
-          parts.push({
-            text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
-          });
-        } else if (pdf?.base64Data) {
-          parts.push({
-            inlineData: {
-              mimeType: pdf.mimeType || 'application/pdf',
-              data: pdf.base64Data,
-            },
-          });
-        }
-      }
+      const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs);
 
       const prompt = `Analise os documentos PDF anexados (se houver) e o tema médico indicado pela Deck Key "${deckKey}".
 ${existingJsonSummary ? `Resumo do deck atual enviado pelo usuário:\n${existingJsonSummary}\n` : ''}
@@ -1564,32 +1781,60 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
 
       parts.push({ text: prompt });
 
-      const response = await generateContentWithRetry(ai, {
-        model: 'gemini-4-hydrogen',
-        contents: { parts },
-        config: {
-          systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-          maxOutputTokens: 32768,
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.HIGH,
-          },
-          ...(useGoogleSearch
-            ? { tools: [{ googleSearch: {} }] }
-            : { responseMimeType: 'application/json' }),
-        },
-      });
+      let result: {
+        text: string;
+        finishReason?: string;
+        groundingSources: Array<{ title: string; uri: string }>;
+      };
 
-      const rawText = response.text || '{}';
+      try {
+        result = await generateContentWithRetry(ai, {
+          model: 'gemini-4-hydrogen',
+          contents: { parts },
+          config: {
+            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+            maxOutputTokens: 32768,
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.HIGH,
+            },
+            ...(useGoogleSearch
+              ? { tools: [{ googleSearch: {} }] }
+              : { responseMimeType: 'application/json' }),
+          },
+        });
+      } catch (primaryErr) {
+        if (useGoogleSearch && isRetryableGeminiError(primaryErr)) {
+          console.warn(
+            '[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:',
+            extractErrorDetails(primaryErr)
+          );
+          result = await generateContentWithRetry(ai, {
+            model: 'gemini-4-hydrogen',
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              maxOutputTokens: 32768,
+              responseMimeType: 'application/json',
+              thinkingConfig: {
+                thinkingLevel: ThinkingLevel.MEDIUM,
+              },
+            },
+          });
+        } else {
+          throw primaryErr;
+        }
+      }
+
+      const rawText = result.text || '{}';
       const cleanedJson = extractJsonBlock(rawText);
       const parsed = JSON.parse(cleanedJson);
-      const groundingSources = extractGroundingSources(response);
 
       return res.json({
         ...parsed,
         deckKey: parsed.deckKey || deckKey,
         groundingSources:
-          groundingSources.length > 0
-            ? groundingSources
+          result.groundingSources.length > 0
+            ? result.groundingSources
             : parsed.groundingSources || [],
       });
     } catch (error: unknown) {
@@ -1624,25 +1869,7 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
         });
       }
 
-      const parts: Array<
-        | { text: string }
-        | { inlineData: { mimeType: string; data: string } }
-      > = [];
-
-      for (const pdf of pdfs) {
-        if (pdf?.textContent && typeof pdf.textContent === 'string') {
-          parts.push({
-            text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
-          });
-        } else if (pdf?.base64Data) {
-          parts.push({
-            inlineData: {
-              mimeType: pdf.mimeType || 'application/pdf',
-              data: pdf.base64Data,
-            },
-          });
-        }
-      }
+      const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs);
 
       const existingIds: number[] = existingMetadata?.existingIds || [];
       const maxExistingId =
@@ -1756,7 +1983,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         });
 
         const rawText = response.text || '{}';
-        const finishReason = response.candidates?.[0]?.finishReason;
+        const finishReason = response.finishReason;
         let parsedNotes: Array<Record<string, unknown>> = [];
         let wasTruncated = false;
 
@@ -1983,9 +2210,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Internato-First Card Architect server running at http://localhost:${PORT}`);
   });
+  server.requestTimeout = 10 * 60 * 1000;
+  server.headersTimeout = 120 * 1000;
+  server.keepAliveTimeout = 65 * 1000;
 }
 
 startServer();

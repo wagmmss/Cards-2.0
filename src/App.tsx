@@ -363,6 +363,77 @@ export default function App() {
     setPdfs([]);
   };
 
+  const ensurePdfsUploadedToGemini = useCallback(
+    async (sourcePdfs: UploadedPdfFile[]): Promise<UploadedPdfFile[]> => {
+      if (!Array.isArray(sourcePdfs) || sourcePdfs.length === 0) return sourcePdfs;
+      const updated = [...sourcePdfs];
+      let anyUploaded = false;
+
+      const pendingIndices = updated
+        .map((p, idx) => (p.base64Data && !p.fileUri && !p.textContent ? idx : -1))
+        .filter((idx) => idx !== -1);
+
+      for (let i = 0; i < pendingIndices.length; i++) {
+        const idx = pendingIndices[i];
+        const pdf = updated[idx];
+        showStatus(
+          `📄 Enviando documento ${i + 1}/${pendingIndices.length} (${pdf.name}) para leitura multimodal...`,
+          'info'
+        );
+        try {
+          const resp = await fetch('/api/gemini/upload-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: pdf.name,
+              mimeType: pdf.mimeType || 'application/pdf',
+              base64Data: pdf.base64Data,
+            }),
+          });
+          if (resp.ok) {
+            const data = (await resp.json()) as {
+              fileUri?: string;
+              fileName?: string;
+              mimeType?: string;
+              fallback?: boolean;
+            };
+            if (data?.fileUri && !data.fallback) {
+              updated[idx] = {
+                ...pdf,
+                fileUri: data.fileUri,
+                fileName: data.fileName,
+                mimeType: data.mimeType || pdf.mimeType,
+              };
+              anyUploaded = true;
+            }
+          }
+        } catch {
+          // Keep base64Data fallback if pre-upload fails
+        }
+      }
+
+      if (anyUploaded) {
+        setPdfs(updated);
+      }
+      return updated;
+    },
+    [showStatus]
+  );
+
+  const serializePdfsForApi = (sourcePdfs: UploadedPdfFile[]) =>
+    sourcePdfs.map((p) =>
+      p.fileUri
+        ? {
+            name: p.name,
+            size: p.size,
+            mimeType: p.mimeType,
+            fileUri: p.fileUri,
+            fileName: p.fileName,
+            docRole: p.docRole,
+          }
+        : p
+    );
+
   // Passo 1: Gerar Mapa Clínico (P1 a P4) + Atualizações de Diretrizes
   const handleGenerateClinicalMap = async (): Promise<ClinicalMapResponse> => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
@@ -373,9 +444,12 @@ export default function App() {
     setIsGeneratingMap(true);
     const optimisticMap = buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards);
     setClinicalMap(optimisticMap);
-    setStatusMessage('Mapeando prioridades clínicas P1→P4 e consultando diretrizes...');
+    showStatus('Mapeando prioridades clínicas P1→P4 e consultando diretrizes...', 'info');
 
     try {
+      const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs);
+      showStatus('Mapeando prioridades clínicas P1→P4 e consultando diretrizes...', 'info');
+
       const existingSummary = extractedMeta.rawCards
         .slice(0, 30)
         .map((c) => `ID ${c.id} [${c.type}]: ${c.topic} -> ${c.question.slice(0, 140)}`)
@@ -386,14 +460,15 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           deckKey: effectiveKey,
-          pdfs,
+          pdfs: serializePdfsForApi(preparedPdfs),
           existingJsonSummary: existingSummary,
           useGoogleSearch,
         }),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const errPayload = await response.json().catch(() => ({}));
+        throw new Error(errPayload?.error || `HTTP ${response.status}`);
       }
 
       const data = (await response.json()) as ClinicalMapResponse & {
@@ -475,6 +550,8 @@ export default function App() {
     setIsGeneratingDeck(true);
 
     try {
+      const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs);
+      const apiPdfs = serializePdfsForApi(preparedPdfs);
       const allRebuiltNotes: CanonicalCard[] = [];
 
       if (sourceCards.length > 0) {
@@ -522,7 +599,7 @@ export default function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 deckKey: effectiveKey,
-                pdfs,
+                pdfs: apiPdfs,
                 clinicalMap: activeMap,
                 existingMetadata: extractedMeta,
                 batchCards,
@@ -607,7 +684,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             deckKey: effectiveKey,
-            pdfs,
+            pdfs: apiPdfs,
             clinicalMap: activeMap,
             existingMetadata: extractedMeta,
           }),

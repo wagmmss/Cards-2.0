@@ -150,6 +150,8 @@ export interface UploadedPdfFile {
   size: number;
   mimeType: string;
   base64Data: string;
+  fileUri?: string;
+  fileName?: string;
   textContent?: string;
   docRole?: 'diretriz' | 'resumo' | 'questoes' | 'documento';
 }
