@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import crypto from 'crypto';
+import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -2620,9 +2621,17 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
     }
   });
 
+  const server = http.createServer(app);
+  server.requestTimeout = 10 * 60 * 1000;
+  server.headersTimeout = 120 * 1000;
+  server.keepAliveTimeout = 65 * 1000;
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -2634,12 +2643,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`Internato-First Card Architect server running at http://localhost:${PORT}`);
   });
-  server.requestTimeout = 10 * 60 * 1000;
-  server.headersTimeout = 120 * 1000;
-  server.keepAliveTimeout = 65 * 1000;
 }
 
 startServer();
