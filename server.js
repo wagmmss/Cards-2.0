@@ -104,17 +104,28 @@ function extractJsonBlock(text) {
   }
   return text.trim();
 }
-function buildCompactCardsDigest(rawCards) {
+function sanitizeCardTextForPrompt(value, maxLen) {
+  return String(value || "").replace(/src=["']data:image\/[^"']+["']/gi, 'src="[IMAGEM_EMBUTIDA]"').replace(/\s+/g, " ").trim().slice(0, maxLen);
+}
+function buildFullCardsDigest(rawCards) {
   if (!Array.isArray(rawCards) || rawCards.length === 0) {
     return "Nenhum JSON anterior enviado.";
   }
   return rawCards.map((c) => {
     const id = c.id ?? "";
     const type = c.type === "cloze" ? "cloze" : "basic";
-    const topic = String(c.topic || "").trim();
-    const q = String(c.question || "").replace(/\s+/g, " ").trim().slice(0, 220);
-    const a = String(c.answer || "").replace(/\s+/g, " ").trim().slice(0, 90);
-    return `- ID:${id} [${type}] Topic:"${topic}" | Q:"${q}"${a ? ` | A:"${a}"` : ""}`;
+    const priority = c.priority ? ` ${String(c.priority)}` : "";
+    const topic = sanitizeCardTextForPrompt(c.topic, 140);
+    const q = sanitizeCardTextForPrompt(c.question, 600);
+    const a = sanitizeCardTextForPrompt(c.answer, 250);
+    const h = sanitizeCardTextForPrompt(c.hint, 700);
+    return [
+      `- ID:${id} [${type}${priority}]`,
+      `  Topic: "${topic}"`,
+      `  Q: "${q}"`,
+      a ? `  A: "${a}"` : null,
+      h ? `  Hint: "${h}"` : null
+    ].filter(Boolean).join("\n");
   }).join("\n");
 }
 function parseOrRecoverNotesJson(rawText) {
@@ -1269,7 +1280,10 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4, escolhendo fluidamen
         pdfs = [],
         clinicalMap = null,
         existingMetadata = null,
-        useGoogleSearch = true
+        batchCards = null,
+        batchIndex = 0,
+        totalBatches = 1,
+        nextNewIdStart = null
       } = req.body || {};
       const ai = getAiClient();
       if (!ai) {
@@ -1296,25 +1310,37 @@ ${pdf.textContent.slice(0, 6e4)}`
       }
       const existingIds = existingMetadata?.existingIds || [];
       const maxExistingId = existingIds.length > 0 ? Math.max(...existingIds) : 171000100;
+      const effectiveNewIdStart = typeof nextNewIdStart === "number" && nextNewIdStart > maxExistingId ? nextNewIdStart : maxExistingId + 1;
       const mediaTags = existingMetadata?.mediaTags || [];
-      const rawCardsSummary = buildCompactCardsDigest(existingMetadata?.rawCards || []);
+      const isBatchMode = Array.isArray(batchCards) && batchCards.length > 0;
+      const cardsForPrompt = isBatchMode ? batchCards : Array.isArray(existingMetadata?.rawCards) ? existingMetadata.rawCards : [];
+      const rawCardsSummary = buildFullCardsDigest(cardsForPrompt);
+      const isLastBatch = !isBatchMode || batchIndex + 1 >= totalBatches;
       const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
-      const prompt = `Recrie, pode redund\xE2ncias e lapide totalmente o baralho can\xF4nico para o tema "${deckKey}".
+      const batchInstruction = isBatchMode ? `MODO DE RECONSTRU\xC7\xC3O PROFUNDA EM LOTE (${batchIndex + 1}/${totalBatches} \u2014 ${cardsForPrompt.length} cards neste lote):
+- N\xC3O fa\xE7a apenas pequenos ajustes cosm\xE9ticos! Reconstrua cada conceito v\xE1lido deste lote **DO ZERO** segundo Andy Matuschak & Michael Nielsen (sali\xEAncia cl\xEDnica \xE0 beira-leito, compreens\xE3o causal "por que / como", zero defini\xE7\xF5es inertes, zero listas abertas, zero perguntas vagas).
+- Preserve rigorosamente o "id" num\xE9rico original de cada conceito sobrevivente (FSRS).
+- Exclua sem hesitar IDs duplicados, triviais ou reprovados pelo Filtro Negativo dentro deste lote.
+- Se algum conceito complexo merecer desmembramento ("More than you think")${isLastBatch ? " OU se houver conceitos do Mapa Cl\xEDnico P1\u2013P4 ainda descobertos pelo baralho" : ""}, crie novos cards atribuindo IDs sequenciais a partir de ${effectiveNewIdStart}.` : `MODO DE GERA\xC7\xC3O INTEGRAL DO BARALHO (${cardsForPrompt.length} cards originais fornecidos):
+- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos sobreviventes e criando novos IDs a partir de ${effectiveNewIdStart} para cobrir integralmente o Mapa Cl\xEDnico P1\u2013P4.`;
+      const prompt = `Reconstrua profundamente e lapide o baralho can\xF4nico para o tema "${deckKey}".
 
-DADOS DO BARALHO ANTIGO PARA CURADORIA E PRESERVA\xC7\xC3O FSRS:
-- Total de cards enviados originalmente: ${existingIds.length}
-- Maior ID existente: ${maxExistingId} (se criar novos cards, use IDs sequenciais a partir de ${maxExistingId + 1})
+${batchInstruction}
+
+DADOS DO BARALHO ANTIGO (COMPLETO COM PERGUNTA, RESPOSTA E COMENT\xC1RIO ORIGINAL):
+- Total de cards no baralho original: ${existingIds.length}
+- Primeiro novo ID dispon\xEDvel se precisar criar cards extras: ${effectiveNewIdStart}
 - Tags de M\xEDdia Originais: ${JSON.stringify(mediaTags)}
-- Resumo Compacto dos Cards Originais (voc\xEA DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o n\xFAmero "id" original daquele conceito; 3) ESCOLHER fluidamente "basic" ou "cloze" conforme o que melhor se encaixa naquele conceito, sem cota fixa; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 e mecanismos causais ausentes):
+- Cards Originais para Reconstru\xE7\xE3o Profunda:
 ${rawCardsSummary}
 
 MAPA CL\xCDNICO APROVADO (P1 a P4):
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Mapear integralmente P1, P2, P3 e P4 do tema."}
 
 CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
-1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): N\xE3o devolva o mesmo n\xFAmero de cards por in\xE9rcia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, crit\xE9rios num\xE9ricos, doses cr\xEDticas e fatos at\xF4micos em \xE2ncora) livremente pelo encaixe cognitivo de cada card \u2014 sem for\xE7ar 50/50.
+1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, crit\xE9rios num\xE9ricos, doses cr\xEDticas e fatos at\xF4micos em \xE2ncora) livremente pelo encaixe cognitivo de cada card \u2014 sem for\xE7ar 50/50.
 2. Se "basic":
-   - "question": no m\xE1ximo 45 a 50 palavras. Para casos cl\xEDnicos, use cen\xE1rio concreto + cl\xEDnica/exame + pergunta precisa (minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha); para compreens\xE3o profunda (Nielsen & Matuschak), tamb\xE9m s\xE3o bem-vindos prompts causais/mecan\xEDsticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), defini\xE7\xF5es passivas ("O que \xE9 X?") ou respostas bin\xE1rias ("Sim/N\xE3o").
+   - "question": no m\xE1ximo 45 a 50 palavras. Para casos cl\xEDnicos, use cen\xE1rio concreto + cl\xEDnica/exame + pergunta precisa (minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha); para compreens\xE3o profunda (Nielsen & Matuschak), crie tamb\xE9m prompts causais/mecan\xEDsticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), defini\xE7\xF5es passivas ("O que \xE9 X?") ou respostas bin\xE1rias ("Sim/N\xE3o").
    - "answer": 1 a 12 palavras (M\xC1XIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-v\xEDrgula (;) e SEM tag <b> externo envolvendo toda a resposta.
 3. Se "cloze":
    - "question": cont\xE9m ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposi\xE7\xE3o pendurada no final, SEM "::dica".
@@ -1323,7 +1349,7 @@ CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
 5. Duplo Salto Cognitivo Impl\xEDcito: NUNCA fa\xE7a pergunta composta ("Qual o diagn\xF3stico e a conduta?"). Apresente o caso cl\xEDnico e pergunte apenas 1 decis\xE3o at\xF4mica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical (ex.: proibido "Manobras" no topic se a resposta come\xE7a com "Manobra de...") e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre par\xEAnteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve conter "<b>Coment\xE1rio:</b> ", ter 1 a 2 frases (entre 180 e 300 caracteres vis\xEDveis medidos AP\xD3S "<b>Coment\xE1rio:</b> ", NUNCA passar de 320 caracteres vis\xEDveis), destacar termos-chave em <b>negrito</b> e trazer contraste diferencial obrigat\xF3rio.
+8. "hint": deve conter "<b>Coment\xE1rio:</b> ", ter 1 a 2 frases (entre 180 e 300 caracteres vis\xEDveis medidos AP\xD3S "<b>Coment\xE1rio:</b> ", NUNCA passar de 320 caracteres vis\xEDveis), destacar termos-chave em <b>negrito</b> e trazer contraste diferencial/causal obrigat\xF3rio.
 9. N\xC3O inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
@@ -1347,16 +1373,17 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
         contents: { parts },
         config: {
           systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-          ...useGoogleSearch ? { tools: [{ googleSearch: {} }] } : {}
+          responseMimeType: "application/json",
+          maxOutputTokens: 16384
         }
       });
       const rawText = response.text || "{}";
       const notes = parseOrRecoverNotesJson(rawText);
-      const groundingSources = extractGroundingSources(response);
       return res.json({
         deck_key: deckKey,
         notes,
-        groundingSources
+        batchIndex,
+        totalBatches
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Erro ao gerar o Deck JSON Can\xF4nico com Gemini.";

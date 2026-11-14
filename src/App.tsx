@@ -88,6 +88,12 @@ export default function App() {
   const [isSyncingAnkiConnect, setIsSyncingAnkiConnect] = useState<boolean>(false);
   const [isQuickReviewOpen, setIsQuickReviewOpen] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<'info' | 'success' | 'error'>('info');
+
+  const showStatus = useCallback((message: string, tone: 'info' | 'success' | 'error' = 'info') => {
+    setStatusTone(tone);
+    setStatusMessage(message);
+  }, []);
 
   // Automatically resolves any card with `<img src="arquivo_local.png">` via Google/Web medical image search
   const autoResolveDeckMissingImages = useCallback(
@@ -390,18 +396,31 @@ export default function App() {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const data: ClinicalMapResponse = await response.json();
+      const data = (await response.json()) as ClinicalMapResponse & {
+        fallback?: boolean;
+        error?: string;
+      };
+      if (data?.fallback || data?.error) {
+        showStatus(
+          `⚠️ IA indisponível no Mapa Clínico (${data.error || 'erro desconhecido'}). Exibindo rascunho local para revisão.`,
+          'error'
+        );
+        return optimisticMap;
+      }
       if (data && Array.isArray(data.items) && data.items.length > 0) {
         setClinicalMap(data);
-        setStatusMessage(
-          `Mapa Clínico P1–P4 gerado para "${data.themeTitle}" (${data.items.length} conceitos).`
+        showStatus(
+          `Mapa Clínico P1–P4 gerado para "${data.themeTitle}" (${data.items.length} conceitos).`,
+          'success'
         );
         return data;
       }
       return optimisticMap;
-    } catch {
-      setStatusMessage(
-        `Mapa Clínico P1–P4 estruturado para "${optimisticMap.themeTitle}". Revise os itens abaixo.`
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'erro de rede';
+      showStatus(
+        `⚠️ Falha ao chamar /api/gemini/clinical-map (${msg}). Exibindo rascunho local para revisão.`,
+        'error'
       );
       return optimisticMap;
     } finally {
@@ -439,7 +458,7 @@ export default function App() {
     void autoResolveDeckMissingImages(curated);
   };
 
-  // Passo 2: Recriar Deck JSON Canônico
+  // Passo 2: Reconstrução Profunda em Lotes via Gemini (sem fallback silencioso!)
   const handleRecreateCanonicalDeck = async (mapOverride?: ClinicalMapResponse) => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
     if (!deckKey.trim()) {
@@ -452,62 +471,120 @@ export default function App() {
       setClinicalMap(activeMap);
     }
 
+    const sourceCards = extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards;
     setIsGeneratingDeck(true);
 
-    const baseCards =
-      extractedMeta.rawCards.length > 0
-        ? extractedMeta.rawCards
-        : buildGenericCanonicalCards(effectiveKey, activeMap);
-
-    const { cards: optimisticCurated, stats: optimisticStats } = curateAndRebalanceDeck(
-      baseCards,
-      extractedMeta,
-      effectiveKey,
-      activeMap
-    );
-
-    setCards(optimisticCurated);
-    setCurationStats(optimisticStats);
-    setStatusMessage(
-      `Deck Canônico "${effectiveKey}" curado (Matuschak & Nielsen): ${optimisticStats.originalCount} → ${optimisticStats.finalCount} cards (${optimisticStats.prunedCount} redundantes excluídos, +${optimisticStats.addedCount} novos P1–P4, ${optimisticStats.basicPct}% basic / ${optimisticStats.clozePct}% cloze).`
-    );
-    void autoResolveDeckMissingImages(optimisticCurated);
-
     try {
-      const response = await fetch('/api/gemini/generate-deck', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deckKey: effectiveKey,
-          pdfs,
-          clinicalMap: activeMap,
-          existingMetadata: extractedMeta,
-          useGoogleSearch,
-        }),
-      });
+      const allRebuiltNotes: CanonicalCard[] = [];
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      if (sourceCards.length > 0) {
+        const BATCH_SIZE = 15;
+        const totalBatches = Math.ceil(sourceCards.length / BATCH_SIZE);
+        let nextNewIdStart =
+          Math.max(
+            171000100,
+            ...(extractedMeta.existingIds || []),
+            ...sourceCards.map((c) => Number(c.id) || 0)
+          ) + 1;
+
+        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+          const batchCards = sourceCards.slice(
+            batchIndex * BATCH_SIZE,
+            (batchIndex + 1) * BATCH_SIZE
+          );
+
+          showStatus(
+            `🧠 Reconstruindo do zero com IA — lote ${batchIndex + 1}/${totalBatches} (${allRebuiltNotes.length} cards reconstruídos até agora)...`,
+            'info'
+          );
+
+          const response = await fetch('/api/gemini/generate-deck', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deckKey: effectiveKey,
+              pdfs,
+              clinicalMap: activeMap,
+              existingMetadata: extractedMeta,
+              batchCards,
+              batchIndex,
+              totalBatches,
+              nextNewIdStart,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} no lote ${batchIndex + 1}/${totalBatches}`);
+          }
+
+          const data = await response.json();
+          if (data?.fallback || data?.error) {
+            throw new Error(
+              data.error || `Falha da IA no lote ${batchIndex + 1}/${totalBatches}`
+            );
+          }
+
+          const batchNotes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
+          if (batchNotes.length === 0) {
+            throw new Error(`Lote ${batchIndex + 1}/${totalBatches} retornou 0 cards da IA.`);
+          }
+
+          allRebuiltNotes.push(...batchNotes);
+          const maxBatchId = Math.max(
+            nextNewIdStart - 1,
+            ...batchNotes.map((n) => Number(n.id) || 0)
+          );
+          nextNewIdStart = maxBatchId + 1;
+        }
+      } else {
+        showStatus('🧠 Gerando deck completo do zero com Gemini (Matuschak & Nielsen)...', 'info');
+        const response = await fetch('/api/gemini/generate-deck', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deckKey: effectiveKey,
+            pdfs,
+            clinicalMap: activeMap,
+            existingMetadata: extractedMeta,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data?.fallback || data?.error) {
+          throw new Error(data.error || 'Falha ao gerar deck com Gemini.');
+        }
+
+        const notes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
+        if (notes.length === 0) {
+          throw new Error('A IA retornou 0 cards.');
+        }
+        allRebuiltNotes.push(...notes);
       }
 
-      const data = await response.json();
-      const rawNotes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
-      if (rawNotes.length > 0) {
-        const { cards: finalCurated, stats: finalStats } = curateAndRebalanceDeck(
-          rawNotes,
-          extractedMeta,
-          effectiveKey,
-          activeMap
-        );
-        setCards(finalCurated);
-        setCurationStats(finalStats);
-        setStatusMessage(
-          `Deck Canônico "${effectiveKey}" recriado com ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS preservados, ${finalStats.prunedCount} excluídos, +${finalStats.addedCount} novos IDs, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`
-        );
-        void autoResolveDeckMissingImages(finalCurated);
-      }
-    } catch {
-      // Optimistic curated and rebalanced deck is already active
+      const { cards: finalCurated, stats: finalStats } = curateAndRebalanceDeck(
+        allRebuiltNotes,
+        extractedMeta,
+        effectiveKey,
+        activeMap,
+        { skipTemplateGapAdditions: true }
+      );
+      setCards(finalCurated);
+      setCurationStats(finalStats);
+      showStatus(
+        `✨ Reconstrução profunda por IA concluída! ${finalStats.originalCount} originais → ${finalStats.finalCount} cards reconstruídos (${finalStats.preservedIdsCount} IDs FSRS preservados, ${finalStats.prunedCount} podados, +${finalStats.addedCount} novos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
+        'success'
+      );
+      void autoResolveDeckMissingImages(finalCurated);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'erro desconhecido';
+      showStatus(
+        `❌ Reconstrução por IA falhou (${msg}). Seus cards atuais NÃO foram sobrescritos. Verifique a GEMINI_API_KEY ou use "Revisar, Podar & Auditar" apenas para ajustes locais.`,
+        'error'
+      );
     } finally {
       setIsGeneratingDeck(false);
     }
@@ -933,7 +1010,13 @@ export default function App() {
         {statusMessage && (
           <div
             role="status"
-            className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-slate-800/90 border border-slate-700 text-slate-100 text-xs"
+            className={`flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg border text-xs ${
+              statusTone === 'error'
+                ? 'bg-red-950/85 border-red-700 text-red-100'
+                : statusTone === 'success'
+                  ? 'bg-emerald-950/75 border-emerald-700 text-emerald-100'
+                  : 'bg-slate-800/90 border-slate-700 text-slate-100'
+            }`}
           >
             <span>{statusMessage}</span>
             <button

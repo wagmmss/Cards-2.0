@@ -1988,7 +1988,8 @@ export function curateAndRebalanceDeck(
   inputCards: CanonicalCard[],
   metadata: ExtractedDeckMetadata,
   deckKey: string,
-  clinicalMap?: ClinicalMapResponse | null
+  clinicalMap?: ClinicalMapResponse | null,
+  options?: { skipTemplateGapAdditions?: boolean }
 ): { cards: CanonicalCard[]; stats: DeckCurationStats } {
   const originalCount =
     metadata.rawCards && metadata.rawCards.length > 0
@@ -2062,7 +2063,7 @@ export function curateAndRebalanceDeck(
   let nextNewId = maxExistingId + 1;
   let addedCount = 0;
 
-  if (clinicalMap && Array.isArray(clinicalMap.items)) {
+  if (!options?.skipTemplateGapAdditions && clinicalMap && Array.isArray(clinicalMap.items)) {
     const checkedItems = clinicalMap.items.filter((item) => item.checked !== false);
     for (const item of checkedItems) {
       const itemTokens = tokenizeForSimilarity(`${item.subtopic} ${item.concept}`);
