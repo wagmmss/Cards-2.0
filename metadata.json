@@ -1,0 +1,6 @@
+{
+  "name": "Internato-First Card Architect (USP/Unicamp + FSRS)",
+  "description": "Arquitetura e lapidação de decks médicos FSRS para o Internato (USP/Unicamp) com Leis de Wozniak & Matuschak, leitura multimodal de PDFs e Google Search Grounding.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
