@@ -4,7 +4,6 @@ import {
   applyResolvedWebImageToCard,
   computeDeterministicDeckId,
   curateAndRebalanceDeck,
-  enforceStrictDeckRatio,
   extractDeckMediaManifest,
   extractDeckMetadata,
   extractUnresolvedLocalImages,
@@ -314,7 +313,7 @@ test('formatCanonicalDeckJson omits sources and rewrites external https:// or da
   assert.equal(parsedExport[1].question.includes('data:image'), false);
 });
 
-test('curateAndRebalanceDeck and enforceStrictDeckRatio guarantee 45%-55% Basic/Cloze even for 44%/56% or 90%/10% decks', () => {
+test('curateAndRebalanceDeck prunes duplicates, adds P1-P4 gaps, and preserves fluid basic/cloze formats without forcing 50/50', () => {
   const rawHundredCards: CanonicalCard[] = [];
   for (let i = 0; i < 100; i++) {
     const id = 1775500001 + i;
@@ -360,19 +359,10 @@ test('curateAndRebalanceDeck and enforceStrictDeckRatio guarantee 45%-55% Basic/
   assert.equal(stats.addedCount >= 1, true);
   assert.notEqual(curated.length, 100);
 
-  assert.equal(stats.basicPct >= 45 && stats.basicPct <= 55, true);
-  assert.equal(stats.clozePct >= 45 && stats.clozePct <= 55, true);
-
-  // Also test enforceStrictDeckRatio on a 44% basic / 56% cloze deck
-  const skewed44 = curated.map((c, idx) => ({
-    ...c,
-    type: (idx < Math.floor(curated.length * 0.43) ? 'basic' : 'cloze') as 'basic' | 'cloze',
-  }));
-  const fixedRatio = enforceStrictDeckRatio(skewed44);
-  const fixedBasicPct = Math.round(
-    (fixedRatio.cards.filter((c) => c.type === 'basic').length / fixedRatio.cards.length) * 100
-  );
-  assert.equal(fixedBasicPct >= 45 && fixedBasicPct <= 55, true);
+  // Fluid format: does NOT force-convert cards to fit an artificial 45%-55% quota
+  assert.equal(stats.convertedCount, 0);
+  assert.equal(stats.clozePct > 55, true);
+  assert.equal(stats.basicPct + stats.clozePct, 100);
 });
 
 test('computeDeterministicDeckId and resolveOrCreateNoteGuid preserve FSRS GUIDs across sessions', () => {

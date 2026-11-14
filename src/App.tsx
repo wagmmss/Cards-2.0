@@ -20,7 +20,6 @@ import {
   applyResolvedWebImageToCard,
   computeDeterministicDeckId,
   curateAndRebalanceDeck,
-  enforceStrictDeckRatio,
   extractDeckMediaManifest,
   extractDeckMetadata,
   extractUnresolvedLocalImages,
@@ -410,7 +409,7 @@ export default function App() {
     }
   };
 
-  // Curadoria local determinística: Poda de redundâncias + Adição P1-P4 + Rebalanceamento 50% basic / 50% cloze
+  // Curadoria local determinística: Poda de redundâncias + Adição P1-P4 preservando IDs FSRS e formato fluido
   const handleCurateAndRebalance = () => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
     const activeMap =
@@ -435,7 +434,7 @@ export default function App() {
     setCards(curated);
     setCurationStats(stats);
     setStatusMessage(
-      `Curadoria concluída: ${stats.originalCount} cards originais → ${stats.finalCount} cards finais (${stats.prunedCount} podados, +${stats.addedCount} novos P1–P4, ${stats.convertedCount} convertidos para ${stats.basicPct}% basic / ${stats.clozePct}% cloze).`
+      `Curadoria concluída: ${stats.originalCount} cards originais → ${stats.finalCount} cards finais (${stats.prunedCount} podados, +${stats.addedCount} novos P1–P4, ${stats.basicPct}% basic / ${stats.clozePct}% cloze).`
     );
     void autoResolveDeckMissingImages(curated);
   };
@@ -470,7 +469,7 @@ export default function App() {
     setCards(optimisticCurated);
     setCurationStats(optimisticStats);
     setStatusMessage(
-      `Deck Canônico "${effectiveKey}" revisado e rebalanceado: ${optimisticStats.originalCount} → ${optimisticStats.finalCount} cards (${optimisticStats.prunedCount} redundantes excluídos, +${optimisticStats.addedCount} novos P1–P4, proporção ${optimisticStats.basicPct}% basic / ${optimisticStats.clozePct}% cloze).`
+      `Deck Canônico "${effectiveKey}" curado (Matuschak & Nielsen): ${optimisticStats.originalCount} → ${optimisticStats.finalCount} cards (${optimisticStats.prunedCount} redundantes excluídos, +${optimisticStats.addedCount} novos P1–P4, ${optimisticStats.basicPct}% basic / ${optimisticStats.clozePct}% cloze).`
     );
     void autoResolveDeckMissingImages(optimisticCurated);
 
@@ -514,7 +513,7 @@ export default function App() {
     }
   };
 
-  // ⚡ Auto-Reparar Avisos com IA + Trava Estrita 45%–55% Basic/Cloze
+  // ⚡ Auto-Reparar Avisos com IA (Matuschak & Nielsen com formato fluido)
   const handleAutoRepairAllFlagged = async () => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
     const activeMap =
@@ -533,7 +532,7 @@ export default function App() {
     setCards(curatedAndRepaired);
     setCurationStats(stats);
     setStatusMessage(
-      `Deck reparado e rebalanceado (${stats.finalCount} cards · ${stats.basicPct}% basic / ${stats.clozePct}% cloze · ${stats.preservedIdsCount} IDs FSRS mantidos).`
+      `Deck curado (${stats.finalCount} cards · ${stats.basicPct}% basic / ${stats.clozePct}% cloze · ${stats.preservedIdsCount} IDs FSRS mantidos).`
     );
 
     const flaggedWithWarnings = curatedAndRepaired
@@ -576,15 +575,12 @@ export default function App() {
           }
         });
 
-        setCards((prev) => {
-          const merged = prev.map((c) =>
-            repairedById.has(c.id) ? repairedById.get(c.id)! : c
-          );
-          return enforceStrictDeckRatio(merged).cards;
-        });
+        setCards((prev) =>
+          prev.map((c) => (repairedById.has(c.id) ? repairedById.get(c.id)! : c))
+        );
       }
     } catch {
-      // Already repaired and rebalanced deterministically
+      // Already repaired deterministically
     } finally {
       setIsRepairing(false);
     }

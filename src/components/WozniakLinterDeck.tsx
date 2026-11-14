@@ -462,7 +462,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       >
         <div>
           <h2 className="text-sm font-bold text-slate-100 font-display">
-            3. Linter Wozniak / Matuschak & Deck JSON
+            3. Curadoria Matuschak &amp; Nielsen &amp; Deck JSON
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
             Nenhum card carregado no momento. Gere um baralho no Passo 2, importe um arquivo{' '}
@@ -491,8 +491,6 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     );
   }
 
-  const isProportionSkewed = cards.length >= 2 && (basicPct < 45 || basicPct > 55);
-
   const handleToggleSingleCardType = (card: CanonicalCard) => {
     if (card.type === 'cloze') {
       onUpdateCard(convertClozeToBasic(card));
@@ -510,17 +508,16 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       <div className="flex flex-col gap-3.5 pb-4 border-b border-slate-800">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-base font-bold text-slate-100 font-display">
-            3. Linter Wozniak / Matuschak & Deck Canônico
+            3. Curadoria Matuschak &amp; Nielsen &amp; Deck Canônico
           </h2>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 tabular-nums">
             <span>
               <strong className="text-slate-100">{cards.length}</strong> cards
             </span>
             <span aria-hidden="true">·</span>
-            <span className={isProportionSkewed ? 'text-amber-400 font-medium' : 'text-slate-400'}>
-              Proporção: <strong className="text-slate-100">{basicPct}%</strong> basic /{' '}
+            <span className="text-slate-400">
+              Formato fluido: <strong className="text-slate-100">{basicPct}%</strong> basic /{' '}
               <strong className="text-slate-100">{clozePct}%</strong> cloze
-              {isProportionSkewed ? ' (meta: 45%–55%)' : ''}
             </span>
             <span aria-hidden="true">·</span>
             <span
@@ -597,13 +594,13 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             type="button"
             onClick={onCurateAndRebalance}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              isProportionSkewed || !curationStats
+              !curationStats
                 ? 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'
                 : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'
             }`}
           >
             <ArrowLeftRight className="w-3.5 h-3.5" />
-            <span>⚖️ Revisar, Podar & Rebalancear 50/50</span>
+            <span>⚖️ Revisar, Podar &amp; Auditar</span>
           </button>
 
           <button

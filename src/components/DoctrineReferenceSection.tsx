@@ -16,11 +16,12 @@ export const DoctrineReferenceSection: React.FC = () => {
       >
         <div>
           <h2 className="text-sm font-bold text-slate-100 font-display">
-            Regras do Sistema (Tripla Ancoragem · Hierarquia P1–P4 · Linter criador_cards)
+            Diretrizes Cognitivas (Matuschak &amp; Nielsen · Internato P1–P4 · FSRS)
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Diretrizes sincronizadas com o motor desktop (<code className="font-mono text-slate-300">lint.py</code> e{' '}
-            <code className="font-mono text-slate-300">SYSTEM_PROMPT_CRIADOR.md</code>).
+            Engenharia de prompts baseada em{' '}
+            <code className="font-mono text-slate-300">andymatuschak.org/prompts</code> e{' '}
+            <code className="font-mono text-slate-300">augmentingcognition.com/ltm.html</code>.
           </p>
         </div>
         {expanded ? (
@@ -33,30 +34,29 @@ export const DoctrineReferenceSection: React.FC = () => {
       {expanded && (
         <div className="px-6 pb-6 pt-2 border-t border-slate-800 grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-slate-300 leading-relaxed">
           <div className="space-y-1.5">
-            <h3 className="font-semibold text-slate-100">1. Tripla Ancoragem & FSRS</h3>
+            <h3 className="font-semibold text-slate-100">1. Matuschak &amp; Nielsen (FSRS)</h3>
             <p>
-              Cards <code className="font-mono text-sky-400">basic</code> seguem{' '}
-              <strong className="text-slate-100">[Cenário + Idade/IG] + [Clínica/Sinais Vitais] + [Comando Temporal Fechado]</strong>{' '}
-              (máx. 50 palavras), preservando o <code className="font-mono text-slate-200">&quot;id&quot;</code> numérico FSRS nos conceitos sobreviventes.
+              Todo card segue as 5 propriedades (<strong className="text-slate-100">Focused, Precise, Consistent, Tractable, Effortful</strong>):
+              compreensão causal antes da decoreba, zero listas abertas ou perguntas Sim/Não, e preservação determinística dos{' '}
+              <code className="font-mono text-slate-200">&quot;id&quot;</code>/GUIDs para manter 100% do FSRS.
             </p>
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="font-semibold text-slate-100">2. Doutrina P1 → P4 & Filtro Negativo</h3>
+            <h3 className="font-semibold text-slate-100">2. Formato Fluido &amp; Doutrina P1–P4</h3>
             <p>
-              <strong className="text-slate-100">P1:</strong> Minuto zero, red flags, 1ª droga (dose/via), 2ª linha e antídotos.{' '}
-              <strong className="text-slate-100">P2:</strong> 1ª linha vs. padrão-ouro e <code className="font-mono text-sky-400">recognition</code> sem spoilers.{' '}
-              <strong className="text-slate-100">P3:</strong> Ambulatório, gestantes e profilaxias.{' '}
-              <strong className="text-slate-100">P4:</strong> Fisiopatologia aplicada (zero genética de bancada ou história).
+              Sem cota rígida 50/50: usa-se <code className="font-mono text-sky-400">basic</code> para condutas, diferenciais, imagens e perguntas{' '}
+              <em>&ldquo;por que / como&rdquo;</em>; <code className="font-mono text-sky-400">cloze</code> para critérios numéricos, doses críticas e limiares em âncora.
+              Filtro negativo estrito contra trivia.
             </p>
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="font-semibold text-slate-100">3. Mídias Offline & Anti-Spoiler Anki</h3>
+            <h3 className="font-semibold text-slate-100">3. Imagens Web &amp; Export .apkg Nativo</h3>
             <p>
-              50% <code className="font-mono text-sky-400">basic</code> e 50% <code className="font-mono text-sky-400">cloze</code>.
-              Imagens são embutidas localmente (<code className="font-mono text-slate-200">&lt;img src=&quot;arquivo.ext&quot;&gt;</code>)
-              e exportadas junto com <code className="font-mono text-slate-200">collection.media</code> no pacote <code className="font-mono text-slate-200">.zip</code> offline, com ferramenta de tarja anti-spoiler no preview.
+              Busca automática no Google/Web (Gemini Grounding, NLM Open-i e Wikimedia) para substituir mídias locais sem upload, galeria de troca rápida com{' '}
+              <code className="font-mono text-slate-200">Ctrl+V</code>, revisão estilo Anki e exportação direta em{' '}
+              <code className="font-mono text-slate-200">.apkg</code> offline.
             </p>
           </div>
         </div>

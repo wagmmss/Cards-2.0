@@ -1981,9 +1981,8 @@ export function convertBasicToCloze(
 
 /**
  * Audits, prunes redundant/overlapping cards (excluding their IDs), adds missing P1-P4 concepts
- * from the Clinical Map (creating new sequential IDs), repairs Wozniak/Matuschak violations,
- * and strictly rebalances the deck to 45%-55% basic / 45%-55% cloze (targeting 50%/50%)
- * while preserving original FSRS IDs on surviving cards.
+ * from the Clinical Map (creating new sequential IDs), and repairs Matuschak & Nielsen violations
+ * while preserving each card's natural format (basic/cloze, no rigid 50/50 quota) and original FSRS IDs.
  */
 export function curateAndRebalanceDeck(
   inputCards: CanonicalCard[],
@@ -2127,28 +2126,25 @@ export function curateAndRebalanceDeck(
     }
   }
 
-  // Step 4: Reconcile IDs and media by ID FIRST so any media restoration happens BEFORE 50/50 rebalancing
+  // Step 4: Reconcile IDs and media by ID preserving each card's natural format (basic vs cloze without rigid 50/50 quota)
   const reconciled = reconcileDeckIdsAndMedia(survivingCards, metadata, cleanDeckKey).map((c) =>
     surgicalRepairCardLocal(c)
   );
 
-  // Step 5: Strictly rebalance Basic vs. Cloze to 50% / 50% (guaranteed within 45%-55% for total >= 2)
-  const { cards: strictlyBalanced, convertedCount } = enforceStrictDeckRatio(reconciled);
-
-  const finalCount = strictlyBalanced.length;
-  const finalBasic = strictlyBalanced.filter((c) => c.type === 'basic').length;
-  const basicPct = finalCount > 0 ? Math.round((finalBasic / finalCount) * 100) : 50;
-  const clozePct = finalCount > 0 ? 100 - basicPct : 50;
-  const preservedIdsCount = strictlyBalanced.filter((c) => existingIdSet.has(Number(c.id))).length;
+  const finalCount = reconciled.length;
+  const finalBasic = reconciled.filter((c) => c.type === 'basic').length;
+  const basicPct = finalCount > 0 ? Math.round((finalBasic / finalCount) * 100) : 0;
+  const clozePct = finalCount > 0 ? 100 - basicPct : 0;
+  const preservedIdsCount = reconciled.filter((c) => existingIdSet.has(Number(c.id))).length;
 
   return {
-    cards: strictlyBalanced,
+    cards: reconciled,
     stats: {
       originalCount,
       finalCount,
       prunedCount,
       addedCount,
-      convertedCount,
+      convertedCount: 0,
       preservedIdsCount,
       basicPct,
       clozePct,

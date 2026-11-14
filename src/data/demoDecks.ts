@@ -64,7 +64,7 @@ export function buildGenericClinicalMap(
       priority: card.priority || priorities[idx % 4],
       subtopic,
       concept: card.question.replace(/<[^>]*>/g, '').slice(0, 140),
-      guidelineNote: 'Auditado do deck original para lapidação Wozniak/Matuschak e rebalanceamento 50/50',
+      guidelineNote: 'Auditado do deck original segundo Matuschak & Nielsen (formato fluido sem cota fixa)',
       targetCardType: (idx % 2 === 0 ? 'basic' : 'cloze') as 'basic' | 'cloze',
       checked: true,
     };
@@ -178,7 +178,7 @@ export function buildGenericClinicalMap(
     deckKey: safeKey,
     guidelineUpdates: [
       `Diretrizes atualizadas aplicadas a ${title}: priorizar pontos de corte diagnósticos exatos, estratificação de gravidade e fármacos de 1ª escolha.`,
-      'Liberdade total de curadoria: poda de cards redundantes (excluindo IDs fracos), adição de novos IDs para lacunas P1–P4 e rebalanceamento rigoroso 50% basic / 50% cloze.',
+      'Liberdade total de curadoria: poda de cards redundantes (excluindo IDs fracos), adição de novos IDs para lacunas P1–P4 e escolha fluida basic/cloze conforme a tarefa cognitiva.',
     ],
     groundingSources: [],
     items: fromExisting.length > 0 ? [...fromExisting, ...defaultItems] : defaultItems,

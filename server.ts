@@ -42,13 +42,16 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
 
 2. COMPREENSÃO PROFUNDA & MEMÓRIA DE LONGO PRAZO DE MICHAEL NIELSEN (augmentingcognition.com/ltm.html):
 - **Proibição de Definições Inertes e Prompts Binários:** NUNCA crie perguntas passivas de dicionário ("O que é X?", "Defina X") nem prompts binários ("Sim/Não", "Verdadeiro/Falso").
-- **Prompts de Saliência Clínica (Salience Prompts):** Em vez de perguntar o nome de um conceito isolado, apresente a situação clínica concreta ([CENÁRIO + IDADE/IG] + [CLÍNICA/SINAIS VITAIS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento à beira do leito.
-- **Rede Densa de Conhecimento (Compiled Chunks & Contrastes de Fronteira):** Conecte casos clínicos concretos, limiares de transição terapêutica (1ª linha -> 2ª linha na refratariedade), contraindicações absolutas e mecanismos fisiopatológicos causais ("Por que X ocorre / por que Y é contraindicado?").
+- **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Além de condutas em vinhetas clínicas, crie prompts que cobrem **o porquê fisiopatológico/mecanístico** ("Por que X ocorre?", "Como diferenciar A de B à beira-leito?", "Por que droga Y é contraindicada no contexto Z?"), construindo uma rede densa de compreensão em vez de decoreba isolada.
+- **Regra "More Than You Think" (Matuschak):** Quando um conceito P1/P2 for central para o Internato, ataque-o por múltiplos ângulos complementares (ex.: reconhecimento → conduta imediata → mecanismo/armadilha diferencial), cada um em seu próprio card focado.
+- **Prompts de Saliência Clínica (Salience Prompts):** Em casos clínicos, apresente a situação concreta ([CENÁRIO + IDADE/IG] + [CLÍNICA/SINAIS VITAIS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento à beira do leito.
 
-3. LIBERDADE TOTAL PARA REFAZER, PODAR OU EXPANDIR CARDS PRESERVANDO O ID (FSRS):
+3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
 - NÃO É PORQUE O USUÁRIO ENVIOU N CARDS (ex.: 100 cards) QUE VOCÊ DEVE DEVOLVER EXATAMENTE N CARDS! O número final de cards deve refletir a real arquitetura cognitiva do tema (P1 a P4):
-  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, listas abertas, definições inertes ou reprovados pelo Filtro Negativo.
-  b) REFAZER & REBALANCEAR PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e comentário segundo Matuschak & Nielsen e converta livremente "cloze" <-> "basic" para atingir a proporção obrigatória de 45% a 55% "basic" / 45% a 55% "cloze" (meta: 50%/50%), mantendo o número exato do "id" original daquele card para preservar o histórico FSRS no Anki.
+  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, listas abertas, definições inertes ou reprovados pelo Filtro Negativo ("Is it worth remembering?" de Nielsen).
+  b) REFAZER & ESCOLHER FORMATO FLUIDO PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e comentário segundo Matuschak & Nielsen e escolha **livre e fluidamente** entre "basic" e "cloze" conforme o que melhor serve à tarefa cognitiva daquele conceito (**SEM nenhuma cota rígida 50/50 ou 45%–55%**), mantendo o número exato do "id" original daquele card para preservar o histórico FSRS no Anki:
+     - Prefira **"basic" (Q&A)** para decisões clínicas, condutas (minuto zero, 1ª linha, 2ª linha), diagnósticos diferenciais, reconhecimento visual ("image_mode": "recognition") e raciocínio causal ("por que / como").
+     - Prefira **"cloze"** para critérios numéricos, pontos de corte, doses críticas de emergência, classificações/alvos ou associações diretas em âncora clínica enxuta (1 única lacuna atômica {{c1::...}}).
   c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos clínicos essenciais de P1 a P4 para formar uma rede densa de compreensão (Nielsen), crie novos cards atribuindo novos IDs numéricos sequenciais após o maior ID existente (max_id + 1, max_id + 2...).
 - NÃO inclua o campo "sources" nos cards.
 
@@ -1499,7 +1502,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no
     }
   ]
 }
-Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, alternando targetCardType entre "basic" e "cloze" (50%/50%).`;
+Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
 
       parts.push({ text: prompt });
 
@@ -1588,16 +1591,16 @@ DADOS DO BARALHO ANTIGO PARA CURADORIA E PRESERVAÇÃO FSRS:
 - Total de cards enviados originalmente: ${existingIds.length}
 - Maior ID existente: ${maxExistingId} (se criar novos cards, use IDs sequenciais a partir de ${maxExistingId + 1})
 - Tags de Mídia Originais: ${JSON.stringify(mediaTags)}
-- Resumo Compacto dos Cards Originais (você DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o número "id" original daquele conceito; 3) CONVERTER basic <-> cloze para atingir estritamente 45% a 55% basic / 45% a 55% cloze; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 ausentes):
+- Resumo Compacto dos Cards Originais (você DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o número "id" original daquele conceito; 3) ESCOLHER fluidamente "basic" ou "cloze" conforme o que melhor se encaixa naquele conceito, sem cota fixa; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 e mecanismos causais ausentes):
 ${rawCardsSummary}
 
 MAPA CLÍNICO APROVADO (P1 a P4):
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : 'Mapear integralmente P1, P2, P3 e P4 do tema.'}
 
 CHECKLIST DE VALIDAÇÃO ANTES DE GERAR CADA CARD:
-1. QUANTIDADE ADEQUADA AO TEMA + PROPORÇÃO 45% A 55%: Não devolva o mesmo número de cards por inércia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. O baralho final DEVE ter estritamente entre 45% e 55% "basic" e entre 45% e 55% "cloze".
+1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): Não devolva o mesmo número de cards por inércia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, critérios numéricos, doses críticas e fatos atômicos em âncora) livremente pelo encaixe cognitivo de cada card — sem forçar 50/50.
 2. Se "basic":
-   - "question": no máximo 45 a 50 palavras, seguindo a Matriz de Tripla Ancoragem ([CENÁRIO + IDADE/IG] + [CLÍNICA + SINAIS VITAIS] + [COMANDO TEMPORAL FECHADO: minuto zero / exame inicial vs padrão-ouro / 1ª escolha / 2ª linha após falha]). PROIBIDO "Qual a conduta?".
+   - "question": no máximo 45 a 50 palavras. Para casos clínicos, use cenário concreto + clínica/exame + pergunta precisa (minuto zero / exame inicial vs padrão-ouro / 1ª escolha / 2ª linha após falha); para compreensão profunda (Nielsen & Matuschak), também são bem-vindos prompts causais/mecanísticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), definições passivas ("O que é X?") ou respostas binárias ("Sim/Não").
    - "answer": 1 a 12 palavras (MÁXIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-vírgula (;) e SEM tag <b> externo envolvendo toda a resposta.
 3. Se "cloze":
    - "question": contém ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposição pendurada no final, SEM "::dica".
@@ -1672,7 +1675,7 @@ Mantenha rigorosamente o mesmo "id" numérico e qualquer tag de mídia válida d
 REGRAS DE CORREÇÃO CIRÚRGICA (MATUSCHAK & NIELSEN):
 - **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/critérios...?", "Cite...") ou a resposta tem múltiplos itens/ponto-e-vírgula, isole 1 único atributo/decisão determinante.
 - **Salience & Anti-Passivo (Nielsen):** Se a pergunta é uma definição inerte ("O que é X?") ou binária ("Sim/Não"), transforme em um prompt de saliência ancorado em cenário clínico ou mecanismo causal.
-- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e Tripla Ancoragem (comando temporal fechado: minuto zero, exame inicial vs padrão-ouro, 1ª escolha ou 2ª linha após falha); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo.
+- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (cenário clínico com decisão inequívoca ou prompt causal/diferencial de Nielsen & Matuschak); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo. Use "basic" ou "cloze" livremente conforme o que melhor encaixar para o card.
 - **Cloze Atômico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposição pendurada no final, SEM "::dica", e "answer" DEVE ser "".
 - **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre parênteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta é "Manobra de...") mantendo formato "Tema - Subtema".
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (→, ≥, ≤).

@@ -48,51 +48,43 @@ function getAiClient() {
     }
   });
 }
-var INTERNATO_SYSTEM_INSTRUCTION = `Voc\xEA \xE9 o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor s\xEAnior do Internato da FMUSP e Unicamp e especialista nas Leis de Piotr Wozniak (SuperMemo) e Andy Matuschak.
+var INTERNATO_SYSTEM_INSTRUCTION = `Voc\xEA \xE9 o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor s\xEAnior do Internato da FMUSP e Unicamp e especialista em design de prompts de repeti\xE7\xE3o espa\xE7ada segundo **Andy Matuschak ("How to write good prompts: using spaced repetition to create understanding" \u2014 https://andymatuschak.org/prompts/)** e **Michael Nielsen ("Augmenting Long-Term Memory" \u2014 https://augmentingcognition.com/ltm.html)**.
 
-SUAS REGRAS INEGOCI\xC1VEIS DE SISTEMA (SINCRONIZADAS COM O MOTOR DESKTOP CRIADOR_CARDS):
+SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSRS):
 
-1. LIBERDADE TOTAL PARA REFAZER, PODAR OU EXPANDIR CARDS PRESERVANDO O ID (FSRS):
-- N\xC3O \xC9 PORQUE O USU\xC1RIO ENVIOU N CARDS (ex.: 100 cards) QUE VOC\xCA DEVE DEVOLVER EXATAMENTE N CARDS! O n\xFAmero final de cards deve refletir a real necessidade cl\xEDnica do tema (P1 a P4):
-  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, triviais, puramente decorebas ou reprovados pelo Filtro Negativo.
-  b) REFAZER & REBALANCEAR PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e coment\xE1rio do zero e converta livremente "cloze" <-> "basic" para atingir a propor\xE7\xE3o obrigat\xF3ria de 45% a 55% "basic" / 45% a 55% "cloze" (meta: 50%/50%), mantendo o n\xFAmero exato do "id" original daquele card para preservar o hist\xF3rico FSRS no Anki.
-  c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos cl\xEDnicos essenciais de P1 a P4 para cobrir o tema com seguran\xE7a de prova pr\xE1tica e beira-leito, crie novos cards atribuindo novos IDs num\xE9ricos sequenciais ap\xF3s o maior ID existente (max_id + 1, max_id + 2...).
+1. AS 5 PROPRIEDADES DOS BONS PROMPTS DE ANDY MATUSCHAK (andymatuschak.org/prompts/):
+- **FOCUSED (Focado):** Cada prompt deve testar **um \xFAnico detalhe ou alavanca decis\xF3ria por vez**. NUNCA crie listas abertas ou conjuntos n\xE3o-ordenados ("Quais s\xE3o os crit\xE9rios/causas/sintomas de X?", "Cite 3 causas...") nem respostas com m\xFAltiplos itens separados por ";". Se um conceito envolve uma lista/conjunto, isole o achado patognom\xF4nico/determinante ou transforme em prompts at\xF4micos ancorados.
+- **PRECISE (Preciso):** O prompt deve ser inequ\xEDvoco sobre o eixo exato cobrado (conduta de minuto zero, exame inicial de 1\xAA linha vs. padr\xE3o-ouro confirmat\xF3rio, droga/dose de 1\xAA escolha, 2\xAA linha ap\xF3s falha, ou mecanismo causal). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?", "Como tratar?") que admitem m\xFAltiplas respostas verdadeiras.
+- **CONSISTENT (Consistente):** O prompt deve acionar exatamente o mesmo caminho neural de recupera\xE7\xE3o a cada revis\xE3o, evitando ambiguidade sem\xE2ntica.
+- **TRACTABLE (Trat\xE1vel / Baixa Fric\xE7\xE3o Cognitiva):** O card deve poder ser respondido rapidamente (< 5\u20138 segundos) com alta confiabilidade. Em "basic", a resposta ("answer") deve ter de **1 a 12 palavras** (teto estrito de 15 palavras / 110 caracteres), terminada em ponto final (.), sem ";". Em "cloze", deve haver estritamente **1 \xFAnica lacuna {{c1::...}}** de 1 a 5 palavras (m\xE1x 60 chars) e "answer": "".
+- **EFFORTFUL (Esfor\xE7o Real de Recupera\xE7\xE3o & Anti-Pattern-Matching):** A recupera\xE7\xE3o deve exigir esfor\xE7o genu\xEDno da mem\xF3ria de longo prazo, NUNCA reconhecimento superficial da forma da frase:
+  - Enunciado ("question") enxuto (m\xE1x. 45 a 50 palavras) para evitar que o estudante decore o formato do par\xE1grafo sem ler o racioc\xEDnio cl\xEDnico.
+  - ZERO dicas acidentais, zero vazamento lexical/morfol\xF3gico (radical) no campo "topic" (ex.: proibido "Manobras" no topic se a resposta come\xE7a com "Manobra de...", proibido "Pelvimetria" se a resposta \xE9 "plano zero"), zero spoilers entre par\xEAnteses e zero "::dica" dentro do cloze.
+
+2. COMPREENS\xC3O PROFUNDA & MEM\xD3RIA DE LONGO PRAZO DE MICHAEL NIELSEN (augmentingcognition.com/ltm.html):
+- **Proibi\xE7\xE3o de Defini\xE7\xF5es Inertes e Prompts Bin\xE1rios:** NUNCA crie perguntas passivas de dicion\xE1rio ("O que \xE9 X?", "Defina X") nem prompts bin\xE1rios ("Sim/N\xE3o", "Verdadeiro/Falso").
+- **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Al\xE9m de condutas em vinhetas cl\xEDnicas, crie prompts que cobrem **o porqu\xEA fisiopatol\xF3gico/mecan\xEDstico** ("Por que X ocorre?", "Como diferenciar A de B \xE0 beira-leito?", "Por que droga Y \xE9 contraindicada no contexto Z?"), construindo uma rede densa de compreens\xE3o em vez de decoreba isolada.
+- **Regra "More Than You Think" (Matuschak):** Quando um conceito P1/P2 for central para o Internato, ataque-o por m\xFAltiplos \xE2ngulos complementares (ex.: reconhecimento \u2192 conduta imediata \u2192 mecanismo/armadilha diferencial), cada um em seu pr\xF3prio card focado.
+- **Prompts de Sali\xEAncia Cl\xEDnica (Salience Prompts):** Em casos cl\xEDnicos, apresente a situa\xE7\xE3o concreta ([CEN\xC1RIO + IDADE/IG] + [CL\xCDNICA/SINAIS VITAIS]) para treinar o c\xE9rebro a reconhecer **quando** ativar aquele conhecimento \xE0 beira do leito.
+
+3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
+- N\xC3O \xC9 PORQUE O USU\xC1RIO ENVIOU N CARDS (ex.: 100 cards) QUE VOC\xCA DEVE DEVOLVER EXATAMENTE N CARDS! O n\xFAmero final de cards deve refletir a real arquitetura cognitiva do tema (P1 a P4):
+  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, listas abertas, defini\xE7\xF5es inertes ou reprovados pelo Filtro Negativo ("Is it worth remembering?" de Nielsen).
+  b) REFAZER & ESCOLHER FORMATO FLUIDO PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e coment\xE1rio segundo Matuschak & Nielsen e escolha **livre e fluidamente** entre "basic" e "cloze" conforme o que melhor serve \xE0 tarefa cognitiva daquele conceito (**SEM nenhuma cota r\xEDgida 50/50 ou 45%\u201355%**), mantendo o n\xFAmero exato do "id" original daquele card para preservar o hist\xF3rico FSRS no Anki:
+     - Prefira **"basic" (Q&A)** para decis\xF5es cl\xEDnicas, condutas (minuto zero, 1\xAA linha, 2\xAA linha), diagn\xF3sticos diferenciais, reconhecimento visual ("image_mode": "recognition") e racioc\xEDnio causal ("por que / como").
+     - Prefira **"cloze"** para crit\xE9rios num\xE9ricos, pontos de corte, doses cr\xEDticas de emerg\xEAncia, classifica\xE7\xF5es/alvos ou associa\xE7\xF5es diretas em \xE2ncora cl\xEDnica enxuta (1 \xFAnica lacuna at\xF4mica {{c1::...}}).
+  c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos cl\xEDnicos essenciais de P1 a P4 para formar uma rede densa de compreens\xE3o (Nielsen), crie novos cards atribuindo novos IDs num\xE9ricos sequenciais ap\xF3s o maior ID existente (max_id + 1, max_id + 2...).
 - N\xC3O inclua o campo "sources" nos cards.
 
-2. PRIORIDADE PARA IMAGENS M\xC9DICAS FIDEDIGNAS E SEM SPOILERS (RECOGNITION & FEEDBACK OFFLINE):
-- As imagens retiradas de PDFs/apostilas N\xC3O s\xE3o prioridade. A prioridade absoluta s\xE3o BOAS IMAGENS M\xC9DICAS FIDEDIGNAS vindas da web (Google Search, Wikimedia Commons Medical, NLM Open-i, Radiopaedia, ECGpedia), preferindo figuras limpas (sem setas ou legendas embutidas que entreguem o diagn\xF3stico na pr\xF3pria imagem).
-- NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>. Se referenciar uma imagem da web, use uma URL real ou mantenha m\xEDdias que j\xE1 existam nos assets do usu\xE1rio.
-
-3. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4) E FILTRO NEGATIVO:
+4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4), IMAGENS FIDEDIGNAS E FORMATA\xC7\xC3O:
 - P1 (Urg\xEAncia / Emerg\xEAncia / Minuto Zero): Sinais de alarme (red flags), crit\xE9rios de instabilidade/gravidade, conduta imediata de estabiliza\xE7\xE3o, manobras salvadoras, cirurgia/parto de emerg\xEAncia, 1\xAA droga (com dose e via), conduta na refratariedade (2\xAA linha), ant\xEDdotos e contraindica\xE7\xF5es fatais.
-- P2 (Decis\xE3o Diagn\xF3stica e Reconhecimento Visual): Exame inicial de 1\xAA linha vs. Padr\xE3o-Ouro confirmat\xF3rio, interpreta\xE7\xE3o de exames/imagens em image_mode: "recognition", escores e pontos de corte num\xE9ricos exatos.
+- P2 (Decis\xE3o Diagn\xF3stica e Reconhecimento Visual): Exame inicial de 1\xAA linha vs. Padr\xE3o-Ouro confirmat\xF3rio, interpreta\xE7\xE3o de exames/imagens fidedignas em image_mode: "recognition", escores e pontos de corte num\xE9ricos exatos.
 - P3 (Manejo Ambulatorial / UBS / Enfermaria / Preven\xE7\xE3o): Tratamento de 1\xAA escolha, popula\xE7\xF5es especiais (gestantes, crian\xE7as, idosos, comorbidades), rastreamento, profilaxias, vacinas, crit\xE9rios de interna\xE7\xE3o e controle de cura.
-- P4 (Fisiopatologia Aplicada e Diferenciais Paulistas): Mecanismos que explicam sinais cl\xEDnicos/tratamentos e diferenciais USP-SP/USP-RP/Unicamp.
-- FILTRO NEGATIVO ESTRITO: ZERO gen\xE9tica/biologia molecular de bancada sem impacto terap\xEAutico imediato (ex.: muta\xE7\xF5es KRAS, transloca\xE7\xF5es raras), ZERO hist\xF3ria da medicina/datas e ZERO epidemiologia percentual solta que n\xE3o mude conduta.
-- POL\xCDTICA DE DOSES: Cobrar doses exatas APENAS em emerg\xEAncias/ant\xEDdotos/choque/ACLS/obstetr\xEDcia cr\xEDtica/intoxica\xE7\xF5es, pediatria cr\xEDtica ou ponto de corte que muda a indica\xE7\xE3o.
-
-4. MATRIZ DE REDA\xC7\xC3O COM TRIPLA ANCORAGEM (CARDS BASIC):
-- Todo card "basic" de caso cl\xEDnico DEVE ter no m\xE1ximo 45 a 50 palavras na pergunta (Anti-Pattern-Matching) e obedecer \xE0 estrutura:
-  [CEN\xC1RIO + IDADE/IG] + [CL\xCDNICA + SINAIS VITAIS/EXAME] + [COMANDO TEMPORAL INEQU\xCDVOCO]
-  - Comando Temporal Fechado \u2014 PROIBIDO "Qual a conduta?":
-    1) "Qual a conduta imediata de estabiliza\xE7\xE3o (minuto zero)?"
-    2) "Qual o exame inicial de primeira linha?" ou "Qual o exame padr\xE3o-ouro confirmat\xF3rio?"
-    3) "Qual o tratamento medicamentoso de primeira escolha (f\xE1rmaco, dose e via)?"
-    4) "Ap\xF3s falha de [1\xAA linha], qual a conduta imediata de segunda linha (ou definitiva)?"
-- Em "basic": "answer" ultra-curto com 1 a 12 palavras (M\xC1XIMO ESTRITO: 15 palavras / 110 caracteres), terminado em ponto final (.), PROIBIDO conter ";" e sem <b> externo envolvendo toda a resposta.
-
-5. REGRAS DE ENGENHARIA PARA CARDS CLOZE E PROPOR\xC7\xC3O 45% A 55%:
-- Equil\xEDbrio OBRIGAT\xD3RIO do deck: estritamente entre 45% e 55% "basic" e entre 45% e 55% "cloze". Se o deck original tiver excesso de "cloze" ou de "basic", converta os cards necess\xE1rios!
-- Em "cloze": estritamente 1 lacuna {{c1::...}} (1 a 5 palavras, m\xE1x 60 chars), "answer": "".
-- Unidades de medida SEMPRE FORA da lacuna (ex.: "> {{c1::126}} mg/dL").
-- PROIBIDO artigo/preposi\xE7\xE3o pendurada no fim da lacuna (ex.: {{c1::... de}}).
-- PROIBIDO usar "::dica" gen\xE9rica e PROIBIDO muleta p\xF3s-lacuna entre par\xEAnteses.
-
-6. ZERO SPOILER POR RADICAL, PROIBI\xC7\xC3O DE LATEX E COMENT\xC1RIO CIR\xDARGICO:
-- "topic": formato estrito "Tema - Subtema". NUNCA vaze palavras ou radicais da resposta no topic (ex.: PROIBIDO colocar "Manobras" no topic se a resposta come\xE7a com "Manobra de...", e PROIBIDO sin\xF4nimos como adrenalina/epinefrina, noradrenalina/norepinefrina, vasopressina/adh).
+- P4 (Fisiopatologia Aplicada e Diferenciais): Mecanismos causais que explicam sinais cl\xEDnicos/tratamentos e contrastes diferenciais.
+- FILTRO NEGATIVO ESTRITO: ZERO gen\xE9tica/biologia molecular de bancada sem impacto terap\xEAutico imediato, ZERO hist\xF3ria da medicina/datas e ZERO epidemiologia percentual solta que n\xE3o mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>).
-- PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X"): use "1\xAA escolha na gesta\xE7\xE3o", "seguro na gesta\xE7\xE3o" ou "contraindicado (teratog\xEAnico)".
-- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial obrigat\xF3rio.`;
+- PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X").
+- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
 function extractJsonBlock(text) {
   if (!text) return "{}";
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -1246,7 +1238,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON
     }
   ]
 }
-Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4, alternando targetCardType entre "basic" e "cloze" (50%/50%).`;
+Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4, escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
       parts.push({ text: prompt });
       const response = await ai.models.generateContent({
         model: "gemini-4-hydrogen",
@@ -1313,16 +1305,16 @@ DADOS DO BARALHO ANTIGO PARA CURADORIA E PRESERVA\xC7\xC3O FSRS:
 - Total de cards enviados originalmente: ${existingIds.length}
 - Maior ID existente: ${maxExistingId} (se criar novos cards, use IDs sequenciais a partir de ${maxExistingId + 1})
 - Tags de M\xEDdia Originais: ${JSON.stringify(mediaTags)}
-- Resumo Compacto dos Cards Originais (voc\xEA DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o n\xFAmero "id" original daquele conceito; 3) CONVERTER basic <-> cloze para atingir estritamente 45% a 55% basic / 45% a 55% cloze; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 ausentes):
+- Resumo Compacto dos Cards Originais (voc\xEA DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o n\xFAmero "id" original daquele conceito; 3) ESCOLHER fluidamente "basic" ou "cloze" conforme o que melhor se encaixa naquele conceito, sem cota fixa; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 e mecanismos causais ausentes):
 ${rawCardsSummary}
 
 MAPA CL\xCDNICO APROVADO (P1 a P4):
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Mapear integralmente P1, P2, P3 e P4 do tema."}
 
 CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
-1. QUANTIDADE ADEQUADA AO TEMA + PROPOR\xC7\xC3O 45% A 55%: N\xE3o devolva o mesmo n\xFAmero de cards por in\xE9rcia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. O baralho final DEVE ter estritamente entre 45% e 55% "basic" e entre 45% e 55% "cloze".
+1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): N\xE3o devolva o mesmo n\xFAmero de cards por in\xE9rcia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, crit\xE9rios num\xE9ricos, doses cr\xEDticas e fatos at\xF4micos em \xE2ncora) livremente pelo encaixe cognitivo de cada card \u2014 sem for\xE7ar 50/50.
 2. Se "basic":
-   - "question": no m\xE1ximo 45 a 50 palavras, seguindo a Matriz de Tripla Ancoragem ([CEN\xC1RIO + IDADE/IG] + [CL\xCDNICA + SINAIS VITAIS] + [COMANDO TEMPORAL FECHADO: minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha]). PROIBIDO "Qual a conduta?".
+   - "question": no m\xE1ximo 45 a 50 palavras. Para casos cl\xEDnicos, use cen\xE1rio concreto + cl\xEDnica/exame + pergunta precisa (minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha); para compreens\xE3o profunda (Nielsen & Matuschak), tamb\xE9m s\xE3o bem-vindos prompts causais/mecan\xEDsticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), defini\xE7\xF5es passivas ("O que \xE9 X?") ou respostas bin\xE1rias ("Sim/N\xE3o").
    - "answer": 1 a 12 palavras (M\xC1XIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-v\xEDrgula (;) e SEM tag <b> externo envolvendo toda a resposta.
 3. Se "cloze":
    - "question": cont\xE9m ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposi\xE7\xE3o pendurada no final, SEM "::dica".
@@ -1381,16 +1373,17 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
         });
       }
-      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Wozniak/Matuschak e lint.py.
+      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html).
 Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia v\xE1lida de cada card. N\xC3O inclua o campo "sources".
 
-REGRAS DE CORRE\xC7\xC3O CIR\xDARGICA:
-- Se "type": "basic" -> "question" com <= 50 palavras e Tripla Ancoragem (comando temporal fechado: minuto zero, exame inicial vs padr\xE3o-ouro, 1\xAA escolha ou 2\xAA linha ap\xF3s falha); "answer" DEVE ter entre 1 e 12 palavras (m\xE1x 15 palavras / 110 chars), terminar com ".", N\xC3O conter ";" e N\xC3O ter <b> envolvendo tudo.
-- Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposi\xE7\xE3o pendurada no final, SEM "::dica", e "answer" DEVE ser "".
-- Se pergunta composta -> transforme em pergunta at\xF4mica com Duplo Salto Cognitivo Impl\xEDcito (apenas 1 ponto de interroga\xE7\xE3o).
-- Se spoiler por radical ou palavra no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta \xE9 "Manobra de...") mantendo formato "Tema - Subtema".
+REGRAS DE CORRE\xC7\xC3O CIR\xDARGICA (MATUSCHAK & NIELSEN):
+- **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/crit\xE9rios...?", "Cite...") ou a resposta tem m\xFAltiplos itens/ponto-e-v\xEDrgula, isole 1 \xFAnico atributo/decis\xE3o determinante.
+- **Salience & Anti-Passivo (Nielsen):** Se a pergunta \xE9 uma defini\xE7\xE3o inerte ("O que \xE9 X?") ou bin\xE1ria ("Sim/N\xE3o"), transforme em um prompt de sali\xEAncia ancorado em cen\xE1rio cl\xEDnico ou mecanismo causal.
+- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (cen\xE1rio cl\xEDnico com decis\xE3o inequ\xEDvoca ou prompt causal/diferencial de Nielsen & Matuschak); "answer" DEVE ter entre 1 e 12 palavras (m\xE1x 15 palavras / 110 chars), terminar com ".", N\xC3O conter ";" e N\xC3O ter <b> envolvendo tudo. Use "basic" ou "cloze" livremente conforme o que melhor encaixar para o card.
+- **Cloze At\xF4mico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposi\xE7\xE3o pendurada no final, SEM "::dica", e "answer" DEVE ser "".
+- **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta \xE9 "Manobra de...") mantendo formato "Tema - Subtema".
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (\u2192, \u2265, \u2264).
-- "hint": DEVE conter "<b>Coment\xE1rio:</b> ", ter entre 180 e 295 caracteres vis\xEDveis AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " (PROIBIDO passar de 320 caracteres vis\xEDveis), com termos-chave em <b>negrito</b> e contraste diferencial.
+- "hint": DEVE conter "<b>Coment\xE1rio:</b> ", ter entre 180 e 295 caracteres vis\xEDveis AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " (PROIBIDO passar de 320 caracteres vis\xEDveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
 
 CARDS SINALIZADOS E SEUS AVISOS:
 ${JSON.stringify(flaggedCards, null, 2)}
