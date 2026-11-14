@@ -110,7 +110,7 @@ export function stripHtml(htmlText: string): string {
   if (!htmlText) return '';
   const withoutAudio = htmlText.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, ' ');
   return withoutAudio
-    .replace(/<[^>]*>/g, ' ')
+    .replace(/<\/?[a-zA-Z!][^>]*>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
@@ -1451,6 +1451,7 @@ export function reconcileDeckIdsAndMedia(
 
     if (originalCard) {
       const hasNewImage = /<img\b/i.test(question) || /<img\b/i.test(hint);
+      const origQMedia = new Set(extractMediaFromString(originalCard.question || ''));
       const origMedia = extractMediaFromString(
         `${originalCard.question} ${originalCard.answer} ${originalCard.hint}`
       );
@@ -1462,7 +1463,14 @@ export function reconcileDeckIdsAndMedia(
               hint = `${hint} ${mediaTag}`.trim();
             }
           } else if (!hasNewImage) {
-            question = `${question} ${mediaTag}`.trim();
+            if (card.image_mode === 'recognition' || origQMedia.has(mediaTag)) {
+              question = `${question} ${mediaTag}`.trim();
+            } else if (hint) {
+              const sep = /^<i>/i.test(hint.trim()) ? '<br>' : '<br><br>';
+              hint = `${mediaTag}${sep}${hint.trim()}`;
+            } else {
+              hint = mediaTag;
+            }
           }
         }
       }
@@ -1550,6 +1558,223 @@ function replaceLatexWithUnicode(input: string): string {
   }
   out = out.replace(/\$([^$]+)\$/g, '$1');
   return out;
+}
+
+/**
+ * Separates leading <img> tags and optional <i>legend</i> from the textual Comentário body
+ * so images/legends never receive a duplicate "<b>Comentário:</b>" prefix or inflate comment length.
+ */
+function splitLeadingMediaAndLegend(
+  rawHint: string,
+  topic: string,
+  imageMode?: 'recognition' | 'feedback'
+): { legendPrefix: string; bodyHint: string } {
+  let working = rawHint.trim();
+
+  // Strip spurious leading "<b>Comentário:</b>" emitted before leading <img> or when another Comentário: follows
+  if (/^<b>\s*Coment[áa]rio:\s*<\/b>\s*(?:<img\b|<i>)/i.test(working)) {
+    const afterSpurious = working.replace(/^<b>\s*Coment[áa]rio:\s*<\/b>\s*/i, '').trim();
+    if (/^<img\b/i.test(afterSpurious) || /Coment[áa]rio:/i.test(afterSpurious)) {
+      working = afterSpurious;
+    }
+  }
+
+  let leadingImgs: string[] = [];
+  if (imageMode === 'recognition') {
+    working = working.replace(/<img\b[^>]*>/gi, '').trim();
+  } else {
+    const imgBlockMatch = working.match(/^(?:\s*<img\b[^>]*>\s*(?:<br\s*\/?>\s*)*)+/i);
+    if (imgBlockMatch) {
+      leadingImgs = imgBlockMatch[0].match(/<img\b[^>]*>/gi) || [];
+      working = working.slice(imgBlockMatch[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim();
+    }
+  }
+
+  let legendHtml = '';
+  const italicMatch = working.match(/^<i>[\s\S]*?<\/i>/i);
+  const restAfterItalic = italicMatch
+    ? working.slice(italicMatch[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim()
+    : '';
+  const hasCommentAfterLegend = Boolean(italicMatch) && /^(?:<b>\s*)?Coment[áa]rio:(?:\s*<\/b>)?/i.test(restAfterItalic);
+
+  if (imageMode === 'recognition') {
+    if (italicMatch) {
+      legendHtml = italicMatch[0];
+      working = restAfterItalic;
+    } else {
+      legendHtml = `<i>Achado complementar demonstrando padrão característico de ${stripHtml(topic)}.</i>`;
+    }
+  } else if (italicMatch && (hasCommentAfterLegend || leadingImgs.length > 0)) {
+    legendHtml = italicMatch[0];
+    working = restAfterItalic;
+  }
+
+  const prefixParts: string[] = [];
+  if (leadingImgs.length > 0) prefixParts.push(leadingImgs.join('<br>'));
+  if (legendHtml) prefixParts.push(legendHtml);
+
+  const legendPrefix = prefixParts.length > 0 ? `${prefixParts.join('<br>')}<br><br>` : '';
+  return { legendPrefix, bodyHint: working };
+}
+
+/**
+ * Highlights the first significant medical token in bold if the comment lacks inline <b> emphasis,
+ * avoiding synthetic boilerplate text injection.
+ */
+function ensureBoldEmphasisInComment(textHint: string): string {
+  const afterPrefix = textHint.replace(/^<b>\s*Coment[áa]rio:\s*<\/b>\s*/i, '');
+  if (/<(?:b|strong)\b/i.test(afterPrefix)) return textHint;
+
+  const prefixMatch = textHint.match(/^<b>\s*Coment[áa]rio:\s*<\/b>\s*/i);
+  const prefix = prefixMatch ? prefixMatch[0] : '<b>Comentário:</b> ';
+  const body = prefixMatch ? textHint.slice(prefix.length) : textHint;
+
+  // Bold the first standalone 5+ letter token outside HTML tags
+  const parts = body.split(/(<\/?[a-zA-Z!][^>]*>)/g);
+  let bolded = false;
+  const updated = parts
+    .map((part) => {
+      if (bolded || /^<\/?[a-zA-Z!]/.test(part)) return part;
+      const m = part.match(/\b([A-Za-zÀ-ú]{5,}(?:-[A-Za-zÀ-ú0-9]+)?)\b/);
+      if (!m || m.index === undefined) return part;
+      bolded = true;
+      return `${part.slice(0, m.index)}<b>${m[1]}</b>${part.slice(m.index + m[1].length)}`;
+    })
+    .join('');
+
+  return `${prefix}${updated}`;
+}
+
+/**
+ * Truncates a Comentário HTML string within maxVisibleChars at sentence or whole-word boundaries,
+ * preserving inline HTML tags (<b>, <i>) and never cutting words in half.
+ */
+function truncateCommentHtmlPreservingWords(textHint: string, maxVisibleChars: number): string {
+  const prefixMatch = textHint.match(/^<b>\s*Coment[áa]rio:\s*<\/b>\s*/i);
+  const prefix = prefixMatch ? prefixMatch[0] : '<b>Comentário:</b> ';
+  const bodyHtml = prefixMatch ? textHint.slice(prefix.length) : textHint;
+
+  const plainBody = stripHtml(bodyHtml);
+  if (plainBody.length <= maxVisibleChars) return textHint;
+
+  // Compute safe character budget on plainBody: prefer last complete sentence >= 110 chars
+  const head = plainBody.slice(0, maxVisibleChars);
+  let budget = -1;
+  const sentenceEnds = Array.from(head.matchAll(/[.!?](?=\s|$)/g));
+  if (sentenceEnds.length > 0) {
+    const lastEnd = sentenceEnds[sentenceEnds.length - 1].index!;
+    if (lastEnd + 1 >= 110) {
+      budget = lastEnd + 1;
+    }
+  }
+  if (budget < 0) {
+    const lastSpace = head.lastIndexOf(' ');
+    budget = lastSpace >= 60 ? lastSpace : maxVisibleChars;
+  }
+
+  // Walk bodyHtml emitting tags and up to `budget` visible characters
+  const tokens = bodyHtml.split(/(<\/?[a-zA-Z!][^>]*>)/g);
+  const openTags: string[] = [];
+  let emitted = 0;
+  let out = '';
+
+  for (const tok of tokens) {
+    if (!tok) continue;
+    if (/^<\/?[a-zA-Z!]/.test(tok)) {
+      const closeM = tok.match(/^<\/([a-z0-9]+)/i);
+      const openM = tok.match(/^<([a-z0-9]+)\b[^>]*>$/i);
+      if (closeM) {
+        const tag = closeM[1].toLowerCase();
+        const idx = openTags.lastIndexOf(tag);
+        if (idx >= 0) openTags.splice(idx, 1);
+        out += tok;
+      } else if (openM && !/^<(?:br|hr|img)\b/i.test(tok) && !tok.endsWith('/>')) {
+        if (emitted < budget) {
+          openTags.push(openM[1].toLowerCase());
+          out += tok;
+        }
+      } else if (emitted < budget) {
+        out += tok;
+      }
+      continue;
+    }
+
+    if (emitted >= budget) break;
+    const remaining = budget - emitted;
+    if (tok.length <= remaining) {
+      out += tok;
+      emitted += tok.length;
+    } else {
+      out += tok.slice(0, remaining);
+      emitted += remaining;
+      break;
+    }
+  }
+
+  out = out.replace(/[\s,;:-]+$/, '').trim();
+  for (let i = openTags.length - 1; i >= 0; i--) {
+    out += `</${openTags[i]}>`;
+  }
+  if (!/[.!?]$/.test(stripHtml(out))) {
+    out += '.';
+  }
+  return `${prefix}${out}`;
+}
+
+/**
+ * Eliminates TOPIC_SPOILER even when the leaking radical resides in the prefix before " - ".
+ */
+function sanitizeTopicAgainstSpoiler(
+  card: CanonicalCard,
+  topic: string,
+  question: string,
+  answer: string,
+  hint: string
+): string {
+  const prefix = (topic.split(' - ')[0] || 'Tema Clínico').trim();
+  const candidateWithNeutralSub = `${prefix} - Tomada de Decisão e Conduta`;
+  if (!lintCard({ ...card, topic: candidateWithNeutralSub, question, answer, hint }).metrics.hasTopicSpoiler) {
+    return candidateWithNeutralSub;
+  }
+
+  // Filter out prefix words whose stem/prefix collides with target answer stems
+  const targetStr = card.type === 'basic' ? answer : question;
+  const targetKws = extractCoreKeywords(targetStr);
+  const targetStems = new Set(targetKws.map((k) => stemPortugueseWord(k)).filter((s) => s.length >= 4));
+  const prefixTokens = prefix.split(/\s+/).filter(Boolean);
+  const safeTokens = prefixTokens.filter((tok) => {
+    const kws = extractCoreKeywords(tok);
+    if (kws.length === 0) return true;
+    return !kws.some((kw) => {
+      const st = stemPortugueseWord(kw);
+      if (st.length >= 4 && targetStems.has(st)) return true;
+      if (st.length >= 5) {
+        for (const ts of targetStems) {
+          if (ts.length >= 5 && ts.slice(0, 5) === st.slice(0, 5)) return true;
+        }
+      }
+      return false;
+    });
+  });
+
+  const safeNonConnectors = safeTokens.filter((t) => extractCoreKeywords(t).length > 0);
+  if (safeNonConnectors.length >= 2) {
+    const cleanedPrefix = safeTokens.join(' ').replace(/^(?:de|da|do|das|dos|em|na|no)\s+/i, '').trim();
+    if (cleanedPrefix) {
+      const candidate = `${cleanedPrefix} - Tomada de Decisão e Conduta`;
+      if (!lintCard({ ...card, topic: candidate, question, answer, hint }).metrics.hasTopicSpoiler) {
+        return candidate;
+      }
+    }
+  }
+
+  for (const fallbackPrefix of ['Manejo Clínico', 'Conduta Médica', 'Avaliação Diagnóstica', 'Tema Clínico']) {
+    const candidate = `${fallbackPrefix} - Tomada de Decisão e Conduta`;
+    if (!lintCard({ ...card, topic: candidate, question, answer, hint }).metrics.hasTopicSpoiler) {
+      return candidate;
+    }
+  }
+  return 'Tema Clínico - Tomada de Decisão e Conduta';
 }
 
 /**
@@ -1679,13 +1904,38 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
       answer = afterBinary || `Conduta imediata guiada por ${stripHtml(topic.split(' - ').pop() || topic)}`;
     }
 
-    const plainWords = stripHtml(answer).replace(/\.$/, '').split(/\s+/).filter(Boolean);
-    if (plainWords.length > 12) {
-      let cut = 11;
-      while (cut > 1 && DANGLING_STOPWORDS.has(plainWords[cut - 1].toLowerCase())) {
+    let plainWords = stripHtml(answer).replace(/\.$/, '').split(/\s+/).filter(Boolean);
+    if (plainWords.length > MAX_BASIC_ANSWER_WORDS || stripHtml(answer).length > MAX_BASIC_ANSWER_CHARS) {
+      answer = answer
+        .replace(/\bpor\s+via\s+intravenosa\b/gi, 'IV')
+        .replace(/\bvia\s+intravenosa\b/gi, 'IV')
+        .replace(/\bpor\s+via\s+oral\b/gi, 'VO')
+        .replace(/\bvia\s+oral\b/gi, 'VO')
+        .replace(/\bdose\s+[úu]nica\b/gi, 'DU')
+        .replace(/\bassociad[ao]s?\s+[àa]o?\b/gi, '+');
+      plainWords = stripHtml(answer).replace(/\.$/, '').split(/\s+/).filter(Boolean);
+    }
+    if (plainWords.length > MAX_BASIC_ANSWER_WORDS || stripHtml(answer).length > MAX_BASIC_ANSWER_CHARS) {
+      let cut = Math.min(plainWords.length, MAX_BASIC_ANSWER_WORDS);
+      while (cut > 1 && plainWords.slice(0, cut).join(' ').length > MAX_BASIC_ANSWER_CHARS - 1) {
         cut--;
       }
-      answer = plainWords.slice(0, cut).join(' ');
+      // Never slice right between a number and its measurement unit, nor end on a dangling stopword
+      while (
+        cut > 1 &&
+        (DANGLING_STOPWORDS.has(plainWords[cut - 1].toLowerCase().replace(/[,;:.]/g, '')) ||
+          /^\d+(?:[.,]\d+)?$/.test(plainWords[cut - 1]))
+      ) {
+        cut--;
+      }
+      // Also avoid leaving an orphan drug/noun before a removed bare number if the slice ended at a preposition
+      while (
+        cut > 1 &&
+        DANGLING_STOPWORDS.has(plainWords[cut - 1].toLowerCase().replace(/[,;:.]/g, ''))
+      ) {
+        cut--;
+      }
+      answer = plainWords.slice(0, cut).join(' ').replace(/[,;:+]+$/, '').trim();
     }
     if (!answer.endsWith('.')) {
       answer = `${answer.replace(/[;:,?!]+$/, '')}.`;
@@ -1701,8 +1951,7 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     question = question.replace(/\s*\([^)]+\)/g, '');
   }
   if (checkAfterAnswer.metrics.hasTopicSpoiler) {
-    const prefix = topic.split(' - ')[0] || 'Tema Clínico';
-    topic = `${prefix} - Tomada de Decisão e Conduta`;
+    topic = sanitizeTopicAgainstSpoiler(card, topic, question, answer, hint);
   }
 
   // Restore media in question if needed
@@ -1724,31 +1973,21 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     .replace(/\[BUSCAR\s+IMAGEM[^\]]*\]\s*/gi, '');
 
   const audioBlocks = hint.match(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi) || [];
-  let textHint = hint.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, '').trim();
+  const hintWithoutAudio = hint.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, '').trim();
 
-  // If recognition card, ensure <i>legend</i> in hint and no duplicate <img> in hint
-  let legendPrefix = '';
-  if (card.image_mode === 'recognition') {
-    textHint = textHint.replace(/<img\b[^>]*>/gi, '').trim();
-    const existingItalic = textHint.match(/^<i>[\s\S]*?<\/i>/i);
-    if (existingItalic) {
-      legendPrefix = `${existingItalic[0]}<br><br>`;
-      textHint = textHint.slice(existingItalic[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim();
-    } else {
-      legendPrefix = `<i>Achado complementar demonstrando padrão característico de ${stripHtml(topic)}.</i><br><br>`;
-    }
-  }
+  // Preserve leading <img> and visual <i>legend</i> before <b>Comentário:</b>
+  const { legendPrefix, bodyHint } = splitLeadingMediaAndLegend(
+    hintWithoutAudio,
+    topic,
+    card.image_mode
+  );
+  let textHint = bodyHint;
 
   if (!/^<b>\s*Coment[áa]rio:\s*<\/b>/i.test(textHint)) {
     textHint = `<b>Comentário:</b> ${textHint.replace(/^Coment[áa]rio:\s*/i, '')}`.trim();
   }
 
-  if (!textHint.replace(/<b>\s*Coment[áa]rio:\s*<\/b>/i, '').includes('<b>')) {
-    textHint = textHint.replace(
-      /<b>\s*Coment[áa]rio:\s*<\/b>\s*/i,
-      '<b>Comentário:</b> A <b>conduta prioritária de 1ª escolha</b> reduz morbimortalidade; '
-    );
-  }
+  textHint = ensureBoldEmphasisInComment(textHint);
 
   let visLen = extractCommentVisibleText(textHint).length;
   if (visLen > MAX_COMMENT_CHARS) {
@@ -1759,12 +1998,7 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
   }
 
   if (visLen > MAX_COMMENT_CHARS) {
-    const bodyOnly = stripHtml(textHint.replace(/^<b>\s*Coment[áa]rio:\s*<\/b>\s*/i, ''))
-      .slice(0, 260)
-      .trim();
-    textHint = `<b>Comentário:</b> <b>Conduta prioritária</b>: ${bodyOnly.replace(/[.,;:\s]+$/, '')}.`;
-  } else if (visLen < 140) {
-    textHint = `${textHint.replace(/\.$/, '')}, diferenciando-se das <b>condutas de 2ª linha</b> reservadas aos quadros refratários ou com contraindicação formal.`;
+    textHint = truncateCommentHtmlPreservingWords(textHint, MAX_COMMENT_CHARS);
   }
 
   const audioSuffix = audioBlocks[0] ? `<br>${audioBlocks[0].trim()}` : '';
@@ -1997,8 +2231,13 @@ export function curateAndRebalanceDeck(
       : inputCards.length;
 
   const existingIdSet = new Set<number>(metadata.existingIds || []);
+  const originalTypeById = new Map<number, 'basic' | 'cloze'>();
   for (const c of metadata.rawCards || []) {
-    if (Number.isFinite(c.id)) existingIdSet.add(Number(c.id));
+    if (Number.isFinite(c.id)) {
+      const numId = Number(c.id);
+      existingIdSet.add(numId);
+      originalTypeById.set(numId, c.type === 'cloze' ? 'cloze' : 'basic');
+    }
   }
 
   // Step 1: Repair and normalize input cards first
@@ -2137,15 +2376,30 @@ export function curateAndRebalanceDeck(
   const basicPct = finalCount > 0 ? Math.round((finalBasic / finalCount) * 100) : 0;
   const clozePct = finalCount > 0 ? 100 - basicPct : 0;
   const preservedIdsCount = reconciled.filter((c) => existingIdSet.has(Number(c.id))).length;
+  const finalPrunedCount =
+    existingIdSet.size > 0
+      ? Math.max(prunedCount, existingIdSet.size - preservedIdsCount)
+      : prunedCount;
+  const finalAddedCount =
+    existingIdSet.size > 0
+      ? Math.max(addedCount, reconciled.filter((c) => !existingIdSet.has(Number(c.id))).length)
+      : addedCount;
+  const convertedCount =
+    originalTypeById.size > 0
+      ? reconciled.filter((c) => {
+          const origType = originalTypeById.get(Number(c.id));
+          return Boolean(origType && origType !== c.type);
+        }).length
+      : 0;
 
   return {
     cards: reconciled,
     stats: {
       originalCount,
       finalCount,
-      prunedCount,
-      addedCount,
-      convertedCount: 0,
+      prunedCount: finalPrunedCount,
+      addedCount: finalAddedCount,
+      convertedCount,
       preservedIdsCount,
       basicPct,
       clozePct,

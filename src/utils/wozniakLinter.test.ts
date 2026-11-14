@@ -12,6 +12,7 @@ import {
   reconcileDeckIdsAndMedia,
   removeMissingMediaFromCard,
   resolveOrCreateNoteGuid,
+  surgicalRepairCardLocal,
 } from './wozniakLinter';
 import { buildGenericClinicalMap } from '../data/demoDecks';
 import { CanonicalCard, GuidRegistryData, MedicalImageResult } from '../types/deck';
@@ -365,6 +366,99 @@ test('curateAndRebalanceDeck prunes duplicates, adds P1-P4 gaps, and preserves f
   assert.equal(stats.basicPct + stats.clozePct, 100);
 });
 
+test('curateAndRebalanceDeck accurately reports pruned, added, and converted counts for AI-rebuilt batches', () => {
+  const originals: CanonicalCard[] = [
+    {
+      id: 1001,
+      type: 'cloze',
+      topic: 'DIPA - Contracepção',
+      question: 'ACOs atuam como {{c1::proteção}} contra DIP.',
+      answer: '',
+      hint: '<b>Comentário:</b> Espessam muco cervical.',
+    },
+    {
+      id: 1002,
+      type: 'cloze',
+      topic: 'DIPA - Risco DIU',
+      question: 'Risco maior nas primeiras {{c1::3}} semanas.',
+      answer: '',
+      hint: '<b>Comentário:</b> Introdução mecânica.',
+    },
+    {
+      id: 1003,
+      type: 'cloze',
+      topic: 'DIPA - Redundante',
+      question: 'Card redundante antigo com {{c1::item duplicado}}.',
+      answer: '',
+      hint: '<b>Comentário:</b> Duplicado.',
+    },
+  ];
+  const meta = extractDeckMetadata(JSON.stringify(originals));
+  const aiRebuilt: CanonicalCard[] = [
+    {
+      id: 1001,
+      type: 'basic',
+      priority: 'P3',
+      topic: 'DIPA - Proteção Hormonal',
+      question: 'Por que os anticoncepcionais orais combinados reduzem a DIP sintomática?',
+      answer: 'Espessam o muco cervical dificultando ascensão bacteriana.',
+      hint: '<b>Comentário:</b> Os <b>ACOs espessam o muco</b>, diferente das <b>duchas vaginais</b> que favorecem ascensão bacteriana na cavidade pélvica.',
+    },
+    {
+      id: 1002,
+      type: 'cloze',
+      priority: 'P3',
+      topic: 'DIPA - Risco DIU',
+      question: 'O DIU eleva o risco de DIP aguda apenas nas primeiras {{c1::3}} semanas pós-inserção.',
+      answer: '',
+      hint: '<b>Comentário:</b> Risco ligado à <b>introdução mecânica</b> na inserção, ao passo que a <b>permanência prolongada</b> não aumenta DIP.',
+    },
+    {
+      id: 1004,
+      type: 'basic',
+      priority: 'P1',
+      topic: 'DIPA - Abscesso Roto',
+      question: 'Na Sala Vermelha, paciente com DIP séptica e suspeita de abscesso tubo-ovariano roto. Qual a conduta imediata?',
+      answer: 'Antibioticoterapia parenteral de amplo espectro e abordagem cirúrgica.',
+      hint: '<b>Comentário:</b> A <b>rotura de abscesso</b> exige cirurgia imediata além de antibióticos, diferente do <b>abscesso íntegro</b> inicialmente tratado clinicamente.',
+    },
+  ];
+
+  const { stats } = curateAndRebalanceDeck(aiRebuilt, meta, 'dipa', null, {
+    skipTemplateGapAdditions: true,
+  });
+
+  assert.equal(stats.originalCount, 3);
+  assert.equal(stats.finalCount, 3);
+  assert.equal(stats.preservedIdsCount, 2);
+  assert.equal(stats.prunedCount, 1);
+  assert.equal(stats.addedCount, 1);
+  assert.equal(stats.convertedCount, 1);
+
+  const visualHintCard = surgicalRepairCardLocal({
+    id: 1099,
+    type: 'basic',
+    topic: 'DIPA - USG',
+    question: 'Qual achado na USG?',
+    answer: 'Sinal da roda dentada.',
+    hint: '<i>Legenda visual: pregas tubárias espessadas em corte transversal.</i><br><br><b>Comentário:</b> O <b>sinal da roda dentada</b> indica salpingite aguda, diferente do <b>sinal das contas de rosário</b> na hidrossalpinge crônica.',
+  });
+  const commentMatches = visualHintCard.hint.match(/<b>\s*Coment[áa]rio:\s*<\/b>/gi) || [];
+  assert.equal(commentMatches.length, 1);
+  assert.equal(visualHintCard.hint.startsWith('<i>Legenda visual:'), true);
+
+  const tripleRegimenCard = surgicalRepairCardLocal({
+    id: 1100,
+    type: 'basic',
+    topic: 'DIPA - Tratamento Ambulatorial',
+    question: 'Qual esquema ambulatorial de 1ª escolha?',
+    answer: 'Ceftriaxona 500 mg IM DU, Doxiciclina 100 mg e Metronidazol 500 mg.',
+    hint: '<b>Comentário:</b> A tríade cobre <b>gonococo, clamídia e anaeróbios</b> por 14 dias, diferente da <b>cervicite isolada</b> que dispensa metronidazol.',
+  });
+  assert.equal(tripleRegimenCard.answer.includes('Metronidazol 500 mg.'), true);
+  assert.equal(lintCard(tripleRegimenCard).isValid, true);
+});
+
 test('computeDeterministicDeckId and resolveOrCreateNoteGuid preserve FSRS GUIDs across sessions', () => {
   const deckId = computeDeterministicDeckId('assistencia_ao_parto');
   const registry: GuidRegistryData = { version: 1, entries: {} };
@@ -384,4 +478,77 @@ test('computeDeterministicDeckId and resolveOrCreateNoteGuid preserve FSRS GUIDs
   assert.equal(res1.guid.length > 0, true);
   assert.equal(res1.key, 'assistencia_ao_parto:id:1775500001');
   assert.equal(registry.entries['assistencia_ao_parto:id:1775500001'], res1.guid);
+});
+
+test('reconcileDeckIdsAndMedia keeps hint-side images in hint and surgicalRepairCardLocal prevents double Comentário, mid-word hint truncation and prefix TOPIC_SPOILER', () => {
+  const origHintCard: CanonicalCard = {
+    id: 1789520693247,
+    type: 'cloze',
+    topic: 'Dermatite atópica - Hidratação',
+    question: 'Aplicar emoliente em até {{c1::3 minutos}} após o banho.',
+    answer: '',
+    hint: '<img src="tabela_hidratantes.png"><br><i>Classificação dos hidratantes na dermatite atópica.</i><br><br><b>Comentário:</b> O emoliente preserva a barreira.',
+  };
+
+  const generatedWithoutImg: CanonicalCard = {
+    id: 1789520693247,
+    type: 'cloze',
+    topic: 'Dermatite atópica - Hidratação',
+    question: 'Na dermatite atópica, o emoliente deve ser aplicado em até {{c1::3 minutos}} após o banho.',
+    answer: '',
+    hint: '<i>Classificação dos hidratantes na dermatite atópica.</i><br><br><b>Comentário:</b> A aplicação imediata em até <b>3 minutos</b> sela a água no estrato córneo e compensa a <b>deficiência de filagrina</b>; banhos quentes demorados piorem o ressecamento.',
+  };
+
+  const reconciled = reconcileDeckIdsAndMedia(
+    [generatedWithoutImg],
+    {
+      rawCards: [origHintCard],
+      existingIds: [1789520693247],
+      mediaTags: ['<img src="tabela_hidratantes.png">'],
+      detectedDeckKey: 'desordens_sistema_imune',
+    },
+    'desordens_sistema_imune'
+  );
+
+  assert.equal(reconciled[0].question.includes('<img'), false);
+  assert.equal(reconciled[0].hint.startsWith('<img src="tabela_hidratantes.png">'), true);
+
+  const repairedImgHint = surgicalRepairCardLocal({
+    ...reconciled[0],
+    hint:
+      '<img src="tabela_hidratantes.png"><br><i>Classificação dos hidratantes na dermatite atópica.</i><br><br><b>Comentário:</b> ' +
+      'A aplicação imediata em até <b>3 minutos</b> sela a água no estrato córneo e compensa a <b>deficiência de filagrina</b>. ' +
+      'Em contraste, banhos quentes demorados e sabonetes alcalinos removem lipídios da barreira epidérmica, agravando o prurido e a perda transepidérmica de água em lactentes e escolares com atopia.',
+  });
+
+  const commentPrefixCount = (repairedImgHint.hint.match(/<b>\s*Coment[áa]rio:\s*<\/b>/gi) || []).length;
+  assert.equal(commentPrefixCount, 1);
+  assert.equal(repairedImgHint.hint.startsWith('<img src="tabela_hidratantes.png">'), true);
+  assert.equal(repairedImgHint.hint.includes('Conduta prioritária'), false);
+  assert.equal(/\btipicame\.|\benquanto\s+[a-z]\.|\bcom\.$/.test(repairedImgHint.hint), false);
+
+  const spoilerPrefixCard = surgicalRepairCardLocal({
+    id: 1789520693285,
+    type: 'basic',
+    topic: 'Rinite alérgica - Gravidade',
+    question: 'Escolar com obstrução nasal apresenta despertar noturno frequente. Qual a classificação ARIA?',
+    answer: 'Rinite moderada a grave.',
+    hint: '<b>Comentário:</b> A alteração do <b>sono ou lazer</b> já define quadro moderado a grave, diferente da <b>forma leve</b> sem impacto funcional.',
+  });
+  const spoilerCheck = lintCard(spoilerPrefixCard);
+  assert.equal(spoilerCheck.warnings.some((w) => w.code === 'TOPIC_SPOILER'), false);
+
+  const shortSingleAdjectiveTopicCard = surgicalRepairCardLocal({
+    id: 1789520693265,
+    type: 'basic',
+    topic: 'Alergia Pediátrica - Conduta',
+    question: 'Lactente tolera ovo sem sintomas e tem IgE positiva. Qual a conduta?',
+    answer: 'Manter o alimento na dieta, pois há apenas sensibilização, não alergia.',
+    hint: '<b>Comentário:</b> O diagnóstico exige clínica reprodutível após exposição (< 2 horas), enquanto <b>sensibilização isolada</b> não justifica exclusão.',
+  });
+  assert.equal(shortSingleAdjectiveTopicCard.topic.startsWith('Pediátrica'), false);
+  assert.equal(
+    lintCard(shortSingleAdjectiveTopicCard).warnings.some((w) => w.code === 'COMMENT_TOO_SHORT'),
+    false
+  );
 });

@@ -478,63 +478,127 @@ export default function App() {
       const allRebuiltNotes: CanonicalCard[] = [];
 
       if (sourceCards.length > 0) {
-        const BATCH_SIZE = 15;
+        const BATCH_SIZE = 10;
+        const CONCURRENCY = 2;
+        const ID_STRIDE = 100;
         const totalBatches = Math.ceil(sourceCards.length / BATCH_SIZE);
-        let nextNewIdStart =
+        const baseNewIdStart =
           Math.max(
             171000100,
             ...(extractedMeta.existingIds || []),
             ...sourceCards.map((c) => Number(c.id) || 0)
           ) + 1;
 
-        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-          const batchCards = sourceCards.slice(
-            batchIndex * BATCH_SIZE,
-            (batchIndex + 1) * BATCH_SIZE
-          );
+        const deckOutline = sourceCards.map((c, idx) => ({
+          batch: Math.floor(idx / BATCH_SIZE) + 1,
+          id: c.id,
+          summary: String(c.topic || c.question || '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 90),
+        }));
 
+        const batchResults: CanonicalCard[][] = Array.from({ length: totalBatches }, () => []);
+        let completedBatches = 0;
+        let nextBatchIdx = 0;
+
+        const runWorker = async () => {
+          while (nextBatchIdx < totalBatches) {
+            const batchIndex = nextBatchIdx++;
+            const batchCards = sourceCards.slice(
+              batchIndex * BATCH_SIZE,
+              (batchIndex + 1) * BATCH_SIZE
+            );
+            const batchNewIdStart = baseNewIdStart + batchIndex * ID_STRIDE;
+
+            showStatus(
+              `🧠 Reconstruindo do zero em paralelo (${completedBatches}/${totalBatches} lotes concluídos)...`,
+              'info'
+            );
+
+            const response = await fetch('/api/gemini/generate-deck', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                deckKey: effectiveKey,
+                pdfs,
+                clinicalMap: activeMap,
+                existingMetadata: extractedMeta,
+                batchCards,
+                batchIndex,
+                totalBatches,
+                nextNewIdStart: batchNewIdStart,
+                deckOutline,
+              }),
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status} no lote ${batchIndex + 1}/${totalBatches}`);
+            }
+
+            const data = await response.json();
+            if (data?.fallback || data?.error) {
+              throw new Error(
+                data.error || `Falha da IA no lote ${batchIndex + 1}/${totalBatches}`
+              );
+            }
+
+            const batchNotes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
+            if (batchNotes.length === 0) {
+              throw new Error(`Lote ${batchIndex + 1}/${totalBatches} retornou 0 cards da IA.`);
+            }
+
+            batchResults[batchIndex] = batchNotes;
+            completedBatches++;
+            const rebuiltSoFar = batchResults.reduce((acc, arr) => acc + arr.length, 0);
+            showStatus(
+              `🧠 Reconstruindo do zero (${completedBatches}/${totalBatches} lotes concluídos — ${rebuiltSoFar} cards prontos)...`,
+              'info'
+            );
+          }
+        };
+
+        const workerCount = Math.min(CONCURRENCY, totalBatches);
+        await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+        for (const notes of batchResults) {
+          allRebuiltNotes.push(...notes);
+        }
+
+        if (activeMap?.items?.some((item) => item.checked !== false)) {
           showStatus(
-            `🧠 Reconstruindo do zero com IA — lote ${batchIndex + 1}/${totalBatches} (${allRebuiltNotes.length} cards reconstruídos até agora)...`,
+            `🔎 Auditando lacunas do Mapa Clínico P1–P4 sobre ${allRebuiltNotes.length} cards reconstruídos...`,
             'info'
           );
-
-          const response = await fetch('/api/gemini/generate-deck', {
+          const gapNewIdStart =
+            Math.max(
+              171000200,
+              ...(extractedMeta.existingIds || []),
+              ...allRebuiltNotes.map((n) => Number(n.id) || 0)
+            ) + 1;
+          const gapResp = await fetch('/api/gemini/fill-map-gaps', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               deckKey: effectiveKey,
-              pdfs,
               clinicalMap: activeMap,
-              existingMetadata: extractedMeta,
-              batchCards,
-              batchIndex,
-              totalBatches,
-              nextNewIdStart,
+              rebuiltCards: allRebuiltNotes,
+              nextNewIdStart: gapNewIdStart,
             }),
           });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status} no lote ${batchIndex + 1}/${totalBatches}`);
+          if (gapResp.ok) {
+            const gapData = await gapResp.json();
+            if (!gapData?.fallback && !gapData?.error && Array.isArray(gapData.notes)) {
+              const seenIds = new Set(allRebuiltNotes.map((n) => Number(n.id)));
+              for (const g of gapData.notes as CanonicalCard[]) {
+                const gid = Number(g.id);
+                if (!seenIds.has(gid)) {
+                  seenIds.add(gid);
+                  allRebuiltNotes.push(g);
+                }
+              }
+            }
           }
-
-          const data = await response.json();
-          if (data?.fallback || data?.error) {
-            throw new Error(
-              data.error || `Falha da IA no lote ${batchIndex + 1}/${totalBatches}`
-            );
-          }
-
-          const batchNotes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
-          if (batchNotes.length === 0) {
-            throw new Error(`Lote ${batchIndex + 1}/${totalBatches} retornou 0 cards da IA.`);
-          }
-
-          allRebuiltNotes.push(...batchNotes);
-          const maxBatchId = Math.max(
-            nextNewIdStart - 1,
-            ...batchNotes.map((n) => Number(n.id) || 0)
-          );
-          nextNewIdStart = maxBatchId + 1;
         }
       } else {
         showStatus('🧠 Gerando deck completo do zero com Gemini (Matuschak & Nielsen)...', 'info');
@@ -575,7 +639,7 @@ export default function App() {
       setCards(finalCurated);
       setCurationStats(finalStats);
       showStatus(
-        `✨ Reconstrução profunda por IA concluída! ${finalStats.originalCount} originais → ${finalStats.finalCount} cards reconstruídos (${finalStats.preservedIdsCount} IDs FSRS preservados, ${finalStats.prunedCount} podados, +${finalStats.addedCount} novos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
+        `✨ Reconstrução profunda por IA concluída! ${finalStats.originalCount} originais → ${finalStats.finalCount} cards reconstruídos (${finalStats.preservedIdsCount} IDs FSRS preservados, ${finalStats.prunedCount} podados, +${finalStats.addedCount} novos, ${finalStats.convertedCount} convertidos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
         'success'
       );
       void autoResolveDeckMissingImages(finalCurated);

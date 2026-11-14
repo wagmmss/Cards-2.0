@@ -4,7 +4,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import initSqlJs from 'sql.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,12 +47,10 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
 - **Prompts de Saliência Clínica (Salience Prompts):** Em casos clínicos, apresente a situação concreta ([CENÁRIO + IDADE/IG] + [CLÍNICA/SINAIS VITAIS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento à beira do leito.
 
 3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
-- NÃO É PORQUE O USUÁRIO ENVIOU N CARDS (ex.: 100 cards) QUE VOCÊ DEVE DEVOLVER EXATAMENTE N CARDS! O número final de cards deve refletir a real arquitetura cognitiva do tema (P1 a P4):
-  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, listas abertas, definições inertes ou reprovados pelo Filtro Negativo ("Is it worth remembering?" de Nielsen).
-  b) REFAZER & ESCOLHER FORMATO FLUIDO PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e comentário segundo Matuschak & Nielsen e escolha **livre e fluidamente** entre "basic" e "cloze" conforme o que melhor serve à tarefa cognitiva daquele conceito (**SEM nenhuma cota rígida 50/50 ou 45%–55%**), mantendo o número exato do "id" original daquele card para preservar o histórico FSRS no Anki:
-     - Prefira **"basic" (Q&A)** para decisões clínicas, condutas (minuto zero, 1ª linha, 2ª linha), diagnósticos diferenciais, reconhecimento visual ("image_mode": "recognition") e raciocínio causal ("por que / como").
-     - Prefira **"cloze"** para critérios numéricos, pontos de corte, doses críticas de emergência, classificações/alvos ou associações diretas em âncora clínica enxuta (1 única lacuna atômica {{c1::...}}).
-  c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos clínicos essenciais de P1 a P4 para formar uma rede densa de compreensão (Nielsen), crie novos cards atribuindo novos IDs numéricos sequenciais após o maior ID existente (max_id + 1, max_id + 2...).
+- A quantidade final de cards deve refletir a cobertura clínica completa (P1 a P4) sem encher linguiça e **sem amputar conceitos essenciais**:
+  a) REFAZER EM VEZ DE DELETAR: Se um card antigo for uma lista aberta, pergunta vaga ou definição passiva sobre um conceito P1–P4 clinicamente útil (estadiamento, critério, esquema terapêutico, retorno, complicação, população especial ou diferencial), **NÃO o exclua**: reconstrua o conceito do zero segundo Matuschak & Nielsen preservando o "id" numérico original no card principal (para manter o histórico FSRS) e desmembrando em novos IDs (max_id + 1...) se houver mais de uma decisão atômica.
+  b) QUANDO PODAR (EXCLUIR IDs): Exclua um "id" original **APENAS** quando for: (i) duplicata semântica exata de outro card mantido, (ii) reprovado pelo Filtro Negativo (genética/biologia molecular de bancada sem impacto clínico, história/datas), ou (iii) preenchimento trivial sem alavanca clínica real.
+  c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais "por que/como") ou "cloze" (critérios numéricos, limiares, doses críticas e alvos em âncora clínica enxuta com 1 única lacuna {{c1::...}}). Em "cloze" de regra geral, NÃO force vinheta artificial com idade/tempo de uso quando isso não altera a conduta.
 - NÃO inclua o campo "sources" nos cards.
 
 4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4), IMAGENS FIDEDIGNAS E FORMATAÇÃO:
@@ -119,12 +117,17 @@ function buildFullCardsDigest(rawCards: Array<Record<string, unknown>>): string 
     .join('\n');
 }
 
-function parseOrRecoverNotesJson(rawText: string): Array<Record<string, unknown>> {
+function parseOrRecoverNotesJsonWithMeta(rawText: string): {
+  notes: Array<Record<string, unknown>>;
+  wasTruncated: boolean;
+} {
   const cleanedJson = extractJsonBlock(rawText);
   try {
     const parsed = JSON.parse(cleanedJson);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && Array.isArray(parsed.notes)) return parsed.notes;
+    if (Array.isArray(parsed)) return { notes: parsed, wasTruncated: false };
+    if (parsed && Array.isArray(parsed.notes)) {
+      return { notes: parsed.notes, wasTruncated: false };
+    }
   } catch {
     const recovered: Array<Record<string, unknown>> = [];
     const objRegex = /\{[^{}]*"id"\s*:\s*\d+[^{}]*"question"\s*:\s*"[\s\S]*?"[^{}]*\}/g;
@@ -139,10 +142,47 @@ function parseOrRecoverNotesJson(rawText: string): Array<Record<string, unknown>
         // skip malformed fragment
       }
     }
-    if (recovered.length > 0) return recovered;
+    if (recovered.length > 0) return { notes: recovered, wasTruncated: true };
     throw new Error('Resposta JSON truncada ou inválida do modelo.');
   }
-  return [];
+  return { notes: [], wasTruncated: false };
+}
+
+function parseOrRecoverNotesJson(rawText: string): Array<Record<string, unknown>> {
+  return parseOrRecoverNotesJsonWithMeta(rawText).notes;
+}
+
+function formatGeminiError(error: unknown, fallbackMessage: string): string {
+  const raw = error instanceof Error ? error.message : fallbackMessage;
+  if (/402|prepayment credits are depleted|billing#prepay/i.test(raw)) {
+    return 'Créditos pré-pagos da chave Gemini esgotados (402 RESOURCE_EXHAUSTED). Troque a chave ou adicione créditos em AI Studio.';
+  }
+  if (/503|UNAVAILABLE|high demand/i.test(raw)) {
+    return 'Servidor da API Gemini temporariamente sobrecarregado (503 UNAVAILABLE). Tente novamente em alguns segundos.';
+  }
+  if (/429|RESOURCE_EXHAUSTED|quota exceeded/i.test(raw)) {
+    const isDaily = /per day|PerDay|limit:\s*20/i.test(raw);
+    return isDaily
+      ? 'Cota diária da API Gemini esgotada (429 RESOURCE_EXHAUSTED — Free Tier: 20 req/dia no gemini-4-hydrogen). Aguarde a renovação da cota ou configure uma chave com faturamento.'
+      : 'Limite de requisições por minuto da API Gemini atingido (429 RESOURCE_EXHAUSTED). Aguarde alguns segundos e tente novamente.';
+  }
+  return raw || fallbackMessage;
+}
+
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  params: Parameters<GoogleGenAI['models']['generateContent']>[0]
+) {
+  try {
+    return await ai.models.generateContent(params);
+  } catch (error: unknown) {
+    const raw = error instanceof Error ? error.message : String(error || '');
+    if (/503|UNAVAILABLE|high demand/i.test(raw)) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      return await ai.models.generateContent(params);
+    }
+    throw error;
+  }
 }
 
 function extractGroundingSources(response: unknown): Array<{ title: string; uri: string }> {
@@ -1524,12 +1564,18 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
 
       parts.push({ text: prompt });
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model: 'gemini-4-hydrogen',
         contents: { parts },
         config: {
           systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-          ...(useGoogleSearch ? { tools: [{ googleSearch: {} }] } : {}),
+          maxOutputTokens: 32768,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.HIGH,
+          },
+          ...(useGoogleSearch
+            ? { tools: [{ googleSearch: {} }] }
+            : { responseMimeType: 'application/json' }),
         },
       });
 
@@ -1547,9 +1593,10 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
             : parsed.groundingSources || [],
       });
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Erro ao gerar o Mapa Clínico com Gemini.';
-      return res.status(200).json({ fallback: true, error: message });
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao gerar o Mapa Clínico com Gemini.'),
+      });
     }
   });
 
@@ -1565,6 +1612,7 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
         batchIndex = 0,
         totalBatches = 1,
         nextNewIdStart = null,
+        deckOutline = null,
       } = req.body || {};
 
       const ai = getAiClient();
@@ -1611,49 +1659,71 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, escolhendo fluidamente
         : Array.isArray(existingMetadata?.rawCards)
           ? existingMetadata.rawCards
           : [];
-      const rawCardsSummary = buildFullCardsDigest(cardsForPrompt);
-      const isLastBatch = !isBatchMode || batchIndex + 1 >= totalBatches;
-
       const checkedMapItems = Array.isArray(clinicalMap?.items)
         ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
         : [];
 
-      const batchInstruction = isBatchMode
-        ? `MODO DE RECONSTRUÇÃO PROFUNDA EM LOTE (${batchIndex + 1}/${totalBatches} — ${cardsForPrompt.length} cards neste lote):
-- NÃO faça apenas pequenos ajustes cosméticos! Reconstrua cada conceito válido deste lote **DO ZERO** segundo Andy Matuschak & Michael Nielsen (saliência clínica à beira-leito, compreensão causal "por que / como", zero definições inertes, zero listas abertas, zero perguntas vagas).
-- Preserve rigorosamente o "id" numérico original de cada conceito sobrevivente (FSRS).
-- Exclua sem hesitar IDs duplicados, triviais ou reprovados pelo Filtro Negativo dentro deste lote.
-- Se algum conceito complexo merecer desmembramento ("More than you think")${isLastBatch ? ' OU se houver conceitos do Mapa Clínico P1–P4 ainda descobertos pelo baralho' : ''}, crie novos cards atribuindo IDs sequenciais a partir de ${effectiveNewIdStart}.`
-        : `MODO DE GERAÇÃO INTEGRAL DO BARALHO (${cardsForPrompt.length} cards originais fornecidos):
-- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos sobreviventes e criando novos IDs a partir de ${effectiveNewIdStart} para cobrir integralmente o Mapa Clínico P1–P4.`;
+      const outlineText =
+        Array.isArray(deckOutline) && deckOutline.length > 0
+          ? deckOutline
+              .slice(0, 140)
+              .map(
+                (item: { id?: unknown; summary?: unknown; batch?: unknown }) =>
+                  `  * Lote ${item.batch ?? '?'} | ID:${item.id ?? '?'} — ${sanitizeCardTextForPrompt(item.summary, 95)}`
+              )
+              .join('\n')
+          : '';
 
-      const prompt = `Reconstrua profundamente e lapide o baralho canônico para o tema "${deckKey}".
+      const runDeckBatch = async (
+        subsetCards: Array<Record<string, unknown>>,
+        subsetNewIdStart: number,
+        depth = 0
+      ): Promise<Array<Record<string, unknown>>> => {
+        const rawCardsSummary = buildFullCardsDigest(subsetCards);
+        const batchInstruction = isBatchMode
+          ? `MODO DE RECONSTRUÇÃO PROFUNDA EM LOTE (${batchIndex + 1}/${totalBatches} — ${subsetCards.length} cards neste lote):
+- PROIBIDO PARÁFRASE COSMÉTICA DE CLOZES FRACOS: Reconstrua cada conceito válido **DO ZERO** segundo Andy Matuschak & Michael Nielsen (esforço real de recuperação, anti-pattern-matching, raciocínio causal "por que / como", precisão clínica).
+- ESCOPO ESTRITO DO LOTE (ZERO COLISÃO ENTRE LOTES PARALELOS):
+  * Trabalhe EXCLUSIVAMENTE sobre os conceitos presentes nos ${subsetCards.length} cards originais DESTE lote. **PROIBIDO criar cards novos para lacunas globais do Mapa Clínico P1–P4 ausentes deste lote** — a auditoria global pós-lotes adicionará automaticamente todas as lacunas do Mapa Clínico após a convergência dos lotes, evitando duplicatas entre lotes paralelos!
+  * Só crie ID novo (a partir de ${subsetNewIdStart}) se um único card complexo DESTE lote precisar ser desmembrado em 2 decisões clínicas distintas.
+- TRANSFORMAR LISTAS DISFARÇADAS, DEFINIÇÕES PASSIVAS E ESQUEMAS "ENTREGUES":
+  1) NUNCA deixe um card listar 4–6 critérios no enunciado apenas para fechar uma única palavra/prazo óbvio no fim. Reconstrua como caso clínico ou decisão específica mantendo o "id" original.
+  2) Em esquemas antimicrobianos combinados, evite entregar 2 drogas com doses completas no enunciado para fechar apenas a 3ª droga ou apenas o número de dias: prefira pergunta "basic" cobrando a decisão/associação terapêutica ou mecanismo (mantendo o "id" original).
+  3) NUNCA transforme um conceito clínico próprio deste lote no cenário de outro card já existente no baralho (ex.: NUNCA mude um card de abscesso íntegro estável/Monif 3 para abscesso roto/choque/Monif 4 quando já houver card de rotura/Monif 4 no Índice Global — preserve a distinção clínica entre manejo conservador vs. falha/drenagem do abscesso íntegro e cirurgia imediata da rotura!).
+  4) Em estadiamentos clínicos (ex.: Monif 2), NÃO pergunte "qual achado ao exame físico" para responder com categoria ampla ("peritonite"): apresente a vinheta com o sinal semiológico à beira-leito (ex.: descompressão brusca dolorosa) cobrando o estádio/conduta, ou cobre explicitamente o sinal semiológico esperado.
+- EQUILÍBRIO ENTRE PRESERVAR CONCEITOS E PODAR DUPLICATAS REAIS:
+  * Mantenha com seu "id" FSRS original todos os conceitos clínicos verdadeiramente distintos de P1–P4.
+  * PODA ATIVA DE DUPLICATAS: Se dois cards neste lote ou no ÍNDICE GLOBAL DE TODOS OS LOTES testarem exatamente a MESMA conduta/alvo redundante (ex.: múltiplos cards fechando "{{c1::48 a 72 horas}}" para retorno, ou dois cards distintos cobrando a mesma prescrição de alta de autoinjetor de adrenalina), **EXCLUA o ID duplicado** neste lote ou diferencie explicitamente o alvo clínico. Também exclua cards reprovados pelo Filtro Negativo.`
+          : `MODO DE GERAÇÃO INTEGRAL DO BARALHO (${subsetCards.length} cards originais fornecidos):
+- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos clínicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Clínico P1–P4.`;
+
+        const prompt = `Reconstrua profundamente e lapide o baralho canônico para o tema "${deckKey}".
 
 ${batchInstruction}
 
 DADOS DO BARALHO ANTIGO (COMPLETO COM PERGUNTA, RESPOSTA E COMENTÁRIO ORIGINAL):
 - Total de cards no baralho original: ${existingIds.length}
-- Primeiro novo ID disponível se precisar criar cards extras: ${effectiveNewIdStart}
+- Primeiro novo ID exclusivo reservado para este lote (se precisar desmembrar algum card deste lote): ${subsetNewIdStart}
 - Tags de Mídia Originais: ${JSON.stringify(mediaTags)}
-- Cards Originais para Reconstrução Profunda:
+${outlineText ? `- ÍNDICE GLOBAL DE TODOS OS LOTES (use para não duplicar outros lotes nem transformar um card deste lote no tema de outro lote):\n${outlineText}\n` : ''}- Cards Originais DESTE LOTE para Reconstrução Profunda:
 ${rawCardsSummary}
 
-MAPA CLÍNICO APROVADO (P1 a P4):
+${isBatchMode ? 'DIRETRIZES CLÍNICAS DE REFERÊNCIA DO TEMA (apenas referência clínica — NÃO gere cards para itens que não estão nos Cards Originais deste lote; lacunas serão preenchidas após os lotes):' : 'MAPA CLÍNICO APROVADO (P1 a P4):'}
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : 'Mapear integralmente P1, P2, P3 e P4 do tema.'}
 
 CHECKLIST DE VALIDAÇÃO ANTES DE GERAR CADA CARD:
 1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, critérios numéricos, doses críticas e fatos atômicos em âncora) livremente pelo encaixe cognitivo de cada card — sem forçar 50/50.
 2. Se "basic":
    - "question": no máximo 45 a 50 palavras. Para casos clínicos, use cenário concreto + clínica/exame + pergunta precisa (minuto zero / exame inicial vs padrão-ouro / 1ª escolha / 2ª linha após falha); para compreensão profunda (Nielsen & Matuschak), crie também prompts causais/mecanísticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), definições passivas ("O que é X?") ou respostas binárias ("Sim/Não").
-   - "answer": 1 a 12 palavras (MÁXIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-vírgula (;) e SEM tag <b> externo envolvendo toda a resposta.
+   - "answer": 1 a 12 palavras (MÁXIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-vírgula (;) e SEM tag <b> externo envolvendo toda a resposta. Para esquemas combinados (ex.: 3 fármacos), seja compacto (<= 14 palavras, deixando intervalos 12/12h e dias no hint) e NUNCA deixe dose numérica sem unidade (mg/g/mL).
 3. Se "cloze":
-   - "question": contém ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposição pendurada no final, SEM "::dica".
+   - "question": contém ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposição pendurada no final, SEM "::dica" e SEM partir expressões ao meio (ex.: proibido "{{c1::3 critérios maiores e 1}} menor"). Mantenha a âncora clínica enxuta e natural: NÃO invente idade nem tempo cronológico artificial no enunciado quando a regra numérica é geral.
    - "answer": "" (string vazia).
-4. Zero Mídias Órfãs: NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>.
+4. Zero Mídias Órfãs, Posicionamento Correto e Coerência Factual: NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>. Se o card original tiver <img src="..."> no "hint" (especialmente tabelas, algoritmos ou esquemas de resposta), MANTENHA a tag <img src="..."> e sua <i>Legenda</i> no INÍCIO do "hint" ("<img ...><br><i>Legenda</i><br><br><b>Comentário:</b> ..."), NUNCA movendo tabelas/esquemas para "question" nem colocando "<b>Comentário:</b>" antes da imagem. Garanta 100% de coerência numérica entre pergunta e hint (ex.: se o enunciado diz "3 semanas", o hint deve dizer "3 semanas / 21 dias", nunca "20 dias").
 5. Duplo Salto Cognitivo Implícito: NUNCA faça pergunta composta ("Qual o diagnóstico e a conduta?"). Apresente o caso clínico e pergunte apenas 1 decisão atômica.
-6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical (ex.: proibido "Manobras" no topic se a resposta começa com "Manobra de...") e NUNCA repita o topic em negrito dentro do question.
+6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " (se a resposta contiver "alimento", "rinite" ou "imunoglobulinas", generalize o prefixo para "Alergia Pediátrica", "Vias Aéreas Superiores" ou "Imunidade Humoral") e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre parênteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve conter "<b>Comentário:</b> ", ter 1 a 2 frases (entre 180 e 300 caracteres visíveis medidos APÓS "<b>Comentário:</b> ", NUNCA passar de 320 caracteres visíveis), destacar termos-chave em <b>negrito</b> e trazer contraste diferencial/causal obrigatório.
+8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <img ...><br><i>Legenda</i>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases (180 a 300 caracteres visíveis no comentário textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.
 9. NÃO inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
@@ -1672,20 +1742,55 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
   ]
 }`;
 
-      parts.push({ text: prompt });
+        const response = await generateContentWithRetry(ai, {
+          model: 'gemini-4-hydrogen',
+          contents: { parts: [...parts, { text: prompt }] },
+          config: {
+            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            maxOutputTokens: 65536,
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.HIGH,
+            },
+          },
+        });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: { parts },
-        config: {
-          systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-          responseMimeType: 'application/json',
-          maxOutputTokens: 16384,
-        },
-      });
+        const rawText = response.text || '{}';
+        const finishReason = response.candidates?.[0]?.finishReason;
+        let parsedNotes: Array<Record<string, unknown>> = [];
+        let wasTruncated = false;
 
-      const rawText = response.text || '{}';
-      const notes = parseOrRecoverNotesJson(rawText);
+        try {
+          const parsed = parseOrRecoverNotesJsonWithMeta(rawText);
+          parsedNotes = parsed.notes;
+          wasTruncated = parsed.wasTruncated;
+        } catch (err) {
+          if (subsetCards.length >= 4 && depth < 2) {
+            wasTruncated = true;
+          } else {
+            throw err;
+          }
+        }
+
+        const isAnomalousLoss =
+          subsetCards.length >= 6 && parsedNotes.length < Math.ceil(subsetCards.length * 0.6);
+
+        if ((finishReason === 'MAX_TOKENS' || wasTruncated || isAnomalousLoss) && subsetCards.length >= 4 && depth < 2) {
+          console.warn(
+            `[generate-deck] Sub-lote dividido (recebido ${parsedNotes.length}/${subsetCards.length}, finish=${String(finishReason)}, truncated=${wasTruncated}, depth=${depth})`
+          );
+          const mid = Math.ceil(subsetCards.length / 2);
+          const [leftNotes, rightNotes] = await Promise.all([
+            runDeckBatch(subsetCards.slice(0, mid), subsetNewIdStart, depth + 1),
+            runDeckBatch(subsetCards.slice(mid), subsetNewIdStart + 50, depth + 1),
+          ]);
+          return [...leftNotes, ...rightNotes];
+        }
+
+        return parsedNotes;
+      };
+
+      const notes = await runDeckBatch(cardsForPrompt, effectiveNewIdStart);
 
       return res.json({
         deck_key: deckKey,
@@ -1694,9 +1799,98 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         totalBatches,
       });
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Erro ao gerar o Deck JSON Canônico com Gemini.';
-      return res.status(200).json({ fallback: true, error: message });
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao gerar o Deck JSON Canônico com Gemini.'),
+      });
+    }
+  });
+
+  // Endpoint 2B: Auditoria Pós-Lotes — Preencher Lacunas Reais do Mapa Clínico P1-P4 Descobertas
+  app.post('/api/gemini/fill-map-gaps', async (req, res) => {
+    try {
+      const {
+        deckKey = 'tema_clinico_internato',
+        clinicalMap = null,
+        rebuiltCards = [],
+        nextNewIdStart = 171000200,
+      } = req.body || {};
+
+      const checkedMapItems = Array.isArray(clinicalMap?.items)
+        ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
+        : [];
+
+      if (checkedMapItems.length === 0) {
+        return res.json({ deck_key: deckKey, notes: [] });
+      }
+
+      const ai = getAiClient();
+      if (!ai) {
+        return res.status(200).json({
+          fallback: true,
+          error: 'Chave GEMINI_API_KEY não configurada no ambiente.',
+        });
+      }
+
+      const existingDigest = Array.isArray(rebuiltCards)
+        ? rebuiltCards
+            .slice(0, 160)
+            .map(
+              (c: { id?: unknown; topic?: unknown; question?: unknown; answer?: unknown }) =>
+                `- ID:${c.id ?? '?'} | ${sanitizeCardTextForPrompt(c.topic, 80)} | Q: "${sanitizeCardTextForPrompt(c.question, 180)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 90)}"` : ''}`
+            )
+            .join('\n')
+        : '';
+
+      const prompt = `Audite a cobertura clínica do baralho reconstruído "${deckKey}" comparando-o com o Mapa Clínico P1–P4 aprovado.
+
+MAPA CLÍNICO APROVADO:
+${JSON.stringify(checkedMapItems, null, 2)}
+
+CARDS JÁ GERADOS NOS LOTES:
+${existingDigest || 'Nenhum card gerado.'}
+
+TAREFA CIRÚRGICA:
+- Identifique APENAS os conceitos essenciais do Mapa Clínico que ficaram SEM UM CARD PRÓPRIO DEDICADO (atenção: uma menção passageira dentro do comentário/"hint" ou lista lateral de outro card NÃO conta como card dedicado!). Exemplos típicos de lacunas reais: exame inicial obrigatório (como β-hCG na suspeita de DIP), critério de transição IV→VO ou diferencial P1 ausente.
+- Para cada lacuna real encontrada, crie 1 card atômico seguindo rigorosamente Andy Matuschak & Michael Nielsen, atribuindo IDs sequenciais a partir de ${nextNewIdStart}:
+  * "topic": formato "Tema - Subtema" sem spoiler por palavra ou radical INCLUSIVE no prefixo antes de " - " (ex.: se a resposta citar "imunoglobulinas", use "Imunidade Humoral - Investigação Inicial", nunca "Imunodeficiência humoral").
+  * Para lacunas marcadas no mapa com "image_mode": "recognition" quando não existir arquivo de imagem no acervo original, formule pergunta clínica objetiva pelo achado esperado sem simular ou inventar <img>.
+  * Se "basic": "question" ≤ 45–50 palavras (vinheta ou pergunta causal), "answer" com 1 a 12 palavras terminado em ponto final (.), sem ";".
+  * Se "cloze": exatamente 1 lacuna {{c1::...}} (1 a 5 palavras) e "answer": "".
+  * "hint": comece com "<b>Comentário:</b> ", tenha entre **180 e 300 caracteres visíveis** (medidos APÓS "<b>Comentário:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema (ex.: gravidez/ectópica vs. quadro não gestacional — nunca use texto genérico sobre "2ª linha").
+- Se TODOS os conceitos do Mapa Clínico já possuírem card próprio dedicado acima, retorne "notes": [].
+- NUNCA duplique conceitos já cobertos nos cards existentes acima.
+- NÃO inclua o campo "sources".
+
+Retorne EXCLUSIVAMENTE um JSON válido:
+{
+  "deck_key": "${deckKey}",
+  "notes": []
+}`;
+
+      const response = await generateContentWithRetry(ai, {
+        model: 'gemini-4-hydrogen',
+        contents: [{ text: prompt }],
+        config: {
+          systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+          responseMimeType: 'application/json',
+          maxOutputTokens: 65536,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.HIGH,
+          },
+        },
+      });
+
+      const { notes, wasTruncated } = parseOrRecoverNotesJsonWithMeta(response.text || '{}');
+      if (wasTruncated) {
+        console.warn('[fill-map-gaps] Resposta truncada recuperada parcialmente:', notes.length);
+      }
+      return res.json({ deck_key: deckKey, notes });
+    } catch (error: unknown) {
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao auditar lacunas do Mapa Clínico.'),
+      });
     }
   });
 
@@ -1744,12 +1938,16 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
   ]
 }`;
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model: 'gemini-4-hydrogen',
         contents: prompt,
         config: {
           systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
           responseMimeType: 'application/json',
+          maxOutputTokens: 65536,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.HIGH,
+          },
         },
       });
 
@@ -1764,9 +1962,10 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
 
       return res.json({ repairedCards, deckKey });
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Erro ao auto-reparar cards com Gemini.';
-      return res.status(200).json({ fallback: true, error: message });
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao auto-reparar cards com Gemini.'),
+      });
     }
   });
 
