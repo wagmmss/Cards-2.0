@@ -24,6 +24,7 @@ import {
   HIGH_PRECISION_MEDICAL_ATLAS,
   matchMedicalAtlasImages,
 } from '../data/medicalDiagnosticAtlas';
+import { readMultipleDocumentFiles } from './documentUpload';
 import { CanonicalCard, GuidRegistryData, MedicalImageResult } from '../types/deck';
 
 test('extractDeckMetadata extracts existing numeric FSRS IDs, records mediaTags, and automatically strips orphan <audio> from rawCards', () => {
@@ -628,4 +629,44 @@ test('buildGenericClinicalMap adapts P1-P4 priorities to active DomainProfile an
   // Zero synthetic drawn SVGs in fallback atlas
   assert.equal(HIGH_PRECISION_MEDICAL_ATLAS.length, 0);
   assert.deepEqual(matchMedicalAtlasImages('ECG supradesnivelamento IAM'), []);
+});
+
+test('readMultipleDocumentFiles snapshots live FileList before awaits so clearing input.value never drops files 2..N', async () => {
+  const f1 = new File(['%PDF-1.4\nconteudo'], 'diretriz_ms.pdf', { type: 'application/pdf' });
+  const f2 = new File(['Resumo clinico do tema'], 'resumo_aula.md', { type: 'text/markdown' });
+  const f3 = new File(['Questao 1 USP'], 'simulado_usp.txt', { type: 'text/plain' });
+
+  // Simulate browser live FileList whose items disappear as soon as e.target.value = '' runs synchronously
+  let cleared = false;
+  const backing = [f1, f2, f3];
+  const liveFileList: ArrayLike<File> = {
+    get length() {
+      return cleared ? 0 : backing.length;
+    },
+    get 0() {
+      return cleared ? (undefined as unknown as File) : backing[0];
+    },
+    get 1() {
+      return cleared ? (undefined as unknown as File) : backing[1];
+    },
+    get 2() {
+      return cleared ? (undefined as unknown as File) : backing[2];
+    },
+  };
+
+  const promise = readMultipleDocumentFiles(liveFileList);
+  // Synchronous reset right after calling handler (exact React onChange behavior)
+  cleared = true;
+
+  const docs = await promise;
+  assert.equal(docs.length, 3);
+  assert.equal(docs[0].name, 'diretriz_ms.pdf');
+  assert.equal(docs[0].docRole, 'diretriz');
+  assert.equal(docs[0].base64Data.length > 0, true);
+  assert.equal(docs[1].name, 'resumo_aula.md');
+  assert.equal(docs[1].docRole, 'resumo');
+  assert.equal(docs[1].textContent, 'Resumo clinico do tema');
+  assert.equal(docs[2].name, 'simulado_usp.txt');
+  assert.equal(docs[2].docRole, 'questoes');
+  assert.equal(docs[2].textContent, 'Questao 1 USP');
 });

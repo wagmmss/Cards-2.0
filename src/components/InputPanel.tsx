@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { DomainProfile, ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
 import { DOMAIN_PROFILE_CONFIGS, DOMAIN_PROFILE_ORDER } from '../utils/domainProfiles';
+import { readMultipleDocumentFiles } from '../utils/documentUpload';
 
 interface InputPanelProps {
   pdfs: UploadedPdfFile[];
@@ -38,20 +39,6 @@ interface InputPanelProps {
   guidCount: number;
   onImportGuidRegistry: (jsonText: string) => void;
   onExportGuidRegistry: () => void;
-}
-
-function inferDocRole(filename: string): UploadedPdfFile['docRole'] {
-  const lower = filename.toLowerCase();
-  if (/diretriz|consenso|guideline|protocolo|febrasgo|sbc|sbp|ms\b/.test(lower)) {
-    return 'diretriz';
-  }
-  if (/quest|prova|simulado|revalida|usp|unicamp|enare|sus/.test(lower)) {
-    return 'questoes';
-  }
-  if (/resumo|apostila|aula|caderno|ficha/.test(lower)) {
-    return 'resumo';
-  }
-  return 'documento';
 }
 
 export const InputPanel: React.FC<InputPanelProps> = ({
@@ -84,50 +71,8 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
   const [showJsonEditor, setShowJsonEditor] = useState(false);
 
-  const handleDocumentFiles = async (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
-    const processed: UploadedPdfFile[] = [];
-
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      const lower = file.name.toLowerCase();
-      const isPdf = file.type === 'application/pdf' || lower.endsWith('.pdf');
-      const isTextDoc =
-        lower.endsWith('.txt') ||
-        lower.endsWith('.md') ||
-        file.type === 'text/plain' ||
-        file.type === 'text/markdown';
-
-      if (isPdf) {
-        const base64Data = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const res = typeof reader.result === 'string' ? reader.result : '';
-            const base64 = res.includes(',') ? res.split(',')[1] : res;
-            resolve(base64);
-          };
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        });
-        processed.push({
-          name: file.name,
-          size: file.size,
-          mimeType: 'application/pdf',
-          base64Data,
-          docRole: inferDocRole(file.name),
-        });
-      } else if (isTextDoc) {
-        const textContent = await file.text();
-        processed.push({
-          name: file.name,
-          size: file.size,
-          mimeType: 'text/plain',
-          base64Data: '',
-          textContent,
-          docRole: inferDocRole(file.name),
-        });
-      }
-    }
+  const handleDocumentFiles = async (fileList: File[] | FileList | null) => {
+    const processed = await readMultipleDocumentFiles(fileList);
 
     if (processed.length > 0) {
       onAddPdfs(processed);
@@ -142,7 +87,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
     }
   };
 
-  const handleJsonFileUpload = async (fileList: FileList | null) => {
+  const handleJsonFileUpload = async (fileList: File[] | FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     const file = fileList[0];
     const text = await file.text();
@@ -150,7 +95,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
     setShowJsonEditor(true);
   };
 
-  const handleGuidFileUpload = async (fileList: FileList | null) => {
+  const handleGuidFileUpload = async (fileList: File[] | FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     const file = fileList[0];
     const text = await file.text();
@@ -256,8 +201,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           accept="application/pdf,.pdf,.txt,.md,text/plain,text/markdown"
           multiple
           onChange={(e) => {
-            handleDocumentFiles(e.target.files);
+            const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
             e.target.value = '';
+            void handleDocumentFiles(selectedFiles);
           }}
           className="sr-only"
         />
@@ -270,8 +216,10 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           onDragLeave={() => setIsDraggingPdf(false)}
           onDrop={(e) => {
             e.preventDefault();
+            e.stopPropagation();
             setIsDraggingPdf(false);
-            handleDocumentFiles(e.dataTransfer.files);
+            const droppedFiles = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+            void handleDocumentFiles(droppedFiles);
           }}
           onClick={() => pdfInputRef.current?.click()}
           role="button"
@@ -389,7 +337,11 @@ export const InputPanel: React.FC<InputPanelProps> = ({
               ref={jsonFileInputRef}
               type="file"
               accept=".json,application/json"
-              onChange={(e) => handleJsonFileUpload(e.target.files)}
+              onChange={(e) => {
+                const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = '';
+                void handleJsonFileUpload(selectedFiles);
+              }}
               className="sr-only"
             />
             <button
@@ -405,7 +357,11 @@ export const InputPanel: React.FC<InputPanelProps> = ({
               ref={guidFileInputRef}
               type="file"
               accept=".json,application/json"
-              onChange={(e) => handleGuidFileUpload(e.target.files)}
+              onChange={(e) => {
+                const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = '';
+                void handleGuidFileUpload(selectedFiles);
+              }}
               className="sr-only"
             />
             <button
