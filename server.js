@@ -286,6 +286,105 @@ async function searchNlmOpenIMedical(searchQuery) {
     };
   }).filter((item) => item !== null);
 }
+async function validateCandidateImageUrl(url) {
+  if (!url || !url.startsWith("https://") && !url.startsWith("http://")) {
+    return { ok: false, contentType: "", byteLength: 0 };
+  }
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)",
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+      },
+      signal: AbortSignal.timeout(2600)
+    });
+    if (!resp.ok) {
+      return { ok: false, contentType: "", byteLength: 0 };
+    }
+    const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.startsWith("image/")) {
+      return { ok: false, contentType, byteLength: 0 };
+    }
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const minBytes = contentType.includes("svg") ? 250 : 1800;
+    if (buf.length < minBytes) {
+      return { ok: false, contentType, byteLength: buf.length };
+    }
+    return { ok: true, contentType, byteLength: buf.length };
+  } catch {
+    return { ok: false, contentType: "", byteLength: 0 };
+  }
+}
+async function searchGoogleMedicalImagesViaGrounding(searchQuery, topic = "", question = "") {
+  const ai = getAiClient();
+  if (!ai) return [];
+  const enQuery = buildEnglishMedicalSearchQuery(`${searchQuery} ${topic}`);
+  const prompt = `Encontre de 4 a 6 URLs diretas de imagens m\xE9dicas cl\xEDnicas limpas (arquivos .jpg, .png, .webp ou .svg sem setas com spoiler da resposta e sem marca d'\xE1gua pesada) para o exame/achado cl\xEDnico:
+- Busca: "${searchQuery}" (${enQuery})
+- T\xF3pico: "${topic}"
+- Contexto: "${question.slice(0, 180)}"
+
+Priorize fontes m\xE9dicas confi\xE1veis de acesso aberto:
+- Life in the Fast Lane (LITFL - litfl.com) para ECG e arritmias
+- Radiopaedia / Open-i (openi.nlm.nih.gov) / Wikimedia Commons (upload.wikimedia.org) para RX, TC, RM, USG, Cardiotocografia
+- DermNet NZ para dermatologia
+- SciELO / PubMed Central para imagens cl\xEDnicas e obst\xE9tricas
+
+Retorne EXCLUSIVAMENTE um array JSON v\xE1lido no formato:
+[
+  {
+    "title": "T\xEDtulo conciso do achado visual",
+    "imageUrl": "https://... (URL direta do arquivo de imagem .jpg/.png/.webp/.svg)",
+    "description": "Descri\xE7\xE3o cl\xEDnica objetiva do exame sem entregar o diagn\xF3stico final",
+    "source": "LITFL / Radiopaedia / Wikimedia / DermNet / SciELO",
+    "suggestedFilename": "nome_limpo_exame.jpg",
+    "defaultLegend": "Exame complementar evidenciando [descri\xE7\xE3o morfol\xF3gica do achado]."
+  }
+]`;
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-4-hydrogen",
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }]
+      }
+    });
+    const rawText = response.text || "[]";
+    const cleaned = extractJsonBlock(rawText);
+    const parsed = JSON.parse(cleaned);
+    const candidates = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.images) ? parsed.images : [];
+    const validationChecks = await Promise.all(
+      candidates.slice(0, 8).map(async (item, idx) => {
+        const rawUrl = String(item.imageUrl || item.url || item.thumbUrl || "").trim();
+        const check = await validateCandidateImageUrl(rawUrl);
+        if (!check.ok) return null;
+        const title = String(item.title || `Imagem M\xE9dica Google #${idx + 1}`).slice(0, 85);
+        const desc = String(
+          item.description || `Exame complementar referente a ${searchQuery}.`
+        ).slice(0, 180);
+        const source = String(item.source || "Google Search Grounding (Medical Web)");
+        const ext = check.contentType.includes("png") ? ".png" : check.contentType.includes("svg") ? ".svg" : check.contentType.includes("webp") ? ".webp" : ".jpg";
+        const rawSuggested = String(item.suggestedFilename || title).toLowerCase().replace(/\.[a-z0-9]+$/i, "").replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+        return {
+          id: `google-grounding-${idx}-${Date.now()}`,
+          title,
+          thumbUrl: rawUrl,
+          fullUrl: rawUrl,
+          description: desc,
+          suggestedFilename: `${rawSuggested || `google_med_${idx + 1}`}${ext}`,
+          defaultLegend: String(
+            item.defaultLegend || `Exame complementar demonstrando ${desc.slice(0, 125)}.`
+          ),
+          source
+        };
+      })
+    );
+    return validationChecks.filter((item) => item !== null);
+  } catch {
+    return [];
+  }
+}
 var CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {
@@ -873,19 +972,42 @@ async function startServer() {
   app.use(import_express.default.json({ limit: "50mb" }));
   app.post("/api/media/search-medical-images", async (req, res) => {
     try {
-      const { query = "", topic = "", question = "" } = req.body || {};
+      const { query = "", topic = "", question = "", preferGoogleGrounding = true } = req.body || {};
       const rawSearch = (query || topic || question || "clinical diagnosis").trim();
-      const [wikiSettled, openiSettled] = await Promise.allSettled([
+      const [googleSettled, wikiSettled, openiSettled] = await Promise.allSettled([
+        preferGoogleGrounding ? searchGoogleMedicalImagesViaGrounding(rawSearch, topic, question) : Promise.resolve([]),
         searchWikimediaCommonsMedical(rawSearch),
         searchNlmOpenIMedical(rawSearch)
       ]);
-      const wikiImages = wikiSettled.status === "fulfilled" ? wikiSettled.value : [];
-      const openiImages = openiSettled.status === "fulfilled" ? openiSettled.value : [];
+      const googleImages = googleSettled.status === "fulfilled" ? googleSettled.value : [];
+      const wikiRaw = wikiSettled.status === "fulfilled" ? wikiSettled.value : [];
+      const openiRaw = openiSettled.status === "fulfilled" ? openiSettled.value : [];
+      const [wikiValidated, openiValidated] = await Promise.all([
+        Promise.all(
+          wikiRaw.slice(0, 6).map(async (img) => {
+            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
+            return check.ok ? img : null;
+          })
+        ),
+        Promise.all(
+          openiRaw.slice(0, 6).map(async (img) => {
+            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
+            return check.ok ? img : null;
+          })
+        )
+      ]);
+      const wikiImages = wikiValidated.filter((x) => x !== null);
+      const openiImages = openiValidated.filter((x) => x !== null);
       const combined = [];
-      const maxLen = Math.max(wikiImages.length, openiImages.length);
+      const seenUrls = /* @__PURE__ */ new Set();
+      const maxLen = Math.max(googleImages.length, wikiImages.length, openiImages.length);
       for (let i = 0; i < maxLen; i++) {
-        if (wikiImages[i]) combined.push(wikiImages[i]);
-        if (openiImages[i]) combined.push(openiImages[i]);
+        for (const candidate of [googleImages[i], wikiImages[i], openiImages[i]]) {
+          if (candidate && !seenUrls.has(candidate.thumbUrl)) {
+            seenUrls.add(candidate.thumbUrl);
+            combined.push(candidate);
+          }
+        }
       }
       return res.json({
         query: rawSearch,
@@ -1081,10 +1203,15 @@ async function startServer() {
       }
       const parts = [];
       for (const pdf of pdfs) {
-        if (pdf?.base64Data) {
+        if (pdf?.textContent && typeof pdf.textContent === "string") {
+          parts.push({
+            text: `DOCUMENTO ANEXADO (${pdf.name || "Texto/Quest\xF5es"}):
+${pdf.textContent.slice(0, 6e4)}`
+          });
+        } else if (pdf?.base64Data) {
           parts.push({
             inlineData: {
-              mimeType: "application/pdf",
+              mimeType: pdf.mimeType || "application/pdf",
               data: pdf.base64Data
             }
           });
@@ -1161,10 +1288,15 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4, alternando targetCar
       }
       const parts = [];
       for (const pdf of pdfs) {
-        if (pdf?.base64Data) {
+        if (pdf?.textContent && typeof pdf.textContent === "string") {
+          parts.push({
+            text: `DOCUMENTO ANEXADO (${pdf.name || "Texto/Quest\xF5es"}):
+${pdf.textContent.slice(0, 6e4)}`
+          });
+        } else if (pdf?.base64Data) {
           parts.push({
             inlineData: {
-              mimeType: "application/pdf",
+              mimeType: pdf.mimeType || "application/pdf",
               data: pdf.base64Data
             }
           });

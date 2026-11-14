@@ -8,16 +8,17 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
-  Image as ImageIcon,
   Database,
   Download,
+  Plus,
 } from 'lucide-react';
-import { ExtractedDeckMetadata, LocalMediaAsset, UploadedPdfFile } from '../types/deck';
+import { ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
 
 interface InputPanelProps {
   pdfs: UploadedPdfFile[];
   onAddPdfs: (files: UploadedPdfFile[]) => void;
   onRemovePdf: (index: number) => void;
+  onClearPdfs: () => void;
   rawJsonText: string;
   onRawJsonChange: (text: string) => void;
   jsonError: string | null;
@@ -31,18 +32,30 @@ interface InputPanelProps {
   onLoadGenericSample: () => void;
   isGeneratingMap: boolean;
   isGeneratingDeck: boolean;
-  localMediaAssets: Record<string, LocalMediaAsset>;
-  onAddLocalMediaFiles: (assets: LocalMediaAsset[]) => void;
-  onClearLocalMedia: () => void;
   guidCount: number;
   onImportGuidRegistry: (jsonText: string) => void;
   onExportGuidRegistry: () => void;
+}
+
+function inferDocRole(filename: string): UploadedPdfFile['docRole'] {
+  const lower = filename.toLowerCase();
+  if (/diretriz|consenso|guideline|protocolo|febrasgo|sbc|sbp|ms\b/.test(lower)) {
+    return 'diretriz';
+  }
+  if (/quest|prova|simulado|revalida|usp|unicamp|enare|sus/.test(lower)) {
+    return 'questoes';
+  }
+  if (/resumo|apostila|aula|caderno|ficha/.test(lower)) {
+    return 'resumo';
+  }
+  return 'documento';
 }
 
 export const InputPanel: React.FC<InputPanelProps> = ({
   pdfs,
   onAddPdfs,
   onRemovePdf,
+  onClearPdfs,
   rawJsonText,
   onRawJsonChange,
   jsonError,
@@ -56,30 +69,31 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   onLoadGenericSample,
   isGeneratingMap,
   isGeneratingDeck,
-  localMediaAssets,
-  onAddLocalMediaFiles,
-  onClearLocalMedia,
   guidCount,
   onImportGuidRegistry,
   onExportGuidRegistry,
 }) => {
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
-  const mediaFilesInputRef = useRef<HTMLInputElement>(null);
   const guidFileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
-  const [isDraggingMedia, setIsDraggingMedia] = useState(false);
   const [showJsonEditor, setShowJsonEditor] = useState(false);
 
-  const loadedMediaList = Object.values(localMediaAssets);
-
-  const handlePdfFiles = async (fileList: FileList | null) => {
+  const handleDocumentFiles = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     const processed: UploadedPdfFile[] = [];
 
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
-      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      const lower = file.name.toLowerCase();
+      const isPdf = file.type === 'application/pdf' || lower.endsWith('.pdf');
+      const isTextDoc =
+        lower.endsWith('.txt') ||
+        lower.endsWith('.md') ||
+        file.type === 'text/plain' ||
+        file.type === 'text/markdown';
+
+      if (isPdf) {
         const base64Data = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
@@ -95,61 +109,31 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           size: file.size,
           mimeType: 'application/pdf',
           base64Data,
+          docRole: inferDocRole(file.name),
+        });
+      } else if (isTextDoc) {
+        const textContent = await file.text();
+        processed.push({
+          name: file.name,
+          size: file.size,
+          mimeType: 'text/plain',
+          base64Data: '',
+          textContent,
+          docRole: inferDocRole(file.name),
         });
       }
     }
+
     if (processed.length > 0) {
       onAddPdfs(processed);
       if (!deckKey.trim()) {
         const inferred = processed[0].name
-          .replace(/\.pdf$/i, '')
+          .replace(/\.(?:pdf|txt|md)$/i, '')
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '_')
           .replace(/^_|_$/g, '');
         if (inferred) onDeckKeyChange(inferred);
       }
-    }
-  };
-
-  const handleLocalMediaFileUpload = async (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
-    const assets: LocalMediaAsset[] = [];
-
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      const lower = file.name.toLowerCase();
-      if (
-        lower.endsWith('.png') ||
-        lower.endsWith('.jpg') ||
-        lower.endsWith('.jpeg') ||
-        lower.endsWith('.webp') ||
-        lower.endsWith('.svg') ||
-        lower.endsWith('.gif') ||
-        lower.endsWith('.mp3') ||
-        lower.endsWith('.wav') ||
-        lower.endsWith('.ogg') ||
-        file.type.startsWith('image/') ||
-        file.type.startsWith('audio/')
-      ) {
-        const dataUri = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        });
-        if (dataUri) {
-          assets.push({
-            filename: file.name.trim(),
-            mimeType: file.type || (lower.endsWith('.mp3') ? 'audio/mpeg' : 'image/png'),
-            dataUri,
-            size: file.size,
-          });
-        }
-      }
-    }
-
-    if (assets.length > 0) {
-      onAddLocalMediaFiles(assets);
     }
   };
 
@@ -177,10 +161,10 @@ export const InputPanel: React.FC<InputPanelProps> = ({
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-base font-bold text-slate-100 font-display">
-            1. Entrada de Materiais, Mídias Locais & Tema
+            1. Entrada de Múltiplos Documentos & Tema
           </h1>
           <p className="text-xs text-slate-400 mt-0.5">
-            Crie ou recrie baralhos de qualquer especialidade médica a partir de PDFs, JSON atual e mídias locais (<code className="font-mono text-slate-300">04_Mídias/</code>).
+            Anexe simultaneamente múltiplos PDFs/documentos (Diretrizes + Resumos + Questões) e/ou o JSON atual. Imagens ausentes são buscadas automaticamente no Google/Web.
           </p>
         </div>
 
@@ -207,7 +191,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             type="text"
             value={deckKey}
             onChange={(e) => onDeckKeyChange(e.target.value)}
-            placeholder="Digite qualquer tema (ex.: insuficiencia_cardiaca, assistencia_ao_parto, trauma_abdominal)"
+            placeholder="Digite qualquer tema (ex.: assistencia_ao_parto, insuficiencia_cardiaca, trauma_abdominal)"
             className="w-full px-3.5 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none transition-colors"
           />
         </div>
@@ -219,10 +203,10 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           >
             <div className="min-w-0">
               <div className="text-xs font-medium text-slate-200 truncate">
-                Complementar com Google Search
+                Google Search Grounding + Imagens Web
               </div>
               <div className="text-[11px] text-slate-400 truncate">
-                Diretrizes MS, Sociedades Brasileiras e Internacionais
+                Diretrizes MS / Sociedades + Imagens LITFL, Radiopaedia, Open-i
               </div>
             </div>
             <input
@@ -236,75 +220,105 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         </div>
       </div>
 
-      {/* Row 2: Two side-by-side dropzones: PDFs + Local Media Assets (04_Mídias/) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* PDF Dropzone */}
-        <div>
-          <input
-            ref={pdfInputRef}
-            id="pdf-file-upload"
-            type="file"
-            accept="application/pdf,.pdf"
-            multiple
-            onChange={(e) => handlePdfFiles(e.target.files)}
-            className="sr-only"
-          />
+      {/* Row 2: Multi-Document Dropzone (Diretriz + Resumo + Questões) */}
+      <div>
+        <input
+          ref={pdfInputRef}
+          id="pdf-file-upload"
+          type="file"
+          accept="application/pdf,.pdf,.txt,.md,text/plain,text/markdown"
+          multiple
+          onChange={(e) => {
+            handleDocumentFiles(e.target.files);
+            e.target.value = '';
+          }}
+          className="sr-only"
+        />
 
-          <div
-            onDragOver={(e) => {
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDraggingPdf(true);
+          }}
+          onDragLeave={() => setIsDraggingPdf(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setIsDraggingPdf(false);
+            handleDocumentFiles(e.dataTransfer.files);
+          }}
+          onClick={() => pdfInputRef.current?.click()}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
-              setIsDraggingPdf(true);
-            }}
-            onDragLeave={() => setIsDraggingPdf(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDraggingPdf(false);
-              handlePdfFiles(e.dataTransfer.files);
-            }}
-            onClick={() => pdfInputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                pdfInputRef.current?.click();
-              }
-            }}
-            className={`flex items-center justify-between gap-3 px-4 py-3.5 border border-dashed rounded-lg transition-colors cursor-pointer ${
-              isDraggingPdf
-                ? 'border-sky-400 bg-slate-900/90'
-                : 'border-slate-700 hover:border-slate-600 bg-[#0B0F17]/70'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Upload className="w-4 h-4 text-slate-400 shrink-0" />
-              <div className="text-left min-w-0">
-                <p className="text-xs font-medium text-slate-200 truncate">
-                  Apostilas / Diretrizes em PDF
-                </p>
-                <p className="text-[11px] text-slate-400 truncate">
-                  Arraste PDFs ou clique para enviar (inlineData)
-                </p>
-              </div>
+              pdfInputRef.current?.click();
+            }
+          }}
+          className={`flex flex-col sm:flex-row items-center justify-between gap-4 px-5 py-4 border border-dashed rounded-lg transition-colors cursor-pointer ${
+            isDraggingPdf
+              ? 'border-sky-400 bg-slate-900/90'
+              : 'border-slate-700 hover:border-slate-600 bg-[#0B0F17]/70'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <Upload className="w-4 h-4 text-sky-400 shrink-0" />
+            <div className="text-left">
+              <p className="text-xs font-medium text-slate-200">
+                Anexe múltiplos documentos simultaneamente (Diretrizes + Resumo + Questões)
+              </p>
+              <p className="text-[11px] text-slate-400">
+                Arraste vários arquivos <code className="font-mono text-slate-300">.pdf</code>,{' '}
+                <code className="font-mono text-slate-300">.txt</code> ou{' '}
+                <code className="font-mono text-slate-300">.md</code> de uma vez ou adicione em etapas
+              </p>
             </div>
-
-            <span className="px-2.5 py-1 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-md whitespace-nowrap shrink-0">
-              {pdfs.length > 0 ? `${pdfs.length} PDF(s)` : 'Escolher PDFs'}
-            </span>
           </div>
 
-          {pdfs.length > 0 && (
-            <ul className="mt-2 divide-y divide-slate-800 border border-slate-800 rounded-lg bg-[#0B0F17] max-h-28 overflow-y-auto">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-md whitespace-nowrap shrink-0">
+            <Plus className="w-3.5 h-3.5 text-sky-400" />
+            <span>
+              {pdfs.length > 0
+                ? `${pdfs.length} documento(s) anexado(s) — Adicionar mais`
+                : 'Selecionar Múltiplos Arquivos'}
+            </span>
+          </span>
+        </div>
+
+        {pdfs.length > 0 && (
+          <div className="mt-2 border border-slate-800 rounded-lg bg-[#0B0F17] overflow-hidden">
+            <div className="px-3.5 py-1.5 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+              <span>
+                <strong className="text-slate-200">{pdfs.length}</strong> documento(s) prontos para síntese conjunta
+              </span>
+              <button
+                type="button"
+                onClick={onClearPdfs}
+                className="text-slate-400 hover:text-red-400 cursor-pointer"
+              >
+                Remover todos
+              </button>
+            </div>
+            <ul className="divide-y divide-slate-800 max-h-40 overflow-y-auto">
               {pdfs.map((pdf, index) => (
                 <li
                   key={`${pdf.name}-${index}`}
-                  className="flex items-center justify-between px-3 py-1.5 text-xs"
+                  className="flex items-center justify-between px-3.5 py-2 text-xs"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <FileText className="w-3.5 h-3.5 text-sky-400 shrink-0" />
                     <span className="font-mono text-slate-200 truncate">{pdf.name}</span>
-                    <span className="text-slate-500 tabular-nums shrink-0">
-                      ({(pdf.size / 1024).toFixed(0)} KB)
+                    <span className="text-slate-600" aria-hidden="true">
+                      ·
+                    </span>
+                    <span className="text-sky-300/90 text-[11px] shrink-0 capitalize">
+                      {pdf.docRole || 'documento'}
+                    </span>
+                    <span className="text-slate-600" aria-hidden="true">
+                      ·
+                    </span>
+                    <span className="text-slate-400 tabular-nums shrink-0">
+                      {Math.max(1, Math.round(pdf.size / 1024))} KB
                     </span>
                   </div>
                   <button
@@ -318,86 +332,8 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                 </li>
               ))}
             </ul>
-          )}
-        </div>
-
-        {/* Local Media Assets Dropzone (04_Mídias / .png, .jpg, .webp, .svg, .mp3) */}
-        <div>
-          <input
-            ref={mediaFilesInputRef}
-            id="local-media-upload"
-            type="file"
-            accept=".png,.jpg,.jpeg,.webp,.svg,.gif,.mp3,.wav,.ogg,image/*,audio/*"
-            multiple
-            onChange={(e) => handleLocalMediaFileUpload(e.target.files)}
-            className="sr-only"
-          />
-
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDraggingMedia(true);
-            }}
-            onDragLeave={() => setIsDraggingMedia(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDraggingMedia(false);
-              handleLocalMediaFileUpload(e.dataTransfer.files);
-            }}
-            onClick={() => mediaFilesInputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                mediaFilesInputRef.current?.click();
-              }
-            }}
-            className={`flex items-center justify-between gap-3 px-4 py-3.5 border border-dashed rounded-lg transition-colors cursor-pointer ${
-              isDraggingMedia
-                ? 'border-emerald-400 bg-slate-900/90'
-                : 'border-slate-700 hover:border-slate-600 bg-[#0B0F17]/70'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <ImageIcon className="w-4 h-4 text-emerald-400 shrink-0" />
-              <div className="text-left min-w-0">
-                <p className="text-xs font-medium text-slate-200 truncate">
-                  Mídias Locais (<code className="font-mono text-emerald-300">04_Mídias/</code>)
-                </p>
-                <p className="text-[11px] text-slate-400 truncate">
-                  Envie .png, .jpg, .webp, .svg ou .mp3 para embutir no .apkg/.zip
-                </p>
-              </div>
-            </div>
-
-            <span className="px-2.5 py-1 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-md whitespace-nowrap shrink-0">
-              {loadedMediaList.length > 0
-                ? `${loadedMediaList.length} arquivo(s)`
-                : 'Enviar Mídias'}
-            </span>
           </div>
-
-          {loadedMediaList.length > 0 && (
-            <div className="mt-2 px-3 py-1.5 border border-slate-800 rounded-lg bg-[#0B0F17] flex items-center justify-between gap-2 text-xs">
-              <span className="font-mono text-emerald-300 truncate">
-                {loadedMediaList.length} mídia(s) pronta(s):{' '}
-                {loadedMediaList
-                  .slice(0, 3)
-                  .map((m) => m.filename)
-                  .join(', ')}
-                {loadedMediaList.length > 3 ? '...' : ''}
-              </span>
-              <button
-                type="button"
-                onClick={onClearLocalMedia}
-                className="text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Limpar mídias
-              </button>
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Row 3: Compact / Collapsible Optional JSON Deck Upload + GUID FSRS Registry */}
@@ -418,7 +354,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
 
           <div className="flex flex-wrap items-center gap-2.5 text-xs">
             <span className="text-slate-400 tabular-nums">
-              {extractedMeta.existingIds.length} IDs · {extractedMeta.mediaTags.length} refs de mídia ·{' '}
+              {extractedMeta.existingIds.length} IDs ·{' '}
               <strong className="text-emerald-400">{guidCount}</strong> GUIDs FSRS salvos
             </span>
 
@@ -484,7 +420,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
               rows={6}
               value={rawJsonText}
               onChange={(e) => onRawJsonChange(e.target.value)}
-              placeholder='Cole aqui o conteúdo do arquivo *_notes.json para preservar os "id" numéricos FSRS...'
+              placeholder='Cole aqui o conteúdo do arquivo *_notes.json para preservar os "id" numéricos FSRS (áudios órfãos serão limpos e imagens locais serão buscadas automaticamente no Google/Web)...'
               className="w-full p-3 text-xs font-mono bg-[#0B0F17] text-slate-200 border border-slate-700 rounded-lg focus:border-sky-400 focus:outline-none leading-relaxed"
             />
             {jsonError && <p className="text-xs text-red-400">{jsonError}</p>}

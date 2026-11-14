@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Zap,
   Copy,
@@ -17,9 +17,9 @@ import {
   ShieldCheck,
   Eye,
   Maximize2,
-  Upload,
   PackageCheck,
-  Volume2,
+  RefreshCw,
+  MonitorUp,
 } from 'lucide-react';
 import {
   CanonicalCard,
@@ -27,11 +27,11 @@ import {
   CardType,
   DeckCurationStats,
   ExtractedDeckMetadata,
-  LocalMediaAsset,
   MedicalImageResult,
   PriorityLevel,
 } from '../types/deck';
 import {
+  applyResolvedWebImageToCard,
   convertBasicToCloze,
   convertClozeToBasic,
   extractDeckMediaManifest,
@@ -47,10 +47,13 @@ interface WozniakLinterDeckProps {
   deckKey: string;
   extractedMeta: ExtractedDeckMetadata;
   curationStats?: DeckCurationStats | null;
-  localMediaAssets: Record<string, LocalMediaAsset>;
-  onUploadCardMediaFile: (card: CanonicalCard, file: File, targetFilename?: string) => void;
   onRemoveMissingMediaFromCard: (cardId: number) => void;
   onRemoveAllMissingMedia: () => void;
+  onAutoResolveMissingImages: () => void;
+  isAutoResolvingImages?: boolean;
+  onOpenQuickReview: () => void;
+  onSyncAnkiConnect: () => void;
+  isSyncingAnkiConnect?: boolean;
   onCurateAndRebalance: () => void;
   onUpdateCard: (updated: CanonicalCard) => void;
   onDeleteCard: (id: number) => void;
@@ -149,10 +152,13 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   deckKey,
   extractedMeta,
   curationStats,
-  localMediaAssets,
-  onUploadCardMediaFile,
   onRemoveMissingMediaFromCard,
   onRemoveAllMissingMedia,
+  onAutoResolveMissingImages,
+  isAutoResolvingImages = false,
+  onOpenQuickReview,
+  onSyncAnkiConnect,
+  isSyncingAnkiConnect = false,
   onCurateAndRebalance,
   onUpdateCard,
   onDeleteCard,
@@ -175,18 +181,12 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const [viewTab, setViewTab] = useState<'CARDS' | 'RAW_JSON'>('CARDS');
   const [copiedJson, setCopiedJson] = useState(false);
 
-  // Per-card local file upload target state
-  const cardFileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadTargetCard, setUploadTargetCard] = useState<{
-    card: CanonicalCard;
-    targetFilename?: string;
-  } | null>(null);
-
   // Medical Image Picker state per card
   const [imagePickerCardId, setImagePickerCardId] = useState<number | null>(null);
   const [imageSearchTerm, setImageSearchTerm] = useState('');
   const [imageResults, setImageResults] = useState<MedicalImageResult[]>([]);
   const [isSearchingImages, setIsSearchingImages] = useState(false);
+  const [refreshingStripCardId, setRefreshingStripCardId] = useState<number | null>(null);
   const [customImageUrl, setCustomImageUrl] = useState('');
   const [customImageLegend, setCustomImageLegend] = useState('');
 
@@ -195,14 +195,13 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const [maskingCardId, setMaskingCardId] = useState<number | null>(null);
 
   const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
-  const availableMediaNames = Object.keys(localMediaAssets);
 
   const lintMap = new Map<number, CardLintResult>();
   let totalFlaggedCards = 0;
   let totalCardsWithMissingMedia = 0;
 
   cards.forEach((card) => {
-    const res = lintCard(card, availableMediaNames);
+    const res = lintCard(card);
     lintMap.set(card.id, res);
     if (!res.isValid) {
       totalFlaggedCards++;
@@ -222,7 +221,10 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const filteredCards = cards.filter((card) => {
     const lintRes = lintMap.get(card.id);
     if (filterMode === 'WARNINGS' && lintRes?.isValid) return false;
-    if (filterMode === 'MISSING_MEDIA' && (!lintRes || lintRes.metrics.missingMediaFiles.length === 0))
+    if (
+      filterMode === 'MISSING_MEDIA' &&
+      (!lintRes || lintRes.metrics.missingMediaFiles.length === 0)
+    )
       return false;
     if (filterMode === 'BASIC' && card.type !== 'basic') return false;
     if (filterMode === 'CLOZE' && card.type !== 'cloze') return false;
@@ -264,10 +266,11 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     setImageSearchTerm(defaultQuery);
     setCustomImageUrl('');
     setCustomImageLegend('');
-    await triggerMedicalImageSearch(defaultQuery, card.topic, card.question);
+    await triggerMedicalImageSearch(card, defaultQuery, card.topic, card.question);
   };
 
   const triggerMedicalImageSearch = async (
+    targetCard: CanonicalCard,
     queryText: string,
     topicText: string = '',
     questionText: string = ''
@@ -283,13 +286,19 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           query: queryText,
           topic: topicText,
           question: stripHtml(questionText),
+          preferGoogleGrounding: true,
         }),
       });
       if (res.ok) {
         const data = await res.json();
         const webImages: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
         if (webImages.length > 0) {
-          setImageResults([...localMatches.slice(0, 3), ...webImages.slice(0, 8)]);
+          const combined = [...webImages.slice(0, 6), ...localMatches.slice(0, 3)];
+          setImageResults(combined);
+          onUpdateCard({
+            ...targetCard,
+            imageAlternatives: combined.slice(0, 6),
+          });
         }
       }
     } catch {
@@ -297,6 +306,59 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     } finally {
       setIsSearchingImages(false);
     }
+  };
+
+  const handleRefreshQuickGallery = async (card: CanonicalCard) => {
+    setRefreshingStripCardId(card.id);
+    try {
+      const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
+      const legend = italicMatch?.[1] ? stripHtml(italicMatch[1]) : '';
+      const q = `${legend} ${card.topic}`.trim();
+      const localMatches = matchMedicalAtlasImages(q);
+      const res = await fetch('/api/media/search-medical-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: q,
+          topic: card.topic,
+          question: stripHtml(card.question),
+          preferGoogleGrounding: true,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const webImages: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
+        const combined = [...webImages, ...localMatches].slice(0, 6);
+        if (combined.length > 0) {
+          onUpdateCard({
+            ...card,
+            imageAlternatives: combined,
+          });
+        }
+      }
+    } catch {
+      // Keep current alternatives
+    } finally {
+      setRefreshingStripCardId(null);
+    }
+  };
+
+  const handleQuickSwapFromStrip = (
+    card: CanonicalCard,
+    chosenImg: MedicalImageResult,
+    currentLocalFilename: string,
+    alternatives: MedicalImageResult[]
+  ) => {
+    const updated = applyResolvedWebImageToCard(
+      card,
+      currentLocalFilename,
+      chosenImg,
+      alternatives
+    );
+    onUpdateCard({
+      ...updated,
+      imageVerified: true,
+    });
   };
 
   const handleAttachMedicalImage = (
@@ -327,6 +389,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         answer: card.type === 'cloze' ? 'Conduta imediata guiada pelo achado visual.' : card.answer,
         image_mode: 'recognition',
         imageVerified: false,
+        imageAlternatives: imageResults.slice(0, 6),
         question: `${cleanQ}<br><img src="${imgUrl.trim()}" data-anki-file="${localFile}">`,
         hint: `<i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`,
       });
@@ -335,6 +398,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         ...card,
         image_mode: 'feedback',
         imageVerified: false,
+        imageAlternatives: imageResults.slice(0, 6),
         question: cleanQ,
         hint: `${cleanHintWithoutImgs}<br><img src="${imgUrl.trim()}" data-anki-file="${localFile}">`,
       });
@@ -386,33 +450,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     };
     delete updated.image_mode;
     delete updated.imageVerified;
+    delete updated.imageAlternatives;
     onUpdateCard(updated);
-  };
-
-  const handleTriggerCardFileInput = (card: CanonicalCard, targetFilename?: string) => {
-    setUploadTargetCard({ card, targetFilename });
-    cardFileInputRef.current?.click();
-  };
-
-  const handleCardPaste = (
-    e: React.ClipboardEvent<HTMLElement>,
-    card: CanonicalCard,
-    missingFiles: string[]
-  ) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.type.startsWith('image/') || item.type.startsWith('audio/')) {
-        const file = item.getAsFile();
-        if (file) {
-          e.preventDefault();
-          const targetFilename = missingFiles[0] || undefined;
-          onUploadCardMediaFile(card, file, targetFilename);
-          break;
-        }
-      }
-    }
   };
 
   if (cards.length === 0) {
@@ -467,25 +506,6 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       id="linter-wozniak"
       className="bg-[#111827] border border-slate-800 rounded-xl p-6 space-y-5"
     >
-      {/* Hidden per-card file upload input */}
-      <input
-        ref={cardFileInputRef}
-        type="file"
-        accept=".png,.jpg,.jpeg,.webp,.svg,.gif,.mp3,.wav,.ogg,image/*,audio/*"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file && uploadTargetCard) {
-            onUploadCardMediaFile(
-              uploadTargetCard.card,
-              file,
-              uploadTargetCard.targetFilename
-            );
-          }
-          e.target.value = '';
-        }}
-        className="sr-only"
-      />
-
       {/* Clean Header & Actions */}
       <div className="flex flex-col gap-3.5 pb-4 border-b border-slate-800">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -505,13 +525,15 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             <span aria-hidden="true">·</span>
             <span
               className={
-                totalCardsWithMissingMedia > 0 ? 'text-red-400 font-semibold' : 'text-sky-300'
+                totalCardsWithMissingMedia > 0 ? 'text-amber-400 font-semibold' : 'text-sky-300'
               }
             >
-              <strong>{mediaManifest.length}</strong> mídia(s) referenciada(s)
-              {totalCardsWithMissingMedia > 0
-                ? ` (${totalCardsWithMissingMedia} card(s) com MISSING_MEDIA)`
-                : ''}
+              <strong>{mediaManifest.length}</strong> imagem(ns)
+              {isAutoResolvingImages
+                ? ' (Buscando imagens no Google/Web...)'
+                : totalCardsWithMissingMedia > 0
+                ? ` (${totalCardsWithMissingMedia} pendente(s))`
+                : ' (100% resolvidas)'}
             </span>
             <span aria-hidden="true">·</span>
             <span
@@ -564,6 +586,15 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={onOpenQuickReview}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-indigo-400 hover:bg-indigo-300 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>👁️ Revisão Rápida (Anki)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={onCurateAndRebalance}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               isProportionSkewed || !curationStats
@@ -594,21 +625,36 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           </button>
 
           {totalCardsWithMissingMedia > 0 && (
-            <button
-              type="button"
-              onClick={onRemoveAllMissingMedia}
-              title="Remove tags <img> e <audio> órfãs que não possuem arquivo local carregado"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-red-400" />
-              <span>🧹 Limpar Mídias Órfãs ({totalCardsWithMissingMedia})</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={onAutoResolveMissingImages}
+                disabled={isAutoResolvingImages}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Search className="w-3.5 h-3.5" />
+                <span>
+                  {isAutoResolvingImages
+                    ? 'Buscando no Google...'
+                    : `🔍 Auto-Buscar Imagens no Google (${totalCardsWithMissingMedia})`}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={onRemoveAllMissingMedia}
+                title="Remove referências de mídia que não encontraram imagem correspondente"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                <span>Limpar Órfãs</span>
+              </button>
+            </>
           )}
 
           <button
             type="button"
             onClick={handleCopyJson}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {copiedJson ? (
               <>
@@ -618,7 +664,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             ) : (
               <>
                 <Copy className="w-3.5 h-3.5" />
-                <span>📋 Copiar JSON</span>
+                <span>📋 JSON</span>
               </>
             )}
           </button>
@@ -626,10 +672,10 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           <button
             type="button"
             onClick={onDownloadJson}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>💾 Baixar {cleanDeckKey}_notes.json</span>
+            <span>💾 {cleanDeckKey}_notes.json</span>
           </button>
 
           <button
@@ -637,13 +683,11 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             onClick={onDownloadOfflineBundle}
             disabled={isExportingBundle}
             title="Baixa o JSON com links locais + pasta collection.media + note_guid_registry.json + RELATORIO_MIDIAS.json"
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Archive className="w-3.5 h-3.5" />
             <span>
-              {isExportingBundle
-                ? 'Empacotando .zip...'
-                : '📦 Baixar Pacote Offline (.zip)'}
+              {isExportingBundle ? 'Empacotando .zip...' : '📦 Pacote .zip'}
             </span>
           </button>
 
@@ -656,9 +700,22 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           >
             <PackageCheck className="w-3.5 h-3.5" />
             <span>
-              {isExportingApkg
-                ? 'Gerando .apkg...'
-                : '🎯 Exportar .apkg (Anki)'}
+              {isExportingApkg ? 'Gerando .apkg...' : '🎯 Exportar .apkg (Anki)'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onSyncAnkiConnect}
+            disabled={isSyncingAnkiConnect}
+            title="Conecta diretamente no AnkiConnect local (http://127.0.0.1:8765) para criar/atualizar as notas in-place pelo mesmo GUID FSRS"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <MonitorUp className="w-3.5 h-3.5 text-emerald-400" />
+            <span>
+              {isSyncingAnkiConnect
+                ? 'Sincronizando Anki...'
+                : '🔌 Enviar para Anki Desktop (Local)'}
             </span>
           </button>
         </div>
@@ -671,10 +728,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             [
               { id: 'ALL', label: `Todos (${cards.length})` },
               { id: 'WARNINGS', label: `Avisos (${totalFlaggedCards})` },
-              {
-                id: 'MISSING_MEDIA',
-                label: `Mídia Ausente (${totalCardsWithMissingMedia})`,
-              },
+              ...(totalCardsWithMissingMedia > 0
+                ? [
+                    {
+                      id: 'MISSING_MEDIA' as const,
+                      label: `Sem Imagem (${totalCardsWithMissingMedia})`,
+                    },
+                  ]
+                : []),
               { id: 'BASIC', label: `Basic (${basicCount})` },
               { id: 'CLOZE', label: `Cloze (${clozeCount})` },
             ] as const
@@ -736,12 +797,13 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       ) : (
         <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden">
           {filteredCards.map((card, index) => {
-            const lint = lintMap.get(card.id) || lintCard(card, availableMediaNames);
+            const lint = lintMap.get(card.id) || lintCard(card);
             const isEditing = editingCardId === card.id;
             const isImagePickerOpen = imagePickerCardId === card.id;
             const questionImgs = extractCardImagesWithMeta(card.question, card.id, cleanDeckKey);
             const hintImgs = extractCardImagesWithMeta(card.hint, card.id, cleanDeckKey);
-            const hasAnyImage = questionImgs.length > 0 || hintImgs.length > 0;
+            const allCardImgs = [...questionImgs, ...hintImgs];
+            const hasAnyImage = allCardImgs.length > 0;
             const missingFiles = lint.metrics.missingMediaFiles;
             const hasMissingMedia = missingFiles.length > 0;
             const isZoomed = zoomedCardId === card.id;
@@ -751,12 +813,17 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
               .replace(/(?:<br\s*\/?>\s*)+$/i, '')
               .trim();
 
+            const cardAlternatives: MedicalImageResult[] =
+              card.imageAlternatives && card.imageAlternatives.length > 0
+                ? card.imageAlternatives
+                : hasAnyImage
+                ? matchMedicalAtlasImages(`${card.topic} ${stripHtml(card.question)}`).slice(0, 6)
+                : [];
+
             return (
               <article
                 key={card.id}
-                onPaste={(e) => handleCardPaste(e, card, missingFiles)}
-                tabIndex={0}
-                className="p-4 sm:p-5 bg-[#0F1623] space-y-3 focus:outline-none focus:ring-1 focus:ring-sky-500/40"
+                className="p-4 sm:p-5 bg-[#0F1623] space-y-3"
               >
                 {/* Metadata & Counters Row */}
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -856,17 +923,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                       }`}
                     >
                       <ImageIcon className="w-3.5 h-3.5" />
-                      <span>{hasAnyImage ? 'Trocar Imagem' : 'Buscar Imagem'}</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleTriggerCardFileInput(card, missingFiles[0])}
-                      title="Enviar arquivo de imagem ou áudio para este card (ou cole com Ctrl+V)"
-                      className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-emerald-300 cursor-pointer transition-colors"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Enviar/Colar</span>
+                      <span>{hasAnyImage ? 'Buscar no Google/Web' : '+ Imagem Google'}</span>
                     </button>
 
                     <button
@@ -889,21 +946,18 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                   </div>
                 </div>
 
-                {/* Critical Alert Box for MISSING_MEDIA */}
+                {/* Alert Box if automatic Google/Web search did not find a match */}
                 {hasMissingMedia && (
                   <div className="px-3.5 py-2.5 rounded-lg bg-red-950/50 border border-red-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                     <div className="flex items-start gap-2 text-xs text-red-200">
                       <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                       <div>
                         <span className="font-semibold text-red-300">
-                          MISSING_MEDIA — Arquivo(s) órfão(s) sem mídia local carregada:{' '}
+                          MISSING_MEDIA — Imagem ainda não resolvida:{' '}
                         </span>
                         <code className="font-mono text-red-200">
                           {missingFiles.join(', ')}
                         </code>
-                        <span className="block text-[11px] text-red-300/90 mt-0.5">
-                          Você pode buscar uma imagem médica (Wikimedia / NLM Open-i), enviar o arquivo / colar imagem (<kbd className="px-1 py-0.5 bg-red-900/80 rounded font-mono">Ctrl+V</kbd>) neste card, ou remover a tag ausente.
-                        </span>
                       </div>
                     </div>
 
@@ -914,16 +968,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer"
                       >
                         <Search className="w-3 h-3" />
-                        <span>Buscar imagem</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleTriggerCardFileInput(card, missingFiles[0])}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded cursor-pointer"
-                      >
-                        <Upload className="w-3 h-3" />
-                        <span>Colar/Enviar arquivo</span>
+                        <span>Pesquisar no Google Imagens</span>
                       </button>
 
                       <button
@@ -932,7 +977,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-200 bg-red-900/70 hover:bg-red-800/80 border border-red-700 rounded cursor-pointer"
                       >
                         <Trash2 className="w-3 h-3" />
-                        <span>Remover mídia ausente</span>
+                        <span>Remover tag ausente</span>
                       </button>
                     </div>
                   </div>
@@ -955,16 +1000,16 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                   </div>
                 )}
 
-                {/* Inline Web Medical Image Search Drawer (Wikimedia Medical + NLM Open-i + Atlas) */}
+                {/* Inline Web Medical Image Search Drawer (Google Search Grounding + Wikimedia + NLM Open-i + Atlas) */}
                 {isImagePickerOpen && (
                   <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-700 space-y-3">
                     <div className="flex items-center justify-between gap-2">
                       <div>
                         <h4 className="text-xs font-semibold text-slate-100">
-                          Buscar Imagem Médica Fidedigna (Wikimedia Commons + NLM Open-i + Atlas)
+                          Busca Direta no Google Imagens / LITFL / Radiopaedia / Open-i / Wikimedia
                         </h4>
                         <p className="text-[11px] text-slate-400">
-                          Ao escolher uma imagem, ela será salva com nome local (<code className="font-mono text-sky-400">&lt;img src=&quot;arquivo.ext&quot;&gt;</code>) e embutida no pacote <code className="font-mono text-emerald-400">.apkg</code> e <code className="font-mono text-sky-400">.zip</code>.
+                          Imagens validadas no backend (<code className="font-mono text-sky-400">image/*</code>) e embutidas automaticamente no pacote <code className="font-mono text-emerald-400">.apkg</code>.
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -991,7 +1036,12 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                     <form
                       onSubmit={(e) => {
                         e.preventDefault();
-                        triggerMedicalImageSearch(imageSearchTerm, card.topic, card.question);
+                        triggerMedicalImageSearch(
+                          card,
+                          imageSearchTerm,
+                          card.topic,
+                          card.question
+                        );
                       }}
                       className="flex items-center gap-2"
                     >
@@ -999,7 +1049,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                         type="text"
                         value={imageSearchTerm}
                         onChange={(e) => setImageSearchTerm(e.target.value)}
-                        placeholder="Ex.: apendicite aguda TC, IAM supra ST ECG, pneumotórax RX, partograma..."
+                        placeholder="Ex.: apendicite aguda TC, IAM supra ST ECG LITFL, pneumotórax RX, partograma..."
                         className="flex-1 px-3 py-1.5 text-xs bg-slate-900 border border-slate-700 rounded-md text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
                       />
                       <button
@@ -1008,7 +1058,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded-md transition-colors cursor-pointer"
                       >
                         <Search className="w-3.5 h-3.5" />
-                        <span>{isSearchingImages ? 'Buscando...' : 'Buscar na Web'}</span>
+                        <span>
+                          {isSearchingImages ? 'Pesquisando no Google...' : 'Pesquisar no Google/Web'}
+                        </span>
                       </button>
                     </form>
 
@@ -1177,31 +1229,27 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                       {questionTextOnly}
                     </div>
 
-                    {/* Visual rendering + Anti-Spoiler & Offline Media Inspector */}
-                    {questionImgs.length > 0 && (
+                    {/* Visual rendering + Anti-Spoiler + Galeria de Troca Rápida Online (4–6 Miniaturas) */}
+                    {allCardImgs.length > 0 && (
                       <div className="space-y-2 pt-1">
-                        {questionImgs.map((imgMeta, i) => {
-                          const localAsset =
-                            localMediaAssets[imgMeta.localFilename.toLowerCase()] ||
-                            localMediaAssets[imgMeta.src.toLowerCase()];
-                          const resolvedImgSrc = localAsset
-                            ? localAsset.dataUri
-                            : imgMeta.src.startsWith('http://') ||
-                              imgMeta.src.startsWith('https://') ||
-                              imgMeta.src.startsWith('data:') ||
-                              imgMeta.src.startsWith('/')
-                            ? imgMeta.src
-                            : '';
+                        {allCardImgs.map((imgMeta, i) => {
+                          const resolvedImgSrc =
+                            imgMeta.src.startsWith('http://') ||
+                            imgMeta.src.startsWith('https://') ||
+                            imgMeta.src.startsWith('data:') ||
+                            imgMeta.src.startsWith('/')
+                              ? imgMeta.src
+                              : '';
 
                           return (
                             <div
                               key={`${imgMeta.localFilename}-${i}`}
-                              className={`rounded-lg overflow-hidden border bg-[#0B0F17] p-2.5 space-y-2 ${
+                              className={`rounded-lg overflow-hidden border bg-[#0B0F17] p-2.5 space-y-2.5 ${
                                 card.imageVerified
                                   ? 'border-emerald-700/70'
                                   : resolvedImgSrc
                                   ? 'border-slate-700/90'
-                                  : 'border-red-700/80'
+                                  : 'border-amber-700/80'
                               } ${isZoomed ? 'max-w-full' : 'max-w-xl'}`}
                             >
                               {resolvedImgSrc ? (
@@ -1213,23 +1261,72 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                                   } w-auto rounded object-contain mx-auto transition-all`}
                                 />
                               ) : (
-                                <div className="px-3 py-2 text-[11px] font-mono text-red-300 flex items-center justify-between gap-2">
+                                <div className="px-3 py-2 text-[11px] font-mono text-amber-300 flex items-center justify-between gap-2">
                                   <div className="flex items-center gap-2">
-                                    <ImageIcon className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                                    <ImageIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                                     <span>
-                                      Mídia local ausente:{' '}
-                                      <strong className="text-red-200">{imgMeta.localFilename}</strong>
+                                      {card.isResolvingImage
+                                        ? `Buscando imagem no Google/Web para ${imgMeta.localFilename}...`
+                                        : `Clique em uma miniatura online abaixo para definir ${imgMeta.localFilename}`}
                                     </span>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleTriggerCardFileInput(card, imgMeta.localFilename)
-                                    }
-                                    className="px-2 py-0.5 rounded bg-emerald-400 text-slate-950 font-sans font-semibold cursor-pointer"
-                                  >
-                                    Enviar {imgMeta.localFilename}
-                                  </button>
+                                </div>
+                              )}
+
+                              {/* Tira Compacta de 4–6 Miniaturas Alternativas Online (Troca em 1 Clique) */}
+                              {cardAlternatives.length > 0 && (
+                                <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                                    <span>
+                                      Troca rápida online em 1 clique ({cardAlternatives.slice(0, 6).length} opções do Google/Web):
+                                    </span>
+                                    <button
+                                      type="button"
+                                      disabled={refreshingStripCardId === card.id}
+                                      onClick={() => handleRefreshQuickGallery(card)}
+                                      className="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300 cursor-pointer"
+                                    >
+                                      <RefreshCw
+                                        className={`w-3 h-3 ${
+                                          refreshingStripCardId === card.id ? 'animate-spin' : ''
+                                        }`}
+                                      />
+                                      <span>Mais opções do Google</span>
+                                    </button>
+                                  </div>
+
+                                  <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5">
+                                    {cardAlternatives.slice(0, 6).map((alt) => {
+                                      const isSelected = resolvedImgSrc === alt.thumbUrl;
+                                      return (
+                                        <button
+                                          key={alt.id}
+                                          type="button"
+                                          onClick={() =>
+                                            handleQuickSwapFromStrip(
+                                              card,
+                                              alt,
+                                              imgMeta.localFilename,
+                                              cardAlternatives
+                                            )
+                                          }
+                                          title={`${alt.title} (${alt.source})`}
+                                          className={`h-12 rounded border overflow-hidden bg-slate-950 flex items-center justify-center cursor-pointer transition-all ${
+                                            isSelected
+                                              ? 'border-emerald-400 ring-1 ring-emerald-400/50'
+                                              : 'border-slate-800 hover:border-sky-400'
+                                          }`}
+                                        >
+                                          <img
+                                            src={alt.thumbUrl}
+                                            alt={alt.title}
+                                            loading="lazy"
+                                            className="max-h-full max-w-full object-contain"
+                                          />
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               )}
 
@@ -1239,11 +1336,6 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                                   <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-sky-300">
                                     collection.media/{imgMeta.localFilename}
                                   </span>
-                                  {localAsset && (
-                                    <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-700 text-emerald-300">
-                                      Local OK
-                                    </span>
-                                  )}
                                 </div>
 
                                 {resolvedImgSrc && (
@@ -1256,7 +1348,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
                                     >
                                       <Maximize2 className="w-3 h-3" />
-                                      <span>{isZoomed ? 'Reduzir' : 'Inspecionar Zoom'}</span>
+                                      <span>{isZoomed ? 'Reduzir' : 'Zoom'}</span>
                                     </button>
 
                                     <button
@@ -1310,7 +1402,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                                       ) : (
                                         <>
                                           <Eye className="w-3 h-3" />
-                                          <span>Marcar Verificada</span>
+                                          <span>Aprovar</span>
                                         </>
                                       )}
                                     </button>
@@ -1330,25 +1422,11 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                       </div>
                     )}
                     <div
-                      className="text-slate-300 leading-relaxed pt-1 [&_b]:text-slate-100 [&_i]:text-slate-400 [&_img]:mt-2 [&_img]:max-h-52 [&_img]:rounded-lg [&_img]:border [&_img]:border-slate-700"
+                      className="text-slate-300 leading-relaxed pt-1 [&_b]:text-slate-100 [&_i]:text-slate-400 [&_img]:hidden"
                       dangerouslySetInnerHTML={{
-                        __html: card.hint.replace(
-                          /\bsrc=["']([^"']+)["']/gi,
-                          (full, srcVal: string) => {
-                            const asset = localMediaAssets[srcVal.trim().toLowerCase()];
-                            return asset ? `src="${asset.dataUri}"` : full;
-                          }
-                        ),
+                        __html: card.hint,
                       }}
                     />
-
-                    {/* Audio local preview indicator when audio is loaded */}
-                    {/<audio\b/i.test(`${card.question} ${card.hint}`) && (
-                      <div className="pt-1 flex items-center gap-2 text-[11px] text-slate-400">
-                        <Volume2 className="w-3.5 h-3.5 text-sky-400" />
-                        <span>Tag de áudio presente no card</span>
-                      </div>
-                    )}
                   </div>
                 )}
               </article>

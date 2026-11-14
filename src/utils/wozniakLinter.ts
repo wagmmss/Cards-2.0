@@ -7,6 +7,7 @@ import {
   ExtractedDeckMetadata,
   LinterWarning,
   MediaBundleItem,
+  MedicalImageResult,
 } from '../types/deck';
 
 export const MAX_CLOZE_WORDS = 5;
@@ -48,6 +49,12 @@ const SYNONYM_SPOILERS: Record<string, string[]> = {
   norepinefrina: ['noradrenalina'],
   vasopressina: ['adh'],
   adh: ['vasopressina'],
+  pelvimetria: ['plano', 'zero', 'planos', 'delee', 'lee', 'hodges', 'bacia', 'espinhas', 'isquiaticas', 'conjugata'],
+  pelvimetr: ['plano', 'zero', 'planos', 'delee', 'lee', 'hodges', 'bacia', 'espinhas'],
+  plano: ['pelvimetria', 'delee', 'hodges'],
+  planos: ['pelvimetria', 'plano', 'zero', 'delee', 'hodges'],
+  manobra: ['manobras', 'mcroberts', 'rubin', 'woods', 'jacquemier', 'zavanelli', 'kristeller', 'leopold', 'ritgen', 'brandt'],
+  manobras: ['manobra', 'mcroberts', 'rubin', 'woods', 'jacquemier', 'zavanelli', 'kristeller', 'leopold', 'ritgen', 'brandt'],
 };
 
 const MEDICAL_ABBREVIATIONS: Array<[RegExp, string]> = [
@@ -418,8 +425,193 @@ export function extractDeckMediaManifest(
 }
 
 /**
+ * Automatically strips orphan `<audio>...</audio>` and `[sound:...]` tags whose source is not
+ * `https://`, `http://`, or `data:` (and not in availableMediaSet).
+ */
+export function stripOrphanAudioFromHtml(
+  html: string,
+  availableMediaSet?: Set<string>
+): { cleanedHtml: string; removedCount: number } {
+  if (!html) return { cleanedHtml: '', removedCount: 0 };
+  let removedCount = 0;
+
+  const isAudioSrcAvailable = (src: string): boolean => {
+    const clean = (src || '').trim();
+    if (/^(?:https?:\/\/|data:)/i.test(clean)) return true;
+    if (availableMediaSet && availableMediaSet.size > 0) {
+      const lower = clean.toLowerCase();
+      const base = lower.split(/[\\/]/).pop() || lower;
+      if (availableMediaSet.has(lower) || availableMediaSet.has(base)) return true;
+    }
+    return false;
+  };
+
+  let out = html.replace(
+    /(?:<br\s*\/?>\s*)*<audio\b[^>]*>[\s\S]*?<source\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/audio>/gi,
+    (fullMatch, srcVal: string) => {
+      if (isAudioSrcAvailable(srcVal)) return fullMatch;
+      removedCount++;
+      return '';
+    }
+  );
+
+  out = out.replace(
+    /(?:<br\s*\/?>\s*)*<audio\b(?![^>]*>[\s\S]*?<source\b)[^>]*\bsrc=["']([^"']+)["'][^>]*>(?:[\s\S]*?<\/audio>)?/gi,
+    (fullMatch, srcVal: string) => {
+      if (isAudioSrcAvailable(srcVal)) return fullMatch;
+      removedCount++;
+      return '';
+    }
+  );
+
+  out = out.replace(/(?:<br\s*\/?>\s*)*\[sound:([^\]]+)\]/gi, (fullMatch, srcVal: string) => {
+    if (isAudioSrcAvailable(srcVal)) return fullMatch;
+    removedCount++;
+    return '';
+  });
+
+  return {
+    cleanedHtml: out.replace(/(?:<br\s*\/?>\s*)+$/i, '').trim(),
+    removedCount,
+  };
+}
+
+/**
+ * Extracts unresolved local `<img src="arquivo_local.png">` references from a card along with
+ * a rich search query built from the visual legend `<i>...</i>` + `topic` + `question` so they can
+ * be automatically resolved via Google/Web medical image search without manual upload.
+ */
+export function extractUnresolvedLocalImages(
+  card: CanonicalCard,
+  availableMediaNames?: Iterable<string>
+): Array<{
+  filename: string;
+  field: 'question' | 'hint';
+  legendText: string;
+  searchQuery: string;
+}> {
+  const availableSet = new Set<string>();
+  if (availableMediaNames) {
+    for (const n of availableMediaNames) {
+      if (n) {
+        const clean = String(n).trim().toLowerCase();
+        availableSet.add(clean);
+        const base = clean.split(/[\\/]/).pop();
+        if (base) availableSet.add(base);
+      }
+    }
+  }
+
+  const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
+  const legendText = italicMatch?.[1] ? stripHtml(italicMatch[1]).trim() : '';
+  const cleanFileWords = (fname: string) =>
+    fname
+      .replace(/\.[a-z0-9]+$/i, '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\b(?:img|image|card|fig|figura|\d+)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const refs = extractCardMediaReferences(card, card.deck_key || 'deck');
+  const unresolved: Array<{
+    filename: string;
+    field: 'question' | 'hint';
+    legendText: string;
+    searchQuery: string;
+  }> = [];
+
+  for (const ref of refs) {
+    if (ref.kind !== 'image') continue;
+    const raw = (ref.sourceUrl || '').trim();
+    const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
+    const isLoadedLocally =
+      availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase());
+
+    if (!isSelfContainedOrWeb && !isLoadedLocally) {
+      const fileHint = cleanFileWords(ref.filename);
+      const searchQuery = [legendText, card.topic, fileHint]
+        .filter(Boolean)
+        .join(' ')
+        .slice(0, 140)
+        .trim();
+      unresolved.push({
+        filename: ref.filename,
+        field: ref.field,
+        legendText,
+        searchQuery: searchQuery || card.topic || 'medical exam',
+      });
+    }
+  }
+
+  return unresolved;
+}
+
+/**
+ * Replaces a card's local `<img src="...">` (or current image) with a resolved web image URL
+ * while preserving `data-anki-file` and storing 4–6 alternative thumbnails on `card.imageAlternatives`.
+ */
+export function applyResolvedWebImageToCard(
+  card: CanonicalCard,
+  targetFilename: string,
+  chosenImage: MedicalImageResult,
+  alternatives: MedicalImageResult[]
+): CanonicalCard {
+  const safeFile =
+    targetFilename.trim() ||
+    chosenImage.suggestedFilename ||
+    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
+  const newImgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
+
+  let question = card.question || '';
+  let hint = card.hint || '';
+
+  const replaceTargetImg = (html: string): { updated: string; replaced: boolean } => {
+    let replaced = false;
+    const updated = html.replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (fullTag, srcVal: string) => {
+      if (replaced) return fullTag;
+      const localName = resolveLocalMediaFilename(fullTag, srcVal, card.id, 0, card.deck_key || 'deck');
+      if (
+        !targetFilename ||
+        localName.toLowerCase() === targetFilename.toLowerCase() ||
+        srcVal.toLowerCase().includes(targetFilename.toLowerCase())
+      ) {
+        replaced = true;
+        return newImgTag;
+      }
+      return fullTag;
+    });
+    return { updated, replaced };
+  };
+
+  const qRes = replaceTargetImg(question);
+  if (qRes.replaced) {
+    question = qRes.updated;
+  } else {
+    const hRes = replaceTargetImg(hint);
+    if (hRes.replaced) {
+      hint = hRes.updated;
+    } else if (/<img\b/i.test(question)) {
+      question = question.replace(/<img\b[^>]*>/i, newImgTag);
+    } else if (/<img\b/i.test(hint)) {
+      hint = hint.replace(/<img\b[^>]*>/i, newImgTag);
+    } else {
+      question = `${question}<br>${newImgTag}`;
+    }
+  }
+
+  return {
+    ...card,
+    question,
+    hint,
+    imageAlternatives: alternatives.slice(0, 6),
+    isResolvingImage: false,
+  };
+}
+
+/**
  * Parses an uploaded or pasted *_notes.json string and extracts existing FSRS numeric IDs
- * and media references (<img src="..."> / <audio>).
+ * and media references (<img src="..."> / <audio>), automatically removing orphan <audio> tags
+ * whose .mp3 files do not exist on rawCards.
  */
 export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata {
   const empty: ExtractedDeckMetadata = {
@@ -427,6 +619,7 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
     mediaTags: [],
     detectedDeckKey: '',
     rawCards: [],
+    removedOrphanAudioCount: 0,
   };
 
   if (!rawJsonText || !rawJsonText.trim()) {
@@ -444,6 +637,7 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
   let detectedDeckKey = '';
   const mediaSet = new Set<string>();
   const existingIds: number[] = [];
+  let removedOrphanAudioCount = 0;
 
   if (Array.isArray(parsed)) {
     rawCards = parsed.filter((item): item is Record<string, unknown> =>
@@ -477,7 +671,7 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
     }
     existingIds.push(numericId);
 
-    const question =
+    const rawQuestion =
       typeof card.question === 'string'
         ? card.question
         : typeof card.front === 'string'
@@ -489,7 +683,7 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
         : typeof card.back === 'string'
         ? card.back
         : '';
-    const hint =
+    const rawHint =
       typeof card.hint === 'string'
         ? card.hint
         : typeof card.comment === 'string'
@@ -497,7 +691,7 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
         : '';
     const topic =
       typeof card.topic === 'string' ? card.topic : 'Clínica Médica - Conduta';
-    const hasCloze = /\{\{c\d+::/.test(question);
+    const hasCloze = /\{\{c\d+::/.test(rawQuestion);
     const type = card.type === 'cloze' || hasCloze ? 'cloze' : 'basic';
 
     if (!detectedDeckKey && Array.isArray(card.tags) && typeof card.tags[0] === 'string') {
@@ -506,9 +700,14 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
       detectedDeckKey = card.deck_key.trim();
     }
 
-    [question, answer, hint].forEach((fieldVal) => {
+    [rawQuestion, answer, rawHint].forEach((fieldVal) => {
       extractMediaFromString(fieldVal).forEach((m) => mediaSet.add(m));
     });
+
+    // Auto-remove orphan <audio> tags on imported deck cards so user never has to upload .mp3 files
+    const qAudioClean = stripOrphanAudioFromHtml(rawQuestion);
+    const hAudioClean = stripOrphanAudioFromHtml(rawHint);
+    removedOrphanAudioCount += qAudioClean.removedCount + hAudioClean.removedCount;
 
     const imageMode =
       card.image_mode === 'recognition' || card.image_mode === 'feedback'
@@ -519,9 +718,9 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
       id: numericId,
       type,
       topic,
-      question,
+      question: qAudioClean.cleanedHtml,
       answer: type === 'cloze' ? (typeof card.answer === 'string' ? card.answer : '') : answer,
-      hint,
+      hint: hAudioClean.cleanedHtml,
       tags: Array.isArray(card.tags)
         ? (card.tags.filter((t) => typeof t === 'string') as string[])
         : undefined,
@@ -544,6 +743,7 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
     mediaTags: Array.from(mediaSet),
     detectedDeckKey,
     rawCards: normalizedCards,
+    removedOrphanAudioCount,
   };
 }
 
@@ -627,25 +827,28 @@ export function lintCard(
   }
 
   // 0. Validate all <img src="..."> and <audio> media references for MISSING_MEDIA
+  // (Only flag MISSING_MEDIA if automatic web search is not currently running and could not resolve the media)
   const mediaRefs = extractCardMediaReferences(card, card.deck_key || 'deck');
   const missingMediaFiles: string[] = [];
-  for (const ref of mediaRefs) {
-    const raw = (ref.sourceUrl || '').trim();
-    const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
-    const isLoadedLocally =
-      availableMediaSet.has(ref.filename.toLowerCase()) ||
-      availableMediaSet.has(raw.toLowerCase());
+  if (!card.isResolvingImage) {
+    for (const ref of mediaRefs) {
+      const raw = (ref.sourceUrl || '').trim();
+      const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
+      const isLoadedLocally =
+        availableMediaSet.has(ref.filename.toLowerCase()) ||
+        availableMediaSet.has(raw.toLowerCase());
 
-    if (!isSelfContainedOrWeb && !isLoadedLocally) {
-      if (!missingMediaFiles.includes(ref.filename)) {
-        missingMediaFiles.push(ref.filename);
+      if (!isSelfContainedOrWeb && !isLoadedLocally) {
+        if (!missingMediaFiles.includes(ref.filename)) {
+          missingMediaFiles.push(ref.filename);
+        }
+        warnings.push({
+          code: 'MISSING_MEDIA',
+          field: ref.field,
+          severity: 'error',
+          message: `Mídia local não encontrada ("${ref.filename}"): clique em "Buscar no Google/Web" ou remova a referência.`,
+        });
       }
-      warnings.push({
-        code: 'MISSING_MEDIA',
-        field: ref.field,
-        severity: 'error',
-        message: `Mídia local ausente ("${ref.filename}"): envie o arquivo em 04_Mídias, cole imagem (Ctrl+V), busque na web ou remova a mídia órfã.`,
-      });
     }
   }
 
@@ -661,7 +864,7 @@ export function lintCard(
       code: 'QUESTION_TOO_LONG',
       field: 'question',
       severity: 'warning',
-      message: `Enunciado com ${questionWordCount} palavras (Anti-Pattern-Matching Matuschak: máx. ${MAX_QUESTION_WORDS} palavras).`,
+      message: `Enunciado com ${questionWordCount} palavras (Matuschak & Nielsen Anti-Pattern-Matching: máx. ${MAX_QUESTION_WORDS} palavras para evitar memorização superficial da forma da frase).`,
     });
   }
 
@@ -783,14 +986,14 @@ export function lintCard(
         code: 'ANSWER_TOO_LONG',
         field: 'answer',
         severity: 'error',
-        message: 'Card basic exige resposta preenchida (1 a 12 palavras, máx 15).',
+        message: 'Card basic exige resposta preenchida (Matuschak Tractable & Focused: 1 a 12 palavras, máx 15).',
       });
     } else if (answerWordCount > MAX_BASIC_ANSWER_WORDS || answerCharCount > MAX_BASIC_ANSWER_CHARS) {
       warnings.push({
         code: 'ANSWER_TOO_LONG',
         field: 'answer',
         severity: 'error',
-        message: `Resposta excede o teto de Wozniak (${answerWordCount}/${MAX_BASIC_ANSWER_WORDS} palavras, ${answerCharCount}/${MAX_BASIC_ANSWER_CHARS} chars).`,
+        message: `Resposta viola Tractable & Focused de Matuschak/Nielsen (${answerWordCount}/${MAX_BASIC_ANSWER_WORDS} palavras, ${answerCharCount}/${MAX_BASIC_ANSWER_CHARS} chars).`,
       });
     }
 
@@ -799,7 +1002,7 @@ export function lintCard(
         code: 'ANSWER_HAS_SEMICOLON',
         field: 'answer',
         severity: 'error',
-        message: 'Proibido conter ponto-e-vírgula (;) na resposta basic (Princípio da Informação Mínima).',
+        message: 'Proibido conter ponto-e-vírgula (;) na resposta basic (Matuschak Focused: teste apenas 1 detalhe atômico por prompt).',
       });
     }
 
@@ -880,7 +1083,41 @@ export function lintCard(
       field: 'question',
       severity: 'error',
       message:
-        'Pergunta composta detectada. Aplique Duplo Salto Cognitivo Implícito (pergunte apenas 1 conduta atômica).',
+        'Pergunta composta detectada (viola Focused & Consistent de Matuschak). Pergunte apenas 1 decisão/alavanca atômica.',
+    });
+  }
+
+  // 7B. Matuschak Focused & Tractable: Prohibit unfocused plural list/set enumerations ("Quais são as causas/critérios...?", "Cite...", or numbered lists)
+  const unfocusedSetRegex =
+    /\b(?:quais\s+(?:s[aã]o\s+)?(?:os|as)\s+(?:principais\s+)?(?:causas|crit[eé]rios|sintomas|sinais|fatores|manifesta[cç][oõ]es|complica[cç][oõ]es|indica[cç][oõ]es|etapas|tipos)|cite\s+(?:os|as|\d+)|liste\s+(?:os|as))\b/i;
+  const answerNumberedListRegex = /(?:^|\s)(?:1[.)]\s+.+2[.)]\s+|[-•]\s+.+[-•]\s+)/;
+  if (
+    unfocusedSetRegex.test(visibleQuestion) ||
+    (card.type === 'basic' && answerNumberedListRegex.test(visibleAnswer))
+  ) {
+    warnings.push({
+      code: 'MATUSCHAK_UNFOCUSED_SET',
+      field: 'question',
+      severity: 'error',
+      message:
+        'Lista aberta não-focada (viola Matuschak Focused & Consistent): converta conjuntos/enumerações em 1 atributo específico ancorado ou 1 lacuna cloze.',
+    });
+  }
+
+  // 7C. Nielsen (Augmenting LTM) & Matuschak (Salience / No Binary Prompts): Prohibit passive dictionary definitions ("O que é X?") or binary Yes/No answers
+  const passiveDefinitionRegex =
+    /^\s*(?:o\s+que\s+[eé]\s+(?:o|a|um|uma)?\s*[a-zà-ú0-9\s-]{2,40}\??|defina\s+[a-zà-ú0-9\s-]{2,40}\.?|fale\s+sobre\s+.+)$/i;
+  const binaryAnswerRegex = /^(?:sim|n[aã]o|verdadeiro|falso)(?:[.,!]|$)/i;
+  if (
+    passiveDefinitionRegex.test(visibleQuestion.trim()) ||
+    (card.type === 'basic' && binaryAnswerRegex.test(visibleAnswer.trim()))
+  ) {
+    warnings.push({
+      code: 'NIELSEN_PASSIVE_OR_BINARY',
+      field: card.type === 'basic' && binaryAnswerRegex.test(visibleAnswer.trim()) ? 'answer' : 'question',
+      severity: 'error',
+      message:
+        'Prompt passivo/binário (viola Salience de Matuschak & LTM de Nielsen): evite definições de dicionário ("O que é...?") ou respostas Sim/Não; ancore em decisão clínica ou mecanismo causal.',
     });
   }
 
@@ -1220,7 +1457,10 @@ export function reconcileDeckIdsAndMedia(
       for (const mediaTag of origMedia) {
         if (!question.includes(mediaTag) && !hint.includes(mediaTag)) {
           if (mediaTag.startsWith('<audio') || mediaTag.startsWith('[sound:')) {
-            hint = `${hint} ${mediaTag}`.trim();
+            // Only keep audio if it has an embedded data: or https:// source
+            if (/src=["'](?:https?:\/\/|data:)/i.test(mediaTag)) {
+              hint = `${hint} ${mediaTag}`.trim();
+            }
           } else if (!hasNewImage) {
             question = `${question} ${mediaTag}`.trim();
           }
@@ -1354,6 +1594,22 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     'Qual a $1 imediata de primeira escolha'
   );
 
+  // 3B. Fix Matuschak unfocused set prompts ("Quais são as causas/critérios...?", "Cite...") -> focused single-attribute prompt
+  question = question.replace(
+    /\b(?:quais\s+(?:s[aã]o\s+)?(?:os|as)\s+(?:principais\s+)?(causas|crit[eé]rios|sintomas|sinais|fatores|manifesta[cç][oõ]es|complica[cç][oõ]es|indica[cç][oõ]es|etapas|tipos)|cite\s+(?:os|as|\d+)\s+([a-zà-ú]+)|liste\s+(?:os|as)\s+([a-zà-ú]+))/gi,
+    'Qual o achado ou parâmetro determinante de primeira linha'
+  );
+
+  // 3C. Fix Nielsen passive definition prompt ("O que é X?", "Defina X") -> salience clinical prompt
+  if (
+    /^\s*(?:o\s+que\s+[eé]\s+(?:o|a|um|uma)?\s*([a-zà-ú0-9\s-]{2,40})\??|defina\s+([a-zà-ú0-9\s-]{2,40})\.?|fale\s+sobre\s+(.+))$/i.test(
+      stripHtml(question).trim()
+    )
+  ) {
+    const cleanSub = stripHtml(topic.split(' - ').pop() || topic);
+    question = `Diante de suspeita clínica de ${cleanSub}, qual o achado determinante ou conduta imediata de primeira escolha?`;
+  }
+
   // 4. Fix vague temporal window ("Qual a conduta?") even if followed by media tags
   question = question.replace(
     /\bqual\s+(?:é\s+)?a\s+conduta\s*\?(?=\s*(?:<[^>]+>\s*)*$)/i,
@@ -1407,6 +1663,22 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
       answer = clauses.length > 1 ? clauses[1] : clauses[0];
     }
 
+    // Strip numbered/bulleted multi-item lists in basic answers (Matuschak Focused)
+    if (/(?:^|\s)(?:1[.)]\s+.+2[.)]\s+|[-•]\s+.+[-•]\s+)/.test(answer)) {
+      answer = answer
+        .replace(/^\s*(?:1[.)]|[-•])\s*/, '')
+        .split(/\s+(?:2[.)]|[-•])\s+/)[0]
+        .trim();
+    }
+
+    // Replace binary Yes/No answers with atomic clinical conduct (Nielsen & Matuschak)
+    if (/^(?:sim|n[aã]o|verdadeiro|falso)(?:[.,!]\s*|$)/i.test(stripHtml(answer).trim())) {
+      const afterBinary = stripHtml(answer)
+        .replace(/^(?:sim|n[aã]o|verdadeiro|falso)[.,!:\s-]*/i, '')
+        .trim();
+      answer = afterBinary || `Conduta imediata guiada por ${stripHtml(topic.split(' - ').pop() || topic)}`;
+    }
+
     const plainWords = stripHtml(answer).replace(/\.$/, '').split(/\s+/).filter(Boolean);
     if (plainWords.length > 12) {
       let cut = 11;
@@ -1440,11 +1712,10 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     }
   }
 
-  // 7. Normalize Hint structure (matching generator.py auto_heal_note & refiner.py)
-  hint = hint.replace(
-    /\[sound:([^\]]+)\]/gi,
-    '<audio controls preload="none" class="med-audio"><source src="$1" type="audio/mpeg"></audio>'
-  );
+  // 7. Normalize Hint structure & automatically remove orphan <audio> tags without files
+  question = stripOrphanAudioFromHtml(question).cleanedHtml;
+  hint = stripOrphanAudioFromHtml(hint).cleanedHtml;
+
   hint = hint
     .replace(/<b>\s*🩺\s*Preceptoria[^<]*:?<\/b>\s*/gi, '')
     .replace(/<b>\s*⚠️\s*Armadilha[^<]*:?<\/b>\s*/gi, '')
@@ -1862,60 +2133,16 @@ export function curateAndRebalanceDeck(
   );
 
   // Step 5: Strictly rebalance Basic vs. Cloze to 50% / 50% (guaranteed within 45%-55% for total >= 2)
-  const total = reconciled.length;
-  const targetBasicCount = Math.round(total * 0.5);
-  let currentBasicCount = reconciled.filter((c) => c.type === 'basic').length;
-  let convertedCount = 0;
+  const { cards: strictlyBalanced, convertedCount } = enforceStrictDeckRatio(reconciled);
 
-  if (total >= 2 && currentBasicCount < targetBasicCount) {
-    const needed = targetBasicCount - currentBasicCount;
-    let converted = 0;
-    for (let i = 0; i < reconciled.length && converted < needed; i++) {
-      if (reconciled[i].type === 'cloze') {
-        reconciled[i] = convertClozeToBasic(reconciled[i]);
-        converted++;
-        convertedCount++;
-      }
-    }
-  } else if (total >= 2 && currentBasicCount > targetBasicCount) {
-    const needed = currentBasicCount - targetBasicCount;
-    let converted = 0;
-    // Pass 1: convert basic cards that do NOT have <img> in question
-    for (let i = 0; i < reconciled.length && converted < needed; i++) {
-      const card = reconciled[i];
-      if (
-        card.type === 'basic' &&
-        card.image_mode !== 'recognition' &&
-        !/<img\b/i.test(card.question || '')
-      ) {
-        reconciled[i] = convertBasicToCloze(card, false);
-        if (reconciled[i].type === 'cloze') {
-          converted++;
-          convertedCount++;
-        }
-      }
-    }
-    // Pass 2: if still above targetBasicCount, force-convert remaining basic cards by moving <img> to feedback mode
-    for (let i = 0; i < reconciled.length && converted < needed; i++) {
-      const card = reconciled[i];
-      if (card.type === 'basic') {
-        reconciled[i] = convertBasicToCloze(card, true);
-        if (reconciled[i].type === 'cloze') {
-          converted++;
-          convertedCount++;
-        }
-      }
-    }
-  }
-
-  const finalCount = reconciled.length;
-  const finalBasic = reconciled.filter((c) => c.type === 'basic').length;
+  const finalCount = strictlyBalanced.length;
+  const finalBasic = strictlyBalanced.filter((c) => c.type === 'basic').length;
   const basicPct = finalCount > 0 ? Math.round((finalBasic / finalCount) * 100) : 50;
   const clozePct = finalCount > 0 ? 100 - basicPct : 50;
-  const preservedIdsCount = reconciled.filter((c) => existingIdSet.has(Number(c.id))).length;
+  const preservedIdsCount = strictlyBalanced.filter((c) => existingIdSet.has(Number(c.id))).length;
 
   return {
-    cards: reconciled,
+    cards: strictlyBalanced,
     stats: {
       originalCount,
       finalCount,
@@ -1927,6 +2154,68 @@ export function curateAndRebalanceDeck(
       clozePct,
     },
   };
+}
+
+/**
+ * Guarantees that any deck with >= 2 cards strictly respects the 45% to 55% Basic / Cloze range,
+ * converting excess cards toward 50%/50% if the deck falls outside 45%–55% (e.g. 44%/56%).
+ */
+export function enforceStrictDeckRatio(
+  inputCards: CanonicalCard[]
+): { cards: CanonicalCard[]; convertedCount: number } {
+  const working = inputCards.map((c) => ({ ...c }));
+  const total = working.length;
+  if (total < 2) {
+    return { cards: working, convertedCount: 0 };
+  }
+
+  const currentBasicCount = working.filter((c) => c.type === 'basic').length;
+  const currentBasicPct = Math.round((currentBasicCount / total) * 100);
+  const targetBasicCount = Math.round(total * 0.5);
+  let convertedCount = 0;
+
+  if (currentBasicPct < 45 || currentBasicCount < targetBasicCount) {
+    const needed = targetBasicCount - currentBasicCount;
+    let converted = 0;
+    for (let i = 0; i < working.length && converted < needed; i++) {
+      if (working[i].type === 'cloze') {
+        working[i] = convertClozeToBasic(working[i]);
+        converted++;
+        convertedCount++;
+      }
+    }
+  } else if (currentBasicPct > 55 || currentBasicCount > targetBasicCount) {
+    const needed = currentBasicCount - targetBasicCount;
+    let converted = 0;
+    // Pass 1: convert basic cards that do NOT have <img> in question
+    for (let i = 0; i < working.length && converted < needed; i++) {
+      const card = working[i];
+      if (
+        card.type === 'basic' &&
+        card.image_mode !== 'recognition' &&
+        !/<img\b/i.test(card.question || '')
+      ) {
+        working[i] = convertBasicToCloze(card, false);
+        if (working[i].type === 'cloze') {
+          converted++;
+          convertedCount++;
+        }
+      }
+    }
+    // Pass 2: if still above targetBasicCount, force-convert remaining basic cards by moving <img> to feedback mode
+    for (let i = 0; i < working.length && converted < needed; i++) {
+      const card = working[i];
+      if (card.type === 'basic') {
+        working[i] = convertBasicToCloze(card, true);
+        if (working[i].type === 'cloze') {
+          converted++;
+          convertedCount++;
+        }
+      }
+    }
+  }
+
+  return { cards: working, convertedCount };
 }
 
 const BASE91_TABLE =

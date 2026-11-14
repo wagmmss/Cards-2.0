@@ -28,6 +28,17 @@ export interface GuidRegistryData {
   entries: Record<string, string>;
 }
 
+export interface MedicalImageResult {
+  id: string;
+  title: string;
+  thumbUrl: string;
+  fullUrl: string;
+  description: string;
+  suggestedFilename: string;
+  defaultLegend: string;
+  source: string;
+}
+
 export interface CanonicalCard {
   id: number;
   type: CardType;
@@ -43,6 +54,8 @@ export interface CanonicalCard {
   priority?: PriorityLevel;
   deck_key?: string;
   imageVerified?: boolean;
+  imageAlternatives?: MedicalImageResult[];
+  isResolvingImage?: boolean;
 }
 
 export interface ExtractedDeckMetadata {
@@ -50,6 +63,7 @@ export interface ExtractedDeckMetadata {
   mediaTags: string[];
   detectedDeckKey: string;
   rawCards: CanonicalCard[];
+  removedOrphanAudioCount?: number;
 }
 
 export interface ClinicalMapItem {
@@ -74,17 +88,6 @@ export interface ClinicalMapResponse {
   items: ClinicalMapItem[];
   guidelineUpdates: string[];
   groundingSources: GroundingSource[];
-}
-
-export interface MedicalImageResult {
-  id: string;
-  title: string;
-  thumbUrl: string;
-  fullUrl: string;
-  description: string;
-  suggestedFilename: string;
-  defaultLegend: string;
-  source: string;
 }
 
 export type WarningCode =
@@ -112,7 +115,9 @@ export type WarningCode =
   | 'LATEX_PROHIBITED'
   | 'FDA_OBSOLETE_CATEGORY'
   | 'LEGACY_MARKERS'
-  | 'RECOGNITION_MISMATCH';
+  | 'RECOGNITION_MISMATCH'
+  | 'MATUSCHAK_UNFOCUSED_SET'
+  | 'NIELSEN_PASSIVE_OR_BINARY';
 
 export interface LinterWarning {
   code: WarningCode;
@@ -143,8 +148,10 @@ export interface CardLintResult {
 export interface UploadedPdfFile {
   name: string;
   size: number;
-  mimeType: 'application/pdf';
+  mimeType: string;
   base64Data: string;
+  textContent?: string;
+  docRole?: 'diretriz' | 'resumo' | 'questoes' | 'documento';
 }
 
 export interface DeckCurationStats {

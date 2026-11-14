@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { TopBar } from './components/TopBar';
 import { InputPanel } from './components/InputPanel';
 import { ClinicalMapSection } from './components/ClinicalMapSection';
 import { WozniakLinterDeck } from './components/WozniakLinterDeck';
+import { QuickReviewModal } from './components/QuickReviewModal';
 import { DoctrineReferenceSection } from './components/DoctrineReferenceSection';
 import {
   CanonicalCard,
@@ -11,18 +12,21 @@ import {
   DeckCurationStats,
   ExtractedDeckMetadata,
   GuidRegistryData,
-  LocalMediaAsset,
+  MedicalImageResult,
   PriorityLevel,
   UploadedPdfFile,
 } from './types/deck';
 import {
+  applyResolvedWebImageToCard,
+  computeDeterministicDeckId,
   curateAndRebalanceDeck,
+  enforceStrictDeckRatio,
   extractDeckMediaManifest,
   extractDeckMetadata,
+  extractUnresolvedLocalImages,
   formatCanonicalDeckJson,
   lintCard,
   removeMissingMediaFromCard,
-  computeDeterministicDeckId,
   resolveOrCreateNoteGuid,
   stripHtml,
   surgicalRepairCardLocal,
@@ -32,17 +36,18 @@ import {
   buildGenericClinicalMap,
   GENERIC_SAMPLE_DECK_JSON,
 } from './data/demoDecks';
+import { matchMedicalAtlasImages } from './data/medicalDiagnosticAtlas';
 
 const EMPTY_META: ExtractedDeckMetadata = {
   existingIds: [],
   mediaTags: [],
   detectedDeckKey: '',
   rawCards: [],
+  removedOrphanAudioCount: 0,
 };
 
 const STORAGE_DECK_STATE_KEY = 'cards2_deck_state_v2';
 const STORAGE_GUID_REGISTRY_KEY = 'cards2_guid_registry_v2';
-const STORAGE_LOCAL_MEDIA_KEY = 'cards2_local_media_v2';
 
 function loadSavedGuidRegistry(): GuidRegistryData {
   try {
@@ -59,21 +64,6 @@ function loadSavedGuidRegistry(): GuidRegistryData {
   return { version: 1, entries: {} };
 }
 
-function loadSavedLocalMedia(): Record<string, LocalMediaAsset> {
-  try {
-    const raw = localStorage.getItem(STORAGE_LOCAL_MEDIA_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        return parsed;
-      }
-    }
-  } catch {
-    // Ignore storage read errors
-  }
-  return {};
-}
-
 export default function App() {
   const [pdfs, setPdfs] = useState<UploadedPdfFile[]>([]);
   const [rawJsonText, setRawJsonText] = useState<string>('');
@@ -86,9 +76,6 @@ export default function App() {
   const [cards, setCards] = useState<CanonicalCard[]>([]);
   const [curationStats, setCurationStats] = useState<DeckCurationStats | null>(null);
 
-  const [localMediaAssets, setLocalMediaAssets] = useState<Record<string, LocalMediaAsset>>(
-    () => loadSavedLocalMedia()
-  );
   const [guidRegistry, setGuidRegistry] = useState<GuidRegistryData>(() =>
     loadSavedGuidRegistry()
   );
@@ -96,9 +83,94 @@ export default function App() {
   const [isGeneratingMap, setIsGeneratingMap] = useState<boolean>(false);
   const [isGeneratingDeck, setIsGeneratingDeck] = useState<boolean>(false);
   const [isRepairing, setIsRepairing] = useState<boolean>(false);
+  const [isAutoResolvingImages, setIsAutoResolvingImages] = useState<boolean>(false);
   const [isExportingBundle, setIsExportingBundle] = useState<boolean>(false);
   const [isExportingApkg, setIsExportingApkg] = useState<boolean>(false);
+  const [isSyncingAnkiConnect, setIsSyncingAnkiConnect] = useState<boolean>(false);
+  const [isQuickReviewOpen, setIsQuickReviewOpen] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Automatically resolves any card with `<img src="arquivo_local.png">` via Google/Web medical image search
+  const autoResolveDeckMissingImages = useCallback(
+    async (targetCards: CanonicalCard[], availableNames: string[] = []) => {
+      const cardsNeedingWebImage = targetCards.filter(
+        (c) => extractUnresolvedLocalImages(c, availableNames).length > 0
+      );
+      if (cardsNeedingWebImage.length === 0) return;
+
+      setIsAutoResolvingImages(true);
+      const pendingIds = new Set(cardsNeedingWebImage.map((c) => c.id));
+      setCards((prev) =>
+        prev.map((c) => (pendingIds.has(c.id) ? { ...c, isResolvingImage: true } : c))
+      );
+
+      let resolvedCount = 0;
+
+      for (const card of cardsNeedingWebImage) {
+        const unresolvedList = extractUnresolvedLocalImages(card, availableNames);
+        if (unresolvedList.length === 0) continue;
+
+        const targetRef = unresolvedList[0];
+        const localAtlasFallback = matchMedicalAtlasImages(
+          `${targetRef.searchQuery} ${card.topic} ${stripHtml(card.question)}`
+        );
+
+        let webImages: MedicalImageResult[] = [];
+        try {
+          const resp = await fetch('/api/media/search-medical-images', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: targetRef.searchQuery,
+              topic: card.topic,
+              question: stripHtml(card.question),
+              preferGoogleGrounding: true,
+            }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (Array.isArray(data.images)) {
+              webImages = data.images;
+            }
+          }
+        } catch {
+          // Use local diagnostic atlas fallback if network fails
+        }
+
+        const mergedCandidates = [...webImages, ...localAtlasFallback].slice(0, 6);
+        if (mergedCandidates.length > 0) {
+          resolvedCount++;
+          const bestImage = mergedCandidates[0];
+          setCards((prev) =>
+            prev.map((c) =>
+              c.id === card.id
+                ? applyResolvedWebImageToCard(
+                    c,
+                    targetRef.filename,
+                    bestImage,
+                    mergedCandidates
+                  )
+                : c
+            )
+          );
+        } else {
+          setCards((prev) =>
+            prev.map((c) =>
+              c.id === card.id ? { ...c, isResolvingImage: false } : c
+            )
+          );
+        }
+      }
+
+      setIsAutoResolvingImages(false);
+      if (resolvedCount > 0) {
+        setStatusMessage(
+          `🔍 ${resolvedCount} imagem(ns) local(is) ausente(s) foram buscadas e substituídas automaticamente via Google/Web (com 4–6 alternativas de troca rápida em 1 clique).`
+        );
+      }
+    },
+    []
+  );
 
   // Restore saved deck state on mount
   useEffect(() => {
@@ -168,128 +240,23 @@ export default function App() {
     }
   }, [cards, deckKey, rawJsonText, extractedMeta, clinicalMap, curationStats]);
 
-  // Persist local media assets (best effort within localStorage quota)
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_LOCAL_MEDIA_KEY, JSON.stringify(localMediaAssets));
-    } catch {
-      // Keep in-memory if total media size exceeds localStorage quota
-    }
-  }, [localMediaAssets]);
-
-  const handleAddLocalMediaFiles = (assets: LocalMediaAsset[]) => {
-    setLocalMediaAssets((prev) => {
-      const next = { ...prev };
-      for (const asset of assets) {
-        next[asset.filename.trim().toLowerCase()] = asset;
-      }
-      return next;
-    });
-    setStatusMessage(
-      `${assets.length} arquivo(s) de mídia local carregado(s) (${assets
-        .map((a) => a.filename)
-        .slice(0, 4)
-        .join(', ')}). As tags MISSING_MEDIA correspondentes foram validadas.`
-    );
-  };
-
-  const handleClearLocalMedia = () => {
-    setLocalMediaAssets({});
-    try {
-      localStorage.removeItem(STORAGE_LOCAL_MEDIA_KEY);
-    } catch {
-      // Ignore
-    }
-    setStatusMessage('Mídias locais em memória removidas.');
-  };
-
-  const handleUploadCardMediaFile = (
-    card: CanonicalCard,
-    file: File,
-    targetFilename?: string
-  ) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUri = typeof reader.result === 'string' ? reader.result : '';
-      if (!dataUri) return;
-
-      const extMatch = file.name.match(/\.[a-z0-9]+$/i);
-      const ext = extMatch ? extMatch[0].toLowerCase() : file.type.includes('audio') ? '.mp3' : '.png';
-      const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
-      const finalFilename = (
-        targetFilename ||
-        file.name ||
-        `${cleanDeckKey}_card_${card.id}${ext}`
-      )
-        .trim()
-        .replace(/[^a-zA-Z0-9._-]+/g, '_');
-
-      const asset: LocalMediaAsset = {
-        filename: finalFilename,
-        mimeType: file.type || (ext === '.mp3' ? 'audio/mpeg' : 'image/png'),
-        dataUri,
-        size: file.size,
-      };
-
-      setLocalMediaAssets((prev) => ({
-        ...prev,
-        [finalFilename.toLowerCase()]: asset,
-      }));
-
-      // If card did not already reference targetFilename, attach it to the card
-      const cardHtml = `${card.question} ${card.hint}`;
-      if (!cardHtml.toLowerCase().includes(finalFilename.toLowerCase())) {
-        if (asset.mimeType.startsWith('audio/')) {
-          const audioTag = `<audio controls preload="none" class="med-audio"><source src="${finalFilename}" type="audio/mpeg"></audio>`;
-          handleUpdateCard({
-            ...card,
-            hint: `${card.hint}<br>${audioTag}`,
-          });
-        } else {
-          const cleanQ = card.question.replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '').trim();
-          const hasItalic = /^<i>[\s\S]*?<\/i>/i.test(card.hint.trim());
-          const nextHint = hasItalic
-            ? card.hint
-            : `<i>Exame complementar referente a ${stripHtml(card.topic)}.</i><br><br>${card.hint}`;
-          handleUpdateCard({
-            ...card,
-            type: 'basic',
-            answer:
-              card.type === 'cloze'
-                ? 'Conduta imediata guiada pelo achado visual.'
-                : card.answer,
-            image_mode: 'recognition',
-            question: `${cleanQ}<br><img src="${finalFilename}">`,
-            hint: nextHint,
-          });
-        }
-      }
-
-      setStatusMessage(
-        `Mídia "${finalFilename}" vinculada ao Card ID ${card.id} e pronta para exportação (.apkg / .zip).`
-      );
-    };
-    reader.readAsDataURL(file);
-  };
-
   const handleRemoveMissingMediaFromCard = (cardId: number) => {
-    const availableNames = Object.keys(localMediaAssets);
     setCards((prev) =>
-      prev.map((c) => (c.id === cardId ? removeMissingMediaFromCard(c, availableNames) : c))
+      prev.map((c) => (c.id === cardId ? removeMissingMediaFromCard(c) : c))
     );
-    setStatusMessage(`Mídia(s) órfã(s) removida(s) do Card ID ${cardId}.`);
+    setStatusMessage(`Referência de mídia ausente removida do Card ID ${cardId}.`);
   };
 
   const handleRemoveAllMissingMedia = () => {
-    const availableNames = Object.keys(localMediaAssets);
-    setCards((prev) => prev.map((c) => removeMissingMediaFromCard(c, availableNames)));
-    setStatusMessage('Todas as referências de mídias órfãs (MISSING_MEDIA) foram limpas do baralho.');
+    setCards((prev) => prev.map((c) => removeMissingMediaFromCard(c)));
+    setStatusMessage('Todas as referências de mídias órfãs foram limpas do baralho.');
   };
 
   const handleImportGuidRegistry = (jsonText: string) => {
     try {
       const parsed = JSON.parse(jsonText);
-      const entries = parsed?.entries && typeof parsed.entries === 'object' ? parsed.entries : parsed;
+      const entries =
+        parsed?.entries && typeof parsed.entries === 'object' ? parsed.entries : parsed;
       if (!entries || typeof entries !== 'object') {
         throw new Error('Formato inválido para note_guid_registry.json');
       }
@@ -349,9 +316,14 @@ export default function App() {
         const rawBasic = meta.rawCards.filter((c) => c.type === 'basic').length;
         const rawBasicPct = Math.round((rawBasic / meta.rawCards.length) * 100);
         const rawClozePct = 100 - rawBasicPct;
+        const audioMsg =
+          meta.removedOrphanAudioCount && meta.removedOrphanAudioCount > 0
+            ? ` (${meta.removedOrphanAudioCount} tag(s) de áudio órfãs removidas automaticamente)`
+            : '';
         setStatusMessage(
-          `Deck bruto carregado (${meta.rawCards.length} cards · ${rawBasicPct}% basic / ${rawClozePct}% cloze). Clique em "Passo 2: Recriar Deck JSON Canônico" ou "⚖️ Revisar, Podar & Rebalancear 50/50" para revisar, podar redundâncias e equilibrar basic/cloze.`
+          `Deck carregado (${meta.rawCards.length} cards · ${rawBasicPct}% basic / ${rawClozePct}% cloze)${audioMsg}. Imagens locais sem arquivo estão sendo buscadas automaticamente no Google/Web.`
         );
+        void autoResolveDeckMissingImages(meta.rawCards);
       }
     } catch (err: unknown) {
       setJsonError(err instanceof Error ? err.message : 'Erro ao analisar JSON.');
@@ -369,8 +341,9 @@ export default function App() {
     setClinicalMap(buildGenericClinicalMap(key, meta.rawCards));
     setCards(meta.rawCards);
     setStatusMessage(
-      `Exemplo genérico carregado (${meta.existingIds.length} IDs FSRS extraídos). Teste a inspeção de mídias, busca Open-i/Wikimedia ou exportação direta para .apkg.`
+      `Exemplo carregado (${meta.existingIds.length} IDs FSRS). Teste a Galeria de Troca Rápida Online (4–6 miniaturas), a "👁️ Revisão Rápida (Anki)" ou a exportação direta para .apkg.`
     );
+    void autoResolveDeckMissingImages(meta.rawCards);
   };
 
   const handleAddPdfs = (newFiles: UploadedPdfFile[]) => {
@@ -379,6 +352,10 @@ export default function App() {
 
   const handleRemovePdf = (index: number) => {
     setPdfs((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleClearPdfs = () => {
+    setPdfs([]);
   };
 
   // Passo 1: Gerar Mapa Clínico (P1 a P4) + Atualizações de Diretrizes
@@ -460,6 +437,7 @@ export default function App() {
     setStatusMessage(
       `Curadoria concluída: ${stats.originalCount} cards originais → ${stats.finalCount} cards finais (${stats.prunedCount} podados, +${stats.addedCount} novos P1–P4, ${stats.convertedCount} convertidos para ${stats.basicPct}% basic / ${stats.clozePct}% cloze).`
     );
+    void autoResolveDeckMissingImages(curated);
   };
 
   // Passo 2: Recriar Deck JSON Canônico
@@ -494,6 +472,7 @@ export default function App() {
     setStatusMessage(
       `Deck Canônico "${effectiveKey}" revisado e rebalanceado: ${optimisticStats.originalCount} → ${optimisticStats.finalCount} cards (${optimisticStats.prunedCount} redundantes excluídos, +${optimisticStats.addedCount} novos P1–P4, proporção ${optimisticStats.basicPct}% basic / ${optimisticStats.clozePct}% cloze).`
     );
+    void autoResolveDeckMissingImages(optimisticCurated);
 
     try {
       const response = await fetch('/api/gemini/generate-deck', {
@@ -526,6 +505,7 @@ export default function App() {
         setStatusMessage(
           `Deck Canônico "${effectiveKey}" recriado com ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS preservados, ${finalStats.prunedCount} excluídos, +${finalStats.addedCount} novos IDs, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`
         );
+        void autoResolveDeckMissingImages(finalCurated);
       }
     } catch {
       // Optimistic curated and rebalanced deck is already active
@@ -534,7 +514,7 @@ export default function App() {
     }
   };
 
-  // ⚡ Auto-Reparar Avisos com IA
+  // ⚡ Auto-Reparar Avisos com IA + Trava Estrita 45%–55% Basic/Cloze
   const handleAutoRepairAllFlagged = async () => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
     const activeMap =
@@ -556,11 +536,10 @@ export default function App() {
       `Deck reparado e rebalanceado (${stats.finalCount} cards · ${stats.basicPct}% basic / ${stats.clozePct}% cloze · ${stats.preservedIdsCount} IDs FSRS mantidos).`
     );
 
-    const availableNames = Object.keys(localMediaAssets);
     const flaggedWithWarnings = curatedAndRepaired
       .map((card) => ({
         card,
-        lint: lintCard(card, availableNames),
+        lint: lintCard(card),
       }))
       .filter((item) => !item.lint.isValid);
 
@@ -597,9 +576,12 @@ export default function App() {
           }
         });
 
-        setCards((prev) =>
-          prev.map((c) => (repairedById.has(c.id) ? repairedById.get(c.id)! : c))
-        );
+        setCards((prev) => {
+          const merged = prev.map((c) =>
+            repairedById.has(c.id) ? repairedById.get(c.id)! : c
+          );
+          return enforceStrictDeckRatio(merged).cards;
+        });
       }
     } catch {
       // Already repaired and rebalanced deterministically
@@ -698,14 +680,7 @@ export default function App() {
     });
   };
 
-  const buildMediaAssetsPayload = (): Record<string, string> => {
-    const map: Record<string, string> = {};
-    for (const [key, asset] of Object.entries(localMediaAssets)) {
-      map[key] = asset.dataUri;
-      map[asset.filename] = asset.dataUri;
-    }
-    return map;
-  };
+  const buildMediaAssetsPayload = (): Record<string, string> => ({});
 
   const handleDownloadJson = () => {
     const cleanDeckKey = (deckKey || 'deck')
@@ -766,11 +741,11 @@ export default function App() {
 
       if (missingCount > 0) {
         setStatusMessage(
-          `⚠️ Pacote .zip baixado (${resolvedCount}/${mediaManifest.length} mídias embutidas), mas ${missingCount} mídia(s) não possuíam arquivo local (${missingList}). Envie os arquivos em "04_Mídias/" ou clique em "🧹 Limpar Mídias Órfãs".`
+          `⚠️ Pacote .zip baixado (${resolvedCount}/${mediaManifest.length} mídias embutidas), mas ${missingCount} mídia(s) não puderam ser baixadas (${missingList}).`
         );
       } else {
         setStatusMessage(
-          `✅ Pacote Anki Offline (${cleanDeckKey}_anki_offline_bundle.zip) baixado com ${cleanDeckKey}_notes.json, note_guid_registry.json e ${resolvedCount}/${mediaManifest.length} mídia(s) verificada(s) em collection.media/.`
+          `✅ Pacote Anki Offline (${cleanDeckKey}_anki_offline_bundle.zip) baixado com ${cleanDeckKey}_notes.json, note_guid_registry.json e ${resolvedCount}/${mediaManifest.length} mídia(s) em collection.media/.`
         );
       }
     } catch {
@@ -831,7 +806,7 @@ export default function App() {
 
       if (missingCount > 0) {
         setStatusMessage(
-          `⚠️ Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS preservado + ${resolvedCount} mídia(s) embutida(s)), porém ${missingCount} mídia(s) órfã(s) estavam ausentes (${missingList}).`
+          `⚠️ Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS preservado + ${resolvedCount} mídia(s) embutida(s)), porém ${missingCount} mídia(s) não foram resolvidas (${missingList}).`
         );
       } else {
         setStatusMessage(
@@ -844,6 +819,107 @@ export default function App() {
       );
     } finally {
       setIsExportingApkg(false);
+    }
+  };
+
+  // Ponte Opcional para AnkiConnect Local (http://127.0.0.1:8765)
+  const handleSyncAnkiConnect = async () => {
+    if (cards.length === 0) return;
+    setIsSyncingAnkiConnect(true);
+    const cleanDeckKey = (deckKey || 'deck')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/g, '_');
+    const deckTitle = clinicalMap?.themeTitle
+      ? `Internato::${clinicalMap.themeTitle}`
+      : `Internato::${cleanDeckKey}`;
+
+    const invokeAnkiConnect = async (action: string, params: Record<string, unknown> = {}) => {
+      const resp = await fetch('http://127.0.0.1:8765', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, version: 6, params }),
+      });
+      if (!resp.ok) {
+        throw new Error(`AnkiConnect HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      if (data.error) {
+        throw new Error(String(data.error));
+      }
+      return data.result;
+    };
+
+    try {
+      await invokeAnkiConnect('version');
+      await invokeAnkiConnect('createDeck', { deck: deckTitle });
+
+      const canonicalJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
+      const canonicalNotes: Array<{
+        id: number;
+        type: CardType;
+        topic: string;
+        question: string;
+        answer: string;
+        hint: string;
+        tags: string[];
+      }> = JSON.parse(canonicalJson);
+
+      let updatedInPlace = 0;
+      let addedNew = 0;
+
+      for (const note of canonicalNotes) {
+        const modelName =
+          note.type === 'cloze' ? 'Med_Cloze_Inverted_v2' : 'Med_Basic_Inverted_v2';
+        const fields =
+          note.type === 'cloze'
+            ? {
+                Texto: note.question,
+                Extra: note.hint,
+                Topico: note.topic,
+              }
+            : {
+                Frente: note.question,
+                Verso: note.answer,
+                Extra: note.hint,
+                Topico: note.topic,
+              };
+
+        const foundIds = (await invokeAnkiConnect('findNotes', {
+          query: `nid:${note.id}`,
+        })) as number[];
+
+        if (Array.isArray(foundIds) && foundIds.length > 0) {
+          await invokeAnkiConnect('updateNoteFields', {
+            note: {
+              id: foundIds[0],
+              fields,
+            },
+          });
+          updatedInPlace++;
+        } else {
+          await invokeAnkiConnect('addNote', {
+            note: {
+              deckName: deckTitle,
+              modelName,
+              fields,
+              tags: note.tags || [cleanDeckKey],
+              options: { allowDuplicate: true },
+            },
+          });
+          addedNew++;
+        }
+      }
+
+      setStatusMessage(
+        `🔌 Sincronizado com Anki Desktop via AnkiConnect! (${updatedInPlace} nota(s) atualizada(s) in-place preservando FSRS e ${addedNew} nova(s) adicionada(s) em "${deckTitle}").`
+      );
+    } catch {
+      setStatusMessage(
+        `ℹ️ AnkiConnect local (http://127.0.0.1:8765) não detectado ou bloqueado por CORS. Para usar a sincronização direta: abra o Anki Desktop com o add-on AnkiConnect (código 2055492159) e adicione "*" em "webCorsOriginList". Ou clique em "🎯 Exportar .apkg (Anki)" ao lado para importar diretamente com 100% do FSRS preservado.`
+      );
+    } finally {
+      setIsSyncingAnkiConnect(false);
     }
   };
 
@@ -878,6 +954,7 @@ export default function App() {
           pdfs={pdfs}
           onAddPdfs={handleAddPdfs}
           onRemovePdf={handleRemovePdf}
+          onClearPdfs={handleClearPdfs}
           rawJsonText={rawJsonText}
           onRawJsonChange={handleRawJsonChange}
           jsonError={jsonError}
@@ -891,9 +968,6 @@ export default function App() {
           onLoadGenericSample={handleLoadGenericSample}
           isGeneratingMap={isGeneratingMap}
           isGeneratingDeck={isGeneratingDeck}
-          localMediaAssets={localMediaAssets}
-          onAddLocalMediaFiles={handleAddLocalMediaFiles}
-          onClearLocalMedia={handleClearLocalMedia}
           guidCount={Object.keys(guidRegistry.entries).length}
           onImportGuidRegistry={handleImportGuidRegistry}
           onExportGuidRegistry={handleExportGuidRegistry}
@@ -913,10 +987,13 @@ export default function App() {
           deckKey={deckKey}
           extractedMeta={extractedMeta}
           curationStats={curationStats}
-          localMediaAssets={localMediaAssets}
-          onUploadCardMediaFile={handleUploadCardMediaFile}
           onRemoveMissingMediaFromCard={handleRemoveMissingMediaFromCard}
           onRemoveAllMissingMedia={handleRemoveAllMissingMedia}
+          onAutoResolveMissingImages={() => void autoResolveDeckMissingImages(cards)}
+          isAutoResolvingImages={isAutoResolvingImages}
+          onOpenQuickReview={() => setIsQuickReviewOpen(true)}
+          onSyncAnkiConnect={handleSyncAnkiConnect}
+          isSyncingAnkiConnect={isSyncingAnkiConnect}
           onCurateAndRebalance={handleCurateAndRebalance}
           onUpdateCard={handleUpdateCard}
           onDeleteCard={handleDeleteCard}
@@ -930,6 +1007,14 @@ export default function App() {
           onExportApkg={handleExportApkg}
           isExportingBundle={isExportingBundle}
           isExportingApkg={isExportingApkg}
+        />
+
+        <QuickReviewModal
+          isOpen={isQuickReviewOpen}
+          onClose={() => setIsQuickReviewOpen(false)}
+          cards={cards}
+          deckKey={deckKey}
+          onUpdateCard={handleUpdateCard}
         />
 
         <DoctrineReferenceSection />

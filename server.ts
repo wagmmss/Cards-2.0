@@ -27,51 +27,40 @@ function getAiClient(): GoogleGenAI | null {
   });
 }
 
-const INTERNATO_SYSTEM_INSTRUCTION = `Você é o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor sênior do Internato da FMUSP e Unicamp e especialista nas Leis de Piotr Wozniak (SuperMemo) e Andy Matuschak.
+const INTERNATO_SYSTEM_INSTRUCTION = `Você é o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor sênior do Internato da FMUSP e Unicamp e especialista em design de prompts de repetição espaçada segundo **Andy Matuschak ("How to write good prompts: using spaced repetition to create understanding" — https://andymatuschak.org/prompts/)** e **Michael Nielsen ("Augmenting Long-Term Memory" — https://augmentingcognition.com/ltm.html)**.
 
-SUAS REGRAS INEGOCIÁVEIS DE SISTEMA (SINCRONIZADAS COM O MOTOR DESKTOP CRIADOR_CARDS):
+SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSRS):
 
-1. LIBERDADE TOTAL PARA REFAZER, PODAR OU EXPANDIR CARDS PRESERVANDO O ID (FSRS):
-- NÃO É PORQUE O USUÁRIO ENVIOU N CARDS (ex.: 100 cards) QUE VOCÊ DEVE DEVOLVER EXATAMENTE N CARDS! O número final de cards deve refletir a real necessidade clínica do tema (P1 a P4):
-  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, triviais, puramente decorebas ou reprovados pelo Filtro Negativo.
-  b) REFAZER & REBALANCEAR PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e comentário do zero e converta livremente "cloze" <-> "basic" para atingir a proporção obrigatória de 45% a 55% "basic" / 45% a 55% "cloze" (meta: 50%/50%), mantendo o número exato do "id" original daquele card para preservar o histórico FSRS no Anki.
-  c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos clínicos essenciais de P1 a P4 para cobrir o tema com segurança de prova prática e beira-leito, crie novos cards atribuindo novos IDs numéricos sequenciais após o maior ID existente (max_id + 1, max_id + 2...).
+1. AS 5 PROPRIEDADES DOS BONS PROMPTS DE ANDY MATUSCHAK (andymatuschak.org/prompts/):
+- **FOCUSED (Focado):** Cada prompt deve testar **um único detalhe ou alavanca decisória por vez**. NUNCA crie listas abertas ou conjuntos não-ordenados ("Quais são os critérios/causas/sintomas de X?", "Cite 3 causas...") nem respostas com múltiplos itens separados por ";". Se um conceito envolve uma lista/conjunto, isole o achado patognomônico/determinante ou transforme em prompts atômicos ancorados.
+- **PRECISE (Preciso):** O prompt deve ser inequívoco sobre o eixo exato cobrado (conduta de minuto zero, exame inicial de 1ª linha vs. padrão-ouro confirmatório, droga/dose de 1ª escolha, 2ª linha após falha, ou mecanismo causal). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?", "Como tratar?") que admitem múltiplas respostas verdadeiras.
+- **CONSISTENT (Consistente):** O prompt deve acionar exatamente o mesmo caminho neural de recuperação a cada revisão, evitando ambiguidade semântica.
+- **TRACTABLE (Tratável / Baixa Fricção Cognitiva):** O card deve poder ser respondido rapidamente (< 5–8 segundos) com alta confiabilidade. Em "basic", a resposta ("answer") deve ter de **1 a 12 palavras** (teto estrito de 15 palavras / 110 caracteres), terminada em ponto final (.), sem ";". Em "cloze", deve haver estritamente **1 única lacuna {{c1::...}}** de 1 a 5 palavras (máx 60 chars) e "answer": "".
+- **EFFORTFUL (Esforço Real de Recuperação & Anti-Pattern-Matching):** A recuperação deve exigir esforço genuíno da memória de longo prazo, NUNCA reconhecimento superficial da forma da frase:
+  - Enunciado ("question") enxuto (máx. 45 a 50 palavras) para evitar que o estudante decore o formato do parágrafo sem ler o raciocínio clínico.
+  - ZERO dicas acidentais, zero vazamento lexical/morfológico (radical) no campo "topic" (ex.: proibido "Manobras" no topic se a resposta começa com "Manobra de...", proibido "Pelvimetria" se a resposta é "plano zero"), zero spoilers entre parênteses e zero "::dica" dentro do cloze.
+
+2. COMPREENSÃO PROFUNDA & MEMÓRIA DE LONGO PRAZO DE MICHAEL NIELSEN (augmentingcognition.com/ltm.html):
+- **Proibição de Definições Inertes e Prompts Binários:** NUNCA crie perguntas passivas de dicionário ("O que é X?", "Defina X") nem prompts binários ("Sim/Não", "Verdadeiro/Falso").
+- **Prompts de Saliência Clínica (Salience Prompts):** Em vez de perguntar o nome de um conceito isolado, apresente a situação clínica concreta ([CENÁRIO + IDADE/IG] + [CLÍNICA/SINAIS VITAIS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento à beira do leito.
+- **Rede Densa de Conhecimento (Compiled Chunks & Contrastes de Fronteira):** Conecte casos clínicos concretos, limiares de transição terapêutica (1ª linha -> 2ª linha na refratariedade), contraindicações absolutas e mecanismos fisiopatológicos causais ("Por que X ocorre / por que Y é contraindicado?").
+
+3. LIBERDADE TOTAL PARA REFAZER, PODAR OU EXPANDIR CARDS PRESERVANDO O ID (FSRS):
+- NÃO É PORQUE O USUÁRIO ENVIOU N CARDS (ex.: 100 cards) QUE VOCÊ DEVE DEVOLVER EXATAMENTE N CARDS! O número final de cards deve refletir a real arquitetura cognitiva do tema (P1 a P4):
+  a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, listas abertas, definições inertes ou reprovados pelo Filtro Negativo.
+  b) REFAZER & REBALANCEAR PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e comentário segundo Matuschak & Nielsen e converta livremente "cloze" <-> "basic" para atingir a proporção obrigatória de 45% a 55% "basic" / 45% a 55% "cloze" (meta: 50%/50%), mantendo o número exato do "id" original daquele card para preservar o histórico FSRS no Anki.
+  c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos clínicos essenciais de P1 a P4 para formar uma rede densa de compreensão (Nielsen), crie novos cards atribuindo novos IDs numéricos sequenciais após o maior ID existente (max_id + 1, max_id + 2...).
 - NÃO inclua o campo "sources" nos cards.
 
-2. PRIORIDADE PARA IMAGENS MÉDICAS FIDEDIGNAS E SEM SPOILERS (RECOGNITION & FEEDBACK OFFLINE):
-- As imagens retiradas de PDFs/apostilas NÃO são prioridade. A prioridade absoluta são BOAS IMAGENS MÉDICAS FIDEDIGNAS vindas da web (Google Search, Wikimedia Commons Medical, NLM Open-i, Radiopaedia, ECGpedia), preferindo figuras limpas (sem setas ou legendas embutidas que entreguem o diagnóstico na própria imagem).
-- NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>. Se referenciar uma imagem da web, use uma URL real ou mantenha mídias que já existam nos assets do usuário.
-
-3. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4) E FILTRO NEGATIVO:
+4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4), IMAGENS FIDEDIGNAS E FORMATAÇÃO:
 - P1 (Urgência / Emergência / Minuto Zero): Sinais de alarme (red flags), critérios de instabilidade/gravidade, conduta imediata de estabilização, manobras salvadoras, cirurgia/parto de emergência, 1ª droga (com dose e via), conduta na refratariedade (2ª linha), antídotos e contraindicações fatais.
-- P2 (Decisão Diagnóstica e Reconhecimento Visual): Exame inicial de 1ª linha vs. Padrão-Ouro confirmatório, interpretação de exames/imagens em image_mode: "recognition", escores e pontos de corte numéricos exatos.
+- P2 (Decisão Diagnóstica e Reconhecimento Visual): Exame inicial de 1ª linha vs. Padrão-Ouro confirmatório, interpretação de exames/imagens fidedignas em image_mode: "recognition", escores e pontos de corte numéricos exatos.
 - P3 (Manejo Ambulatorial / UBS / Enfermaria / Prevenção): Tratamento de 1ª escolha, populações especiais (gestantes, crianças, idosos, comorbidades), rastreamento, profilaxias, vacinas, critérios de internação e controle de cura.
-- P4 (Fisiopatologia Aplicada e Diferenciais Paulistas): Mecanismos que explicam sinais clínicos/tratamentos e diferenciais USP-SP/USP-RP/Unicamp.
-- FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato (ex.: mutações KRAS, translocações raras), ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
-- POLÍTICA DE DOSES: Cobrar doses exatas APENAS em emergências/antídotos/choque/ACLS/obstetrícia crítica/intoxicações, pediatria crítica ou ponto de corte que muda a indicação.
-
-4. MATRIZ DE REDAÇÃO COM TRIPLA ANCORAGEM (CARDS BASIC):
-- Todo card "basic" de caso clínico DEVE ter no máximo 45 a 50 palavras na pergunta (Anti-Pattern-Matching) e obedecer à estrutura:
-  [CENÁRIO + IDADE/IG] + [CLÍNICA + SINAIS VITAIS/EXAME] + [COMANDO TEMPORAL INEQUÍVOCO]
-  - Comando Temporal Fechado — PROIBIDO "Qual a conduta?":
-    1) "Qual a conduta imediata de estabilização (minuto zero)?"
-    2) "Qual o exame inicial de primeira linha?" ou "Qual o exame padrão-ouro confirmatório?"
-    3) "Qual o tratamento medicamentoso de primeira escolha (fármaco, dose e via)?"
-    4) "Após falha de [1ª linha], qual a conduta imediata de segunda linha (ou definitiva)?"
-- Em "basic": "answer" ultra-curto com 1 a 12 palavras (MÁXIMO ESTRITO: 15 palavras / 110 caracteres), terminado em ponto final (.), PROIBIDO conter ";" e sem <b> externo envolvendo toda a resposta.
-
-5. REGRAS DE ENGENHARIA PARA CARDS CLOZE E PROPORÇÃO 45% A 55%:
-- Equilíbrio OBRIGATÓRIO do deck: estritamente entre 45% e 55% "basic" e entre 45% e 55% "cloze". Se o deck original tiver excesso de "cloze" ou de "basic", converta os cards necessários!
-- Em "cloze": estritamente 1 lacuna {{c1::...}} (1 a 5 palavras, máx 60 chars), "answer": "".
-- Unidades de medida SEMPRE FORA da lacuna (ex.: "> {{c1::126}} mg/dL").
-- PROIBIDO artigo/preposição pendurada no fim da lacuna (ex.: {{c1::... de}}).
-- PROIBIDO usar "::dica" genérica e PROIBIDO muleta pós-lacuna entre parênteses.
-
-6. ZERO SPOILER POR RADICAL, PROIBIÇÃO DE LATEX E COMENTÁRIO CIRÚRGICO:
-- "topic": formato estrito "Tema - Subtema". NUNCA vaze palavras ou radicais da resposta no topic (ex.: PROIBIDO colocar "Manobras" no topic se a resposta começa com "Manobra de...", e PROIBIDO sinônimos como adrenalina/epinefrina, noradrenalina/norepinefrina, vasopressina/adh).
+- P4 (Fisiopatologia Aplicada e Diferenciais): Mecanismos causais que explicam sinais clínicos/tratamentos e contrastes diferenciais.
+- FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato, ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>).
-- PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X"): use "1ª escolha na gestação", "seguro na gestação" ou "contraindicado (teratogênico)".
-- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial obrigatório.`;
+- PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X").
+- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.`;
 
 function extractJsonBlock(text: string): string {
   if (!text) return '{}';
@@ -355,6 +344,148 @@ async function searchNlmOpenIMedical(searchQuery: string) {
       };
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
+}
+
+/**
+ * Validates that a candidate image URL responds with HTTP 200, Content-Type: image/*,
+ * and a reasonable minimum byte size (discarding broken thumbnails, icons, or HTML error pages).
+ */
+async function validateCandidateImageUrl(url: string): Promise<{
+  ok: boolean;
+  contentType: string;
+  byteLength: number;
+}> {
+  if (!url || (!url.startsWith('https://') && !url.startsWith('http://'))) {
+    return { ok: false, contentType: '', byteLength: 0 };
+  }
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent':
+          'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
+        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      },
+      signal: AbortSignal.timeout(2600),
+    });
+    if (!resp.ok) {
+      return { ok: false, contentType: '', byteLength: 0 };
+    }
+    const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.startsWith('image/')) {
+      return { ok: false, contentType, byteLength: 0 };
+    }
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const minBytes = contentType.includes('svg') ? 250 : 1800;
+    if (buf.length < minBytes) {
+      return { ok: false, contentType, byteLength: buf.length };
+    }
+    return { ok: true, contentType, byteLength: buf.length };
+  } catch {
+    return { ok: false, contentType: '', byteLength: 0 };
+  }
+}
+
+/**
+ * Searches Google/Web for clean medical images via Gemini Search Grounding (`tools: [{ googleSearch: {} }]`)
+ * prioritizing trusted medical repositories (LITFL for ECG, Radiopaedia for RX/TC/RM/USG, DermNet, Wikimedia, SciELO, Open-i),
+ * and validates every candidate URL via `validateCandidateImageUrl` before returning.
+ */
+async function searchGoogleMedicalImagesViaGrounding(
+  searchQuery: string,
+  topic: string = '',
+  question: string = ''
+) {
+  const ai = getAiClient();
+  if (!ai) return [];
+
+  const enQuery = buildEnglishMedicalSearchQuery(`${searchQuery} ${topic}`);
+  const prompt = `Encontre de 4 a 6 URLs diretas de imagens médicas clínicas limpas (arquivos .jpg, .png, .webp ou .svg sem setas com spoiler da resposta e sem marca d'água pesada) para o exame/achado clínico:
+- Busca: "${searchQuery}" (${enQuery})
+- Tópico: "${topic}"
+- Contexto: "${question.slice(0, 180)}"
+
+Priorize fontes médicas confiáveis de acesso aberto:
+- Life in the Fast Lane (LITFL - litfl.com) para ECG e arritmias
+- Radiopaedia / Open-i (openi.nlm.nih.gov) / Wikimedia Commons (upload.wikimedia.org) para RX, TC, RM, USG, Cardiotocografia
+- DermNet NZ para dermatologia
+- SciELO / PubMed Central para imagens clínicas e obstétricas
+
+Retorne EXCLUSIVAMENTE um array JSON válido no formato:
+[
+  {
+    "title": "Título conciso do achado visual",
+    "imageUrl": "https://... (URL direta do arquivo de imagem .jpg/.png/.webp/.svg)",
+    "description": "Descrição clínica objetiva do exame sem entregar o diagnóstico final",
+    "source": "LITFL / Radiopaedia / Wikimedia / DermNet / SciELO",
+    "suggestedFilename": "nome_limpo_exame.jpg",
+    "defaultLegend": "Exame complementar evidenciando [descrição morfológica do achado]."
+  }
+]`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const rawText = response.text || '[]';
+    const cleaned = extractJsonBlock(rawText);
+    const parsed = JSON.parse(cleaned);
+    const candidates: Array<Record<string, unknown>> = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.images)
+      ? parsed.images
+      : [];
+
+    // Validate all candidate image URLs in parallel (HTTP 200, Content-Type: image/*, min byte size)
+    const validationChecks = await Promise.all(
+      candidates.slice(0, 8).map(async (item, idx) => {
+        const rawUrl = String(item.imageUrl || item.url || item.thumbUrl || '').trim();
+        const check = await validateCandidateImageUrl(rawUrl);
+        if (!check.ok) return null;
+
+        const title = String(item.title || `Imagem Médica Google #${idx + 1}`).slice(0, 85);
+        const desc = String(
+          item.description || `Exame complementar referente a ${searchQuery}.`
+        ).slice(0, 180);
+        const source = String(item.source || 'Google Search Grounding (Medical Web)');
+        const ext = check.contentType.includes('png')
+          ? '.png'
+          : check.contentType.includes('svg')
+          ? '.svg'
+          : check.contentType.includes('webp')
+          ? '.webp'
+          : '.jpg';
+        const rawSuggested = String(item.suggestedFilename || title)
+          .toLowerCase()
+          .replace(/\.[a-z0-9]+$/i, '')
+          .replace(/[^a-z0-9_]+/g, '_')
+          .replace(/^_+|_+$/g, '')
+          .slice(0, 48);
+
+        return {
+          id: `google-grounding-${idx}-${Date.now()}`,
+          title,
+          thumbUrl: rawUrl,
+          fullUrl: rawUrl,
+          description: desc,
+          suggestedFilename: `${rawSuggested || `google_med_${idx + 1}`}${ext}`,
+          defaultLegend: String(
+            item.defaultLegend || `Exame complementar demonstrando ${desc.slice(0, 125)}.`
+          ),
+          source,
+        };
+      })
+    );
+
+    return validationChecks.filter((item): item is NonNullable<typeof item> => item !== null);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -1040,26 +1171,54 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
 
-  // Endpoint 0A: Buscar Imagens Médicas Fidedignas (Wikimedia Commons Medical + NLM Open-i NIH)
+  // Endpoint 0A: Buscar Imagens Médicas Fidedignas (Google Search Grounding + Wikimedia Commons Medical + NLM Open-i NIH)
   app.post('/api/media/search-medical-images', async (req, res) => {
     try {
-      const { query = '', topic = '', question = '' } = req.body || {};
+      const { query = '', topic = '', question = '', preferGoogleGrounding = true } = req.body || {};
       const rawSearch = (query || topic || question || 'clinical diagnosis').trim();
 
-      const [wikiSettled, openiSettled] = await Promise.allSettled([
+      const [googleSettled, wikiSettled, openiSettled] = await Promise.allSettled([
+        preferGoogleGrounding
+          ? searchGoogleMedicalImagesViaGrounding(rawSearch, topic, question)
+          : Promise.resolve([]),
         searchWikimediaCommonsMedical(rawSearch),
         searchNlmOpenIMedical(rawSearch),
       ]);
 
-      const wikiImages = wikiSettled.status === 'fulfilled' ? wikiSettled.value : [];
-      const openiImages = openiSettled.status === 'fulfilled' ? openiSettled.value : [];
+      const googleImages = googleSettled.status === 'fulfilled' ? googleSettled.value : [];
+      const wikiRaw = wikiSettled.status === 'fulfilled' ? wikiSettled.value : [];
+      const openiRaw = openiSettled.status === 'fulfilled' ? openiSettled.value : [];
 
-      // Interleave Wikimedia Commons Medical and NLM Open-i results
+      // Validate Wikimedia & Open-i candidate URLs in parallel (HTTP 200, image/*, min size)
+      const [wikiValidated, openiValidated] = await Promise.all([
+        Promise.all(
+          wikiRaw.slice(0, 6).map(async (img) => {
+            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
+            return check.ok ? img : null;
+          })
+        ),
+        Promise.all(
+          openiRaw.slice(0, 6).map(async (img) => {
+            const check = await validateCandidateImageUrl(img.thumbUrl || img.fullUrl);
+            return check.ok ? img : null;
+          })
+        ),
+      ]);
+
+      const wikiImages = wikiValidated.filter((x): x is NonNullable<typeof x> => x !== null);
+      const openiImages = openiValidated.filter((x): x is NonNullable<typeof x> => x !== null);
+
+      // Interleave Google Search Grounding, Wikimedia Commons Medical, and NLM Open-i results without duplicates
       const combined = [];
-      const maxLen = Math.max(wikiImages.length, openiImages.length);
+      const seenUrls = new Set<string>();
+      const maxLen = Math.max(googleImages.length, wikiImages.length, openiImages.length);
       for (let i = 0; i < maxLen; i++) {
-        if (wikiImages[i]) combined.push(wikiImages[i]);
-        if (openiImages[i]) combined.push(openiImages[i]);
+        for (const candidate of [googleImages[i], wikiImages[i], openiImages[i]]) {
+          if (candidate && !seenUrls.has(candidate.thumbUrl)) {
+            seenUrls.add(candidate.thumbUrl);
+            combined.push(candidate);
+          }
+        }
       }
 
       return res.json({
@@ -1295,10 +1454,14 @@ async function startServer() {
       > = [];
 
       for (const pdf of pdfs) {
-        if (pdf?.base64Data) {
+        if (pdf?.textContent && typeof pdf.textContent === 'string') {
+          parts.push({
+            text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
+          });
+        } else if (pdf?.base64Data) {
           parts.push({
             inlineData: {
-              mimeType: 'application/pdf',
+              mimeType: pdf.mimeType || 'application/pdf',
               data: pdf.base64Data,
             },
           });
@@ -1395,10 +1558,14 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4, alternando targetCardT
       > = [];
 
       for (const pdf of pdfs) {
-        if (pdf?.base64Data) {
+        if (pdf?.textContent && typeof pdf.textContent === 'string') {
+          parts.push({
+            text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
+          });
+        } else if (pdf?.base64Data) {
           parts.push({
             inlineData: {
-              mimeType: 'application/pdf',
+              mimeType: pdf.mimeType || 'application/pdf',
               data: pdf.base64Data,
             },
           });
@@ -1499,16 +1666,17 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         });
       }
 
-      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Wozniak/Matuschak e lint.py.
+      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html).
 Mantenha rigorosamente o mesmo "id" numérico e qualquer tag de mídia válida de cada card. NÃO inclua o campo "sources".
 
-REGRAS DE CORREÇÃO CIRÚRGICA:
-- Se "type": "basic" -> "question" com <= 50 palavras e Tripla Ancoragem (comando temporal fechado: minuto zero, exame inicial vs padrão-ouro, 1ª escolha ou 2ª linha após falha); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo.
-- Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposição pendurada no final, SEM "::dica", e "answer" DEVE ser "".
-- Se pergunta composta -> transforme em pergunta atômica com Duplo Salto Cognitivo Implícito (apenas 1 ponto de interrogação).
-- Se spoiler por radical ou palavra no "topic" ou entre parênteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta é "Manobra de...") mantendo formato "Tema - Subtema".
+REGRAS DE CORREÇÃO CIRÚRGICA (MATUSCHAK & NIELSEN):
+- **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/critérios...?", "Cite...") ou a resposta tem múltiplos itens/ponto-e-vírgula, isole 1 único atributo/decisão determinante.
+- **Salience & Anti-Passivo (Nielsen):** Se a pergunta é uma definição inerte ("O que é X?") ou binária ("Sim/Não"), transforme em um prompt de saliência ancorado em cenário clínico ou mecanismo causal.
+- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e Tripla Ancoragem (comando temporal fechado: minuto zero, exame inicial vs padrão-ouro, 1ª escolha ou 2ª linha após falha); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo.
+- **Cloze Atômico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposição pendurada no final, SEM "::dica", e "answer" DEVE ser "".
+- **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre parênteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta é "Manobra de...") mantendo formato "Tema - Subtema".
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (→, ≥, ≤).
-- "hint": DEVE conter "<b>Comentário:</b> ", ter entre 180 e 295 caracteres visíveis APÓS o prefixo "<b>Comentário:</b> " (PROIBIDO passar de 320 caracteres visíveis), com termos-chave em <b>negrito</b> e contraste diferencial.
+- "hint": DEVE conter "<b>Comentário:</b> ", ter entre 180 e 295 caracteres visíveis APÓS o prefixo "<b>Comentário:</b> " (PROIBIDO passar de 320 caracteres visíveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
 
 CARDS SINALIZADOS E SEUS AVISOS:
 ${JSON.stringify(flaggedCards, null, 2)}
