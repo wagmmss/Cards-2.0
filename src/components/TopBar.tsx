@@ -1,22 +1,26 @@
 import React from 'react';
-import { Download } from 'lucide-react';
+import { Download, PackageCheck } from 'lucide-react';
 
 interface TopBarProps {
   deckKey: string;
   cardCount: number;
   onDownloadJson: () => void;
+  onExportApkg: () => void;
+  isExportingApkg?: boolean;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   deckKey,
   cardCount,
   onDownloadJson,
+  onExportApkg,
+  isExportingApkg = false,
 }) => {
   const cleanKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
 
   return (
     <header className="bg-[#0F1623] border-b border-slate-800/90">
-      <div className="max-w-4xl mx-auto flex items-center justify-between gap-8 px-6 py-3.5">
+      <div className="max-w-4xl mx-auto flex items-center justify-between gap-6 px-6 py-3.5">
         {/* Zone 1: Brand title, one line */}
         <a
           href="#painel-entrada"
@@ -56,16 +60,26 @@ export const TopBar: React.FC<TopBarProps> = ({
           </a>
         </nav>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center shrink-0">
+        {/* Zone 3: Primary actions */}
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={onDownloadJson}
             disabled={cardCount === 0}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>Baixar {cleanKey}_notes.json</span>
+            <span>{cleanKey}_notes.json</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onExportApkg}
+            disabled={cardCount === 0 || isExportingApkg}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <PackageCheck className="w-3.5 h-3.5" />
+            <span>{isExportingApkg ? 'Gerando .apkg...' : 'Exportar .apkg (Anki)'}</span>
           </button>
         </div>
       </div>

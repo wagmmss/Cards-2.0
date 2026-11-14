@@ -23,11 +23,13 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // server.ts
 var import_config = require("dotenv/config");
+var import_crypto = __toESM(require("crypto"), 1);
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_url = require("url");
 var import_vite = require("vite");
 var import_genai = require("@google/genai");
+var import_sql = __toESM(require("sql.js"), 1);
 var import_meta = {};
 var __filename = (0, import_url.fileURLToPath)(import_meta.url);
 var __dirname = import_path.default.dirname(__filename);
@@ -53,15 +55,13 @@ SUAS REGRAS INEGOCI\xC1VEIS DE SISTEMA (SINCRONIZADAS COM O MOTOR DESKTOP CRIADO
 1. LIBERDADE TOTAL PARA REFAZER, PODAR OU EXPANDIR CARDS PRESERVANDO O ID (FSRS):
 - N\xC3O \xC9 PORQUE O USU\xC1RIO ENVIOU N CARDS (ex.: 100 cards) QUE VOC\xCA DEVE DEVOLVER EXATAMENTE N CARDS! O n\xFAmero final de cards deve refletir a real necessidade cl\xEDnica do tema (P1 a P4):
   a) PODAR (EXCLUIR IDs): Exclua sem hesitar os IDs de cards duplicados/sobrepostos, triviais, puramente decorebas ou reprovados pelo Filtro Negativo.
-  b) REFAZER & REBALANCEAR PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e coment\xE1rio do zero e converta livremente "cloze" <-> "basic" para atingir a propor\xE7\xE3o obrigat\xF3ria de ~50% "basic" / 50% "cloze" (45% a 55%), mantendo o n\xFAmero exato do "id" original daquele card para preservar o hist\xF3rico FSRS no Anki.
+  b) REFAZER & REBALANCEAR PRESERVANDO O ID: Nos conceitos sobreviventes, reescreva pergunta, resposta e coment\xE1rio do zero e converta livremente "cloze" <-> "basic" para atingir a propor\xE7\xE3o obrigat\xF3ria de 45% a 55% "basic" / 45% a 55% "cloze" (meta: 50%/50%), mantendo o n\xFAmero exato do "id" original daquele card para preservar o hist\xF3rico FSRS no Anki.
   c) EXPANDIR (CRIAR NOVOS IDs): Se faltarem conceitos cl\xEDnicos essenciais de P1 a P4 para cobrir o tema com seguran\xE7a de prova pr\xE1tica e beira-leito, crie novos cards atribuindo novos IDs num\xE9ricos sequenciais ap\xF3s o maior ID existente (max_id + 1, max_id + 2...).
-- N\xC3O inclua o campo "sources" nos cards (desnecess\xE1rio).
+- N\xC3O inclua o campo "sources" nos cards.
 
 2. PRIORIDADE PARA IMAGENS M\xC9DICAS FIDEDIGNAS E SEM SPOILERS (RECOGNITION & FEEDBACK OFFLINE):
 - As imagens retiradas de PDFs/apostilas N\xC3O s\xE3o prioridade. A prioridade absoluta s\xE3o BOAS IMAGENS M\xC9DICAS FIDEDIGNAS vindas da web (Google Search, Wikimedia Commons Medical, NLM Open-i, Radiopaedia, ECGpedia), preferindo figuras limpas (sem setas ou legendas embutidas que entreguem o diagn\xF3stico na pr\xF3pria imagem).
-- Sempre que um conceito envolver reconhecimento visual (ECG, RX de t\xF3rax/abdome, TC, USG/FAST, cardiotocografia, dermatologia, fundoscopia, esfrega\xE7o sangu\xEDneo ou sinal semiol\xF3gico/cir\xFArgico), incorpore uma imagem fidedigna usando <img src="URL_OU_ARQUIVO"> e defina:
-  - "image_mode": "recognition" (card "basic" com <img src="..."> na "question" sem entregar o achado no texto da pergunta + legenda explicativa em it\xE1lico <i>Descri\xE7\xE3o do achado visual...</i><br><br> no in\xEDcio do "hint" antes de <b>Coment\xE1rio:</b>).
-  - ou "image_mode": "feedback" (quando a imagem entra no "hint" como algoritmo/fluxograma/anatomia de refor\xE7o visual).
+- NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>. Se referenciar uma imagem da web, use uma URL real ou mantenha m\xEDdias que j\xE1 existam nos assets do usu\xE1rio.
 
 3. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4) E FILTRO NEGATIVO:
 - P1 (Urg\xEAncia / Emerg\xEAncia / Minuto Zero): Sinais de alarme (red flags), crit\xE9rios de instabilidade/gravidade, conduta imediata de estabiliza\xE7\xE3o, manobras salvadoras, cirurgia/parto de emerg\xEAncia, 1\xAA droga (com dose e via), conduta na refratariedade (2\xAA linha), ant\xEDdotos e contraindica\xE7\xF5es fatais.
@@ -81,15 +81,15 @@ SUAS REGRAS INEGOCI\xC1VEIS DE SISTEMA (SINCRONIZADAS COM O MOTOR DESKTOP CRIADO
     4) "Ap\xF3s falha de [1\xAA linha], qual a conduta imediata de segunda linha (ou definitiva)?"
 - Em "basic": "answer" ultra-curto com 1 a 12 palavras (M\xC1XIMO ESTRITO: 15 palavras / 110 caracteres), terminado em ponto final (.), PROIBIDO conter ";" e sem <b> externo envolvendo toda a resposta.
 
-5. REGRAS DE ENGENHARIA PARA CARDS CLOZE E PROPOR\xC7\xC3O 50/50:
-- Equil\xEDbrio OBRIGAT\xD3RIO do deck: 45% a 55% "basic" e 45% a 55% "cloze". Se o deck original tiver excesso de "cloze" ou de "basic", converta os cards necess\xE1rios!
+5. REGRAS DE ENGENHARIA PARA CARDS CLOZE E PROPOR\xC7\xC3O 45% A 55%:
+- Equil\xEDbrio OBRIGAT\xD3RIO do deck: estritamente entre 45% e 55% "basic" e entre 45% e 55% "cloze". Se o deck original tiver excesso de "cloze" ou de "basic", converta os cards necess\xE1rios!
 - Em "cloze": estritamente 1 lacuna {{c1::...}} (1 a 5 palavras, m\xE1x 60 chars), "answer": "".
 - Unidades de medida SEMPRE FORA da lacuna (ex.: "> {{c1::126}} mg/dL").
 - PROIBIDO artigo/preposi\xE7\xE3o pendurada no fim da lacuna (ex.: {{c1::... de}}).
 - PROIBIDO usar "::dica" gen\xE9rica e PROIBIDO muleta p\xF3s-lacuna entre par\xEAnteses.
 
-6. ZERO SPOILER, PROIBI\xC7\xC3O DE LATEX E COMENT\xC1RIO CIR\xDARGICO:
-- "topic": formato estrito "Tema - Subtema" (NUNCA repetir o topic em negrito dentro do question e NUNCA vazar palavras da resposta ou sin\xF4nimos como adrenalina/epinefrina, noradrenalina/norepinefrina, vasopressina/adh).
+6. ZERO SPOILER POR RADICAL, PROIBI\xC7\xC3O DE LATEX E COMENT\xC1RIO CIR\xDARGICO:
+- "topic": formato estrito "Tema - Subtema". NUNCA vaze palavras ou radicais da resposta no topic (ex.: PROIBIDO colocar "Manobras" no topic se a resposta come\xE7a com "Manobra de...", e PROIBIDO sin\xF4nimos como adrenalina/epinefrina, noradrenalina/norepinefrina, vasopressina/adh).
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>).
 - PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X"): use "1\xAA escolha na gesta\xE7\xE3o", "seguro na gesta\xE7\xE3o" ou "contraindicado (teratog\xEAnico)".
 - "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial obrigat\xF3rio.`;
@@ -192,7 +192,8 @@ var PT_TO_EN_MEDICAL_TERMS = [
   [/\bhematoma\s+subdural\b/gi, "subdural hematoma brain CT"],
   [/\bobstru[cç][aã]o\s+intestinal|volvo\b/gi, "bowel obstruction sigmoid volvulus xray"],
   [/\bintussuscep[cç][aã]o\b/gi, "intussusception target sign ultrasound"],
-  [/\bretinopatia\s+hipertensiva|retinopatia\s+diab[eé]tica|fundoscopia\b/gi, "hypertensive retinopathy fundus"]
+  [/\bretinopatia\s+hipertensiva|retinopatia\s+diab[eé]tica|fundoscopia\b/gi, "hypertensive retinopathy fundus"],
+  [/\bmelanoma|carcinoma\s+basocelular|dermatoscopia\b/gi, "melanoma dermoscopy skin lesion"]
 ];
 function buildEnglishMedicalSearchQuery(rawQuery) {
   let translated = rawQuery;
@@ -211,7 +212,7 @@ async function searchWikimediaCommonsMedical(searchQuery) {
   url.searchParams.set("generator", "search");
   url.searchParams.set("gsrsearch", `filetype:bitmap ${enQuery}`);
   url.searchParams.set("gsrnamespace", "6");
-  url.searchParams.set("gsrlimit", "8");
+  url.searchParams.set("gsrlimit", "6");
   url.searchParams.set("prop", "imageinfo");
   url.searchParams.set("iiprop", "url|extmetadata");
   url.searchParams.set("iiurlwidth", "800");
@@ -219,9 +220,9 @@ async function searchWikimediaCommonsMedical(searchQuery) {
   url.searchParams.set("origin", "*");
   const resp = await fetch(url.toString(), {
     headers: {
-      "User-Agent": "InternatoFirstCardArchitect/1.0 (https://aistudio.google.com; medical-education)"
+      "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)"
     },
-    signal: AbortSignal.timeout(2e3)
+    signal: AbortSignal.timeout(2500)
   });
   if (!resp.ok) {
     throw new Error(`Wikimedia HTTP ${resp.status}`);
@@ -243,7 +244,45 @@ async function searchWikimediaCommonsMedical(searchQuery) {
       description: cleanDesc || `Imagem m\xE9dica de refer\xEAncia para ${searchQuery}.`,
       suggestedFilename: cleanName.endsWith(".jpg") || cleanName.endsWith(".png") ? cleanName : `${cleanName}.jpg`,
       defaultLegend: cleanDesc ? `Exame complementar demonstrando ${cleanDesc.slice(0, 130)}.` : `Imagem diagn\xF3stica demonstrando achado cl\xE1ssico de ${searchQuery}.`,
-      source: "Wikimedia Commons Medical (Google / Open Access)"
+      source: "Wikimedia Commons Medical"
+    };
+  }).filter((item) => item !== null);
+}
+async function searchNlmOpenIMedical(searchQuery) {
+  const enQuery = buildEnglishMedicalSearchQuery(searchQuery);
+  const url = new URL("https://openi.nlm.nih.gov/api/search");
+  url.searchParams.set("query", enQuery);
+  url.searchParams.set("m", "1");
+  url.searchParams.set("n", "6");
+  const resp = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)"
+    },
+    signal: AbortSignal.timeout(2800)
+  });
+  if (!resp.ok) {
+    throw new Error(`NLM Open-i HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  const list = Array.isArray(data?.list) ? data.list : [];
+  return list.map((item, idx) => {
+    const rawImgPath = item.imgLarge || item.imgThumb || "";
+    if (!rawImgPath) return null;
+    const fullImgUrl = rawImgPath.startsWith("http") ? rawImgPath : `https://openi.nlm.nih.gov${rawImgPath.startsWith("/") ? "" : "/"}${rawImgPath}`;
+    const thumbImgUrl = item.imgThumb ? item.imgThumb.startsWith("http") ? item.imgThumb : `https://openi.nlm.nih.gov${item.imgThumb.startsWith("/") ? "" : "/"}${item.imgThumb}` : fullImgUrl;
+    const rawCaption = item.image?.caption || item.title || item.abstract || `Exame biom\xE9dico NLM Open-i ${idx + 1}`;
+    const cleanCaption = rawCaption.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+    const cleanUid = (item.uid || `openi_${idx + 1}`).toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+    return {
+      id: `openi-${cleanUid}-${idx}`,
+      title: (item.title || cleanCaption).replace(/<[^>]*>/g, "").slice(0, 85),
+      thumbUrl: thumbImgUrl,
+      fullUrl: fullImgUrl,
+      description: cleanCaption,
+      suggestedFilename: `openi_${cleanUid}.png`,
+      defaultLegend: `Exame complementar (NLM Open-i) evidenciando ${cleanCaption.slice(0, 125)}.`,
+      source: "NLM Open-i (NIH Biomedical Archive)"
     };
   }).filter((item) => item !== null);
 }
@@ -335,9 +374,9 @@ async function resolveMediaSourceToBuffer(sourceUrl) {
     try {
       const resp = await fetch(sourceUrl, {
         headers: {
-          "User-Agent": "InternatoFirstCardArchitect/1.0 (https://aistudio.google.com; medical-education)"
+          "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)"
         },
-        signal: AbortSignal.timeout(3500)
+        signal: AbortSignal.timeout(4e3)
       });
       if (!resp.ok) return null;
       const arrBuf = await resp.arrayBuffer();
@@ -346,7 +385,488 @@ async function resolveMediaSourceToBuffer(sourceUrl) {
       return null;
     }
   }
+  if (/^[A-Za-z0-9+/=\s]+$/.test(sourceUrl) && sourceUrl.length > 64) {
+    try {
+      return Buffer.from(sourceUrl.replace(/\s+/g, ""), "base64");
+    } catch {
+      return null;
+    }
+  }
   return null;
+}
+async function resolveDeckMediaFiles(mediaManifest, mediaAssets = {}) {
+  const normalizedAssetMap = /* @__PURE__ */ new Map();
+  for (const [key, val] of Object.entries(mediaAssets || {})) {
+    if (key && typeof val === "string" && val) {
+      const cleanKey = key.trim().toLowerCase();
+      normalizedAssetMap.set(cleanKey, val);
+      const base = cleanKey.split(/[\\/]/).pop();
+      if (base) normalizedAssetMap.set(base, val);
+    }
+  }
+  const seenFilenames = /* @__PURE__ */ new Set();
+  const resolvedMedia = [];
+  const missingMedia = [];
+  if (Array.isArray(mediaManifest)) {
+    for (const item of mediaManifest) {
+      const filename = String(item?.filename || item?.localFilename || "").trim();
+      const sourceUrl = String(item?.sourceUrl || "").trim();
+      if (!filename || seenFilenames.has(filename)) continue;
+      seenFilenames.add(filename);
+      const lowerName = filename.toLowerCase();
+      const uploadedDataUri = normalizedAssetMap.get(lowerName) || normalizedAssetMap.get(sourceUrl.toLowerCase());
+      let buf = null;
+      if (uploadedDataUri) {
+        buf = await resolveMediaSourceToBuffer(uploadedDataUri);
+      }
+      if (!buf && sourceUrl) {
+        buf = await resolveMediaSourceToBuffer(sourceUrl);
+      }
+      if (buf && buf.length > 0) {
+        resolvedMedia.push({ filename, data: buf });
+      } else {
+        missingMedia.push({
+          filename,
+          cardId: item?.cardId,
+          reason: /^(?:https?:\/\/)/i.test(sourceUrl) ? `Falha ao baixar URL externa (${sourceUrl.slice(0, 80)})` : "Arquivo local n\xE3o encontrado nos assets carregados (04_M\xEDdias)"
+        });
+      }
+    }
+  }
+  for (const [rawName, dataUri] of Object.entries(mediaAssets || {})) {
+    const cleanName = rawName.trim().split(/[\\/]/).pop() || "";
+    if (!cleanName || seenFilenames.has(cleanName)) continue;
+    const buf = await resolveMediaSourceToBuffer(dataUri);
+    if (buf && buf.length > 0) {
+      seenFilenames.add(cleanName);
+      resolvedMedia.push({ filename: cleanName, data: buf });
+    }
+  }
+  return { resolvedMedia, missingMedia };
+}
+var CLOZE_MODEL_ID = 1738331521911;
+var CLOZE_MODEL_NAME = "Med_Cloze_Inverted_v2";
+var BASIC_MODEL_ID = 1738331521912;
+var BASIC_MODEL_NAME = "Med_Basic_Inverted_v2";
+var GUID_SALT = "criador-de-cards";
+var ANKI_CLINICAL_CSS = `.card {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 18.5px;
+  line-height: 1.58;
+  text-align: left;
+  color: #1e293b;
+  background-color: #f8fafc;
+  padding: 24px;
+}
+.med-card { max-width: 740px; margin: 0 auto; }
+.topic-box {
+  display: inline-block; background-color: #f1f5f9; color: #0369a1;
+  padding: 4px 10px; border-radius: 4px; font-size: 13.5px;
+  font-weight: 700; margin-bottom: 12px; border: 1px solid #cbd5e1;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+b, strong { color: #0284c7; font-weight: 700; }
+.cloze { font-weight: 700; color: #0284c7; border-bottom: 2px solid #38bdf8; padding: 0 2px; }
+.front-content { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
+.back-content { font-size: 18.5px; color: #0f172a; line-height: 1.58; margin-top: 10px; }
+.main-answer { font-size: 20px; font-weight: 700; color: #0f172a; margin-bottom: 12px; }
+.extra-box {
+  margin-top: 16px; padding: 14px 18px; background: #f1f5f9;
+  border-radius: 8px; border-left: 4px solid #0284c7;
+  font-size: 16px; color: #334155; line-height: 1.52;
+}
+hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
+img {
+  max-width: 100%; max-height: 65vh; height: auto; border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12); margin: 14px auto 0;
+  background: #ffffff; padding: 4px; display: block; object-fit: contain;
+}
+table.med-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
+table.med-table th, table.med-table td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
+table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700; }
+.nightMode.card, .night_mode.card, body.nightMode, body.night_mode { background-color: #18181b !important; color: #f4f4f5 !important; }
+.nightMode .topic-box, .night_mode .topic-box { background-color: #27272a !important; color: #7dd3fc !important; border-color: #3f3f46 !important; }
+.nightMode .front-content, .nightMode .back-content, .night_mode .front-content, .night_mode .back-content, .nightMode .cloze-text, .night_mode .cloze-text { color: #f4f4f5 !important; }
+.nightMode .main-answer, .night_mode .main-answer { color: #f4f4f5 !important; }
+.nightMode b, .nightMode strong, .night_mode b, .night_mode strong { color: #38bdf8 !important; }
+.nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
+.nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
+.nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
+.nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46; }
+.nightMode table.med-table th, .night_mode table.med-table th { background-color: #0c4a6e !important; color: #e0f2fe !important; border-color: #3f3f46 !important; }
+.nightMode table.med-table td, .night_mode table.med-table td { border-color: #3f3f46 !important; color: #f4f4f5 !important; }
+@media (max-width: 600px) {
+  .card { padding: 14px; font-size: 16.5px; }
+  .med-card { max-width: 100%; }
+  .front-content { font-size: 17.5px; }
+  .back-content { font-size: 16.5px; }
+  .main-answer { font-size: 18px; }
+  .extra-box { padding: 10px 14px; font-size: 15px; }
+  img { max-height: 55vh; margin-top: 10px; }
+}`;
+var BASE91_TABLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~";
+function genankiGuidFor(deckId, deckKey, noteId) {
+  const key = `${deckKey}:id:${noteId}`;
+  const hashStr = `${GUID_SALT}__${deckId}__${key}`;
+  const digest = import_crypto.default.createHash("sha256").update(hashStr, "utf8").digest();
+  let hashInt = 0n;
+  for (let i = 0; i < 8; i++) {
+    hashInt = hashInt << 8n | BigInt(digest[i]);
+  }
+  const base = BigInt(BASE91_TABLE.length);
+  let rv = "";
+  while (hashInt > 0n) {
+    rv = BASE91_TABLE[Number(hashInt % base)] + rv;
+    hashInt = hashInt / base;
+  }
+  return rv || `id${noteId}`;
+}
+function ankiFieldChecksum(sfld) {
+  const hex = import_crypto.default.createHash("sha1").update(sfld || "", "utf8").digest("hex").slice(0, 8);
+  return parseInt(hex, 16) >>> 0;
+}
+function computeDeckIdFromKey(deckKey) {
+  const digest = import_crypto.default.createHash("sha256").update(deckKey || "deck", "utf8").digest();
+  const val = digest.readUInt32BE(0);
+  return 173e10 + val % 9e8;
+}
+var sqlJsPromise = null;
+function getSqlJs() {
+  if (!sqlJsPromise) {
+    sqlJsPromise = (0, import_sql.default)();
+  }
+  return sqlJsPromise;
+}
+async function buildAnkiApkgBuffer(params) {
+  const SQL = await getSqlJs();
+  const db = new SQL.Database();
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const cleanDeckKey = (params.deckKey || "internato_deck").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_") || "internato_deck";
+  const deckId = typeof params.deckId === "number" && params.deckId > 1 ? params.deckId : computeDeckIdFromKey(cleanDeckKey);
+  const deckName = (params.deckName || cleanDeckKey.replace(/_/g, " ")).trim();
+  const updatedRegistry = { ...params.guidRegistry || {} };
+  db.run(`
+    CREATE TABLE col (
+      id integer primary key,
+      crt integer not null,
+      mod integer not null,
+      scm integer not null,
+      ver integer not null,
+      dty integer not null,
+      usn integer not null,
+      ls integer not null,
+      conf text not null,
+      models text not null,
+      decks text not null,
+      dconf text not null,
+      tags text not null
+    );
+    CREATE TABLE notes (
+      id integer primary key,
+      guid text not null,
+      mid integer not null,
+      mod integer not null,
+      usn integer not null,
+      tags text not null,
+      flds text not null,
+      sfld integer not null,
+      csum integer not null,
+      flags integer not null,
+      data text not null
+    );
+    CREATE TABLE cards (
+      id integer primary key,
+      nid integer not null,
+      did integer not null,
+      ord integer not null,
+      mod integer not null,
+      usn integer not null,
+      type integer not null,
+      queue integer not null,
+      due integer not null,
+      ivl integer not null,
+      factor integer not null,
+      reps integer not null,
+      lapses integer not null,
+      left integer not null,
+      odue integer not null,
+      odid integer not null,
+      flags integer not null,
+      data text not null
+    );
+    CREATE TABLE revlog (
+      id integer primary key,
+      cid integer not null,
+      usn integer not null,
+      ease integer not null,
+      ivl integer not null,
+      lastIvl integer not null,
+      factor integer not null,
+      time integer not null,
+      type integer not null
+    );
+    CREATE TABLE graves (
+      usn integer not null,
+      oid integer not null,
+      type integer not null
+    );
+    CREATE INDEX ix_notes_usn on notes (usn);
+    CREATE INDEX ix_cards_nid on cards (nid);
+    CREATE INDEX ix_cards_sched on cards (did, queue, due);
+    CREATE INDEX ix_cards_usn on cards (usn);
+    CREATE INDEX ix_revlog_usn on revlog (usn);
+    CREATE INDEX ix_revlog_cid on revlog (cid);
+  `);
+  const fieldDefs = ["Question", "Topic", "Answer", "Hint"].map((name, ord) => ({
+    name,
+    ord,
+    sticky: false,
+    rtl: false,
+    font: "Arial",
+    size: 20,
+    media: []
+  }));
+  const modelsObj = {
+    [String(CLOZE_MODEL_ID)]: {
+      id: CLOZE_MODEL_ID,
+      name: CLOZE_MODEL_NAME,
+      type: 1,
+      // Cloze
+      mod: nowSec,
+      usn: -1,
+      sortf: 0,
+      did: deckId,
+      tmpls: [
+        {
+          name: "Cloze",
+          ord: 0,
+          qfmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="cloze-text">{{cloze:Question}}</div></div>',
+          afmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="cloze-text">{{cloze:Question}}</div>{{#Hint}}<hr id="answer" class="med-divider"><div class="extra-box">{{Hint}}</div>{{/Hint}}</div><script>(document.querySelector(".cloze") || document.getElementById("answer"))?.scrollIntoView({behavior: "smooth", block: "center"});</script>',
+          bqfmt: "",
+          bafmt: "",
+          did: null,
+          bfont: "",
+          bsize: 0
+        }
+      ],
+      flds: fieldDefs,
+      css: ANKI_CLINICAL_CSS,
+      latexPre: "",
+      latexPost: "",
+      latexsvg: false,
+      req: [[0, "all", [0]]],
+      tags: [],
+      vers: []
+    },
+    [String(BASIC_MODEL_ID)]: {
+      id: BASIC_MODEL_ID,
+      name: BASIC_MODEL_NAME,
+      type: 0,
+      // Standard Basic
+      mod: nowSec,
+      usn: -1,
+      sortf: 0,
+      did: deckId,
+      tmpls: [
+        {
+          name: "Basic",
+          ord: 0,
+          qfmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="front-content">{{Question}}</div></div>',
+          afmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="front-content">{{Question}}</div><hr id="answer" class="med-divider"><div class="back-content"><div class="main-answer"><b>{{Answer}}</b></div>{{#Hint}}<div class="extra-box">{{Hint}}</div>{{/Hint}}</div></div><script>document.getElementById("answer")?.scrollIntoView({behavior: "smooth", block: "nearest"});</script>',
+          bqfmt: "",
+          bafmt: "",
+          did: null,
+          bfont: "",
+          bsize: 0
+        }
+      ],
+      flds: fieldDefs,
+      css: ANKI_CLINICAL_CSS,
+      latexPre: "",
+      latexPost: "",
+      latexsvg: false,
+      req: [[0, "all", [0]]],
+      tags: [],
+      vers: []
+    }
+  };
+  const decksObj = {
+    "1": {
+      id: 1,
+      mod: nowSec,
+      name: "Default",
+      usn: -1,
+      lrnToday: [0, 0],
+      revToday: [0, 0],
+      newToday: [0, 0],
+      timeToday: [0, 0],
+      collapsed: false,
+      browserCollapsed: false,
+      desc: "",
+      dyn: 0,
+      conf: 1,
+      extendNew: 10,
+      extendRev: 50
+    },
+    [String(deckId)]: {
+      id: deckId,
+      mod: nowSec,
+      name: deckName,
+      usn: -1,
+      lrnToday: [0, 0],
+      revToday: [0, 0],
+      newToday: [0, 0],
+      timeToday: [0, 0],
+      collapsed: false,
+      browserCollapsed: false,
+      desc: `Baralho Can\xF4nico Internato-First (${cleanDeckKey})`,
+      dyn: 0,
+      conf: 1,
+      extendNew: 10,
+      extendRev: 50
+    }
+  };
+  const confObj = {
+    nextPos: 1,
+    estTimes: true,
+    activeDecks: [deckId],
+    sortType: "noteFld",
+    timeLim: 0,
+    sortBackwards: false,
+    addToCur: true,
+    curDeck: deckId,
+    newBury: true,
+    newSpread: 0,
+    dueCounts: true,
+    curModel: String(BASIC_MODEL_ID),
+    collapseTime: 1200
+  };
+  const dconfObj = {
+    "1": {
+      id: 1,
+      mod: 0,
+      name: "Default",
+      usn: 0,
+      maxTaken: 60,
+      autoplay: true,
+      timer: 0,
+      replayq: true,
+      new: { bury: true, delays: [1, 10], initialFactor: 2500, ints: [1, 4, 7], order: 1, perDay: 20 },
+      rev: { bury: true, ease4: 1.3, fuzz: 0.05, ivlFct: 1, maxIvl: 36500, perDay: 200, hardFactor: 1.2 },
+      lapse: { delays: [10], leechAction: 0, leechFails: 8, minInt: 1, mult: 0 },
+      dyn: false
+    }
+  };
+  db.run(
+    `INSERT INTO col VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      1,
+      nowSec,
+      nowSec * 1e3,
+      nowSec * 1e3,
+      11,
+      0,
+      0,
+      0,
+      JSON.stringify(confObj),
+      JSON.stringify(modelsObj),
+      JSON.stringify(decksObj),
+      JSON.stringify(dconfObj),
+      "{}"
+    ]
+  );
+  const insertNoteStmt = db.prepare(
+    `INSERT OR REPLACE INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const insertCardStmt = db.prepare(
+    `INSERT OR REPLACE INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const usedCardIds = /* @__PURE__ */ new Set();
+  params.notes.forEach((note, index) => {
+    const nid = Number(note.id) > 0 ? Number(note.id) : 171000101 + index;
+    const regKey = `${cleanDeckKey}:id:${nid}`;
+    const guid = updatedRegistry[regKey] || genankiGuidFor(deckId, cleanDeckKey, nid);
+    updatedRegistry[regKey] = guid;
+    const isCloze = note.type === "cloze";
+    const mid = isCloze ? CLOZE_MODEL_ID : BASIC_MODEL_ID;
+    const qField = String(note.question || "");
+    const tField = String(note.topic || "");
+    const aField = isCloze ? "" : String(note.answer || "");
+    const hField = String(note.hint || "");
+    const flds = [qField, tField, aField, hField].join("");
+    const sfld = qField.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const csum = ankiFieldChecksum(sfld);
+    const noteTags = Array.from(
+      /* @__PURE__ */ new Set([
+        cleanDeckKey,
+        ...Array.isArray(note.tags) ? note.tags.map((t) => String(t).trim()).filter((t) => t && !/\s/.test(t)) : []
+      ])
+    );
+    const tagsStr = ` ${noteTags.join(" ")} `;
+    insertNoteStmt.run([
+      nid,
+      guid,
+      mid,
+      nowSec,
+      -1,
+      tagsStr,
+      flds,
+      sfld,
+      csum,
+      0,
+      ""
+    ]);
+    let cid = nid < 1e11 ? nid * 10 + 1 : nid + index + 1;
+    while (usedCardIds.has(cid)) {
+      cid++;
+    }
+    usedCardIds.add(cid);
+    insertCardStmt.run([
+      cid,
+      nid,
+      deckId,
+      0,
+      nowSec,
+      -1,
+      0,
+      0,
+      index + 1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      ""
+    ]);
+  });
+  insertNoteStmt.free();
+  insertCardStmt.free();
+  const sqliteBytes = Buffer.from(db.export());
+  db.close();
+  const zipEntries = [
+    { name: "collection.anki21", data: sqliteBytes },
+    { name: "collection.anki2", data: sqliteBytes }
+  ];
+  const mediaJsonMap = {};
+  params.resolvedMedia.forEach((mediaItem, idx) => {
+    const numKey = String(idx);
+    mediaJsonMap[numKey] = mediaItem.filename;
+    zipEntries.push({
+      name: numKey,
+      data: mediaItem.data
+    });
+  });
+  zipEntries.push({
+    name: "media",
+    data: Buffer.from(JSON.stringify(mediaJsonMap), "utf8")
+  });
+  return {
+    apkgBuffer: buildZipArchive(zipEntries),
+    updatedRegistry
+  };
 }
 async function startServer() {
   const app = (0, import_express.default)();
@@ -355,10 +875,21 @@ async function startServer() {
     try {
       const { query = "", topic = "", question = "" } = req.body || {};
       const rawSearch = (query || topic || question || "clinical diagnosis").trim();
-      const results = await searchWikimediaCommonsMedical(rawSearch);
+      const [wikiSettled, openiSettled] = await Promise.allSettled([
+        searchWikimediaCommonsMedical(rawSearch),
+        searchNlmOpenIMedical(rawSearch)
+      ]);
+      const wikiImages = wikiSettled.status === "fulfilled" ? wikiSettled.value : [];
+      const openiImages = openiSettled.status === "fulfilled" ? openiSettled.value : [];
+      const combined = [];
+      const maxLen = Math.max(wikiImages.length, openiImages.length);
+      for (let i = 0; i < maxLen; i++) {
+        if (wikiImages[i]) combined.push(wikiImages[i]);
+        if (openiImages[i]) combined.push(openiImages[i]);
+      }
       return res.json({
         query: rawSearch,
-        images: results.slice(0, 8)
+        images: combined.slice(0, 12)
       });
     } catch {
       return res.json({
@@ -375,7 +906,7 @@ async function startServer() {
       }
       const upstream = await fetch(targetUrl, {
         headers: {
-          "User-Agent": "InternatoFirstCardArchitect/1.0 (https://aistudio.google.com; medical-education)"
+          "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)"
         },
         signal: AbortSignal.timeout(4e3)
       });
@@ -397,9 +928,15 @@ async function startServer() {
       const {
         deckKey = "internato_deck",
         notesJson = "[]",
-        mediaManifest = []
+        mediaManifest = [],
+        mediaAssets = {},
+        guidRegistry = {}
       } = req.body || {};
       const cleanDeckKey = String(deckKey || "internato_deck").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+      const { resolvedMedia, missingMedia } = await resolveDeckMediaFiles(
+        mediaManifest,
+        mediaAssets
+      );
       const zipEntries = [];
       const jsonBuffer = Buffer.from(String(notesJson), "utf8");
       zipEntries.push({
@@ -410,26 +947,37 @@ async function startServer() {
         name: `01_Notas/${cleanDeckKey}_notes.json`,
         data: jsonBuffer
       });
-      const seenFilenames = /* @__PURE__ */ new Set();
-      if (Array.isArray(mediaManifest)) {
-        for (const item of mediaManifest) {
-          const localFilename = String(item?.filename || item?.localFilename || "").trim();
-          const sourceUrl = String(item?.sourceUrl || "").trim();
-          if (!localFilename || seenFilenames.has(localFilename)) continue;
-          const imgBuf = await resolveMediaSourceToBuffer(sourceUrl);
-          if (imgBuf && imgBuf.length > 0) {
-            seenFilenames.add(localFilename);
-            zipEntries.push({
-              name: `collection.media/${localFilename}`,
-              data: imgBuf
-            });
-            zipEntries.push({
-              name: `04_M\xEDdias/${cleanDeckKey}/${localFilename}`,
-              data: imgBuf
-            });
-          }
-        }
+      for (const mediaItem of resolvedMedia) {
+        zipEntries.push({
+          name: `collection.media/${mediaItem.filename}`,
+          data: mediaItem.data
+        });
+        zipEntries.push({
+          name: `04_M\xEDdias/${cleanDeckKey}/${mediaItem.filename}`,
+          data: mediaItem.data
+        });
       }
+      if (guidRegistry && typeof guidRegistry === "object") {
+        zipEntries.push({
+          name: "data/registry/note_guid_registry.json",
+          data: Buffer.from(
+            JSON.stringify({ version: 1, entries: guidRegistry }, null, 2),
+            "utf8"
+          )
+        });
+      }
+      const mediaReport = {
+        deckKey: cleanDeckKey,
+        exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        resolvedCount: resolvedMedia.length,
+        missingCount: missingMedia.length,
+        resolvedFiles: resolvedMedia.map((m) => m.filename),
+        missingMedia
+      };
+      zipEntries.push({
+        name: "RELATORIO_MIDIAS.json",
+        data: Buffer.from(JSON.stringify(mediaReport, null, 2), "utf8")
+      });
       const readmeText = [
         `PACOTE OFFLINE ANKI \u2014 ${cleanDeckKey.toUpperCase()}`,
         "==========================================================",
@@ -437,9 +985,16 @@ async function startServer() {
         `   - ${cleanDeckKey}_notes.json`,
         `   - 01_Notas/${cleanDeckKey}_notes.json`,
         "",
-        `2. M\xEDdias Baixadas e Embutidas Offline (${seenFilenames.size} arquivo(s)):`,
+        `2. Auditoria de M\xEDdias (${resolvedMedia.length} resolvida(s) / ${missingMedia.length} faltante(s)):`,
         "   - Pasta collection.media/ : copie os arquivos diretamente para a pasta collection.media do seu Anki.",
-        `   - Pasta 04_M\xEDdias/${cleanDeckKey}/ : pronta para o gerador desktop (uv run cards build / anki.py), que empacota automaticamente no .apkg.`,
+        `   - Pasta 04_M\xEDdias/${cleanDeckKey}/ : pronta para o gerador desktop (uv run cards).`,
+        ...missingMedia.length > 0 ? [
+          "",
+          "\u26A0\uFE0F ATEN\xC7\xC3O \u2014 M\xCDDIAS AUSENTES N\xC3O INCLU\xCDDAS NO PACOTE:",
+          ...missingMedia.map(
+            (m) => `   - ${m.filename} (Card ID: ${m.cardId ?? "?"}) -> ${m.reason}`
+          )
+        ] : ["   - Todas as m\xEDdias referenciadas foram embutidas com sucesso!"],
         ""
       ].join("\n");
       zipEntries.push({
@@ -448,6 +1003,12 @@ async function startServer() {
       });
       const zipBuffer = buildZipArchive(zipEntries);
       res.setHeader("Content-Type", "application/zip");
+      res.setHeader("X-Resolved-Media-Count", String(resolvedMedia.length));
+      res.setHeader("X-Missing-Media-Count", String(missingMedia.length));
+      res.setHeader(
+        "X-Missing-Media",
+        encodeURIComponent(JSON.stringify(missingMedia.map((m) => m.filename)))
+      );
       res.setHeader(
         "Content-Disposition",
         `attachment; filename="${cleanDeckKey}_anki_offline_bundle.zip"`
@@ -455,6 +1016,51 @@ async function startServer() {
       return res.send(zipBuffer);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Erro ao montar pacote ZIP offline";
+      return res.status(500).json({ error: msg });
+    }
+  });
+  app.post("/api/export/apkg", async (req, res) => {
+    try {
+      const {
+        deckKey = "internato_deck",
+        deckName = "",
+        deckId,
+        notes = [],
+        mediaManifest = [],
+        mediaAssets = {},
+        guidRegistry = {}
+      } = req.body || {};
+      const cleanDeckKey = String(deckKey || "internato_deck").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+      const { resolvedMedia, missingMedia } = await resolveDeckMediaFiles(
+        mediaManifest,
+        mediaAssets
+      );
+      const { apkgBuffer, updatedRegistry } = await buildAnkiApkgBuffer({
+        deckKey: cleanDeckKey,
+        deckName: deckName || cleanDeckKey.replace(/_/g, " "),
+        deckId: typeof deckId === "number" ? deckId : void 0,
+        notes: Array.isArray(notes) ? notes : [],
+        resolvedMedia,
+        guidRegistry: guidRegistry && typeof guidRegistry === "object" ? guidRegistry : {}
+      });
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("X-Resolved-Media-Count", String(resolvedMedia.length));
+      res.setHeader("X-Missing-Media-Count", String(missingMedia.length));
+      res.setHeader(
+        "X-Missing-Media",
+        encodeURIComponent(JSON.stringify(missingMedia.map((m) => m.filename)))
+      );
+      res.setHeader(
+        "X-Updated-Guid-Count",
+        String(Object.keys(updatedRegistry).length)
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${cleanDeckKey}.apkg"`
+      );
+      return res.send(apkgBuffer);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao gerar arquivo .apkg";
       return res.status(500).json({ error: msg });
     }
   });
@@ -575,24 +1181,23 @@ DADOS DO BARALHO ANTIGO PARA CURADORIA E PRESERVA\xC7\xC3O FSRS:
 - Total de cards enviados originalmente: ${existingIds.length}
 - Maior ID existente: ${maxExistingId} (se criar novos cards, use IDs sequenciais a partir de ${maxExistingId + 1})
 - Tags de M\xEDdia Originais: ${JSON.stringify(mediaTags)}
-- Resumo Compacto dos Cards Originais (voc\xEA DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o n\xFAmero "id" original daquele conceito; 3) CONVERTER basic <-> cloze para atingir 50% basic / 50% cloze; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 ausentes):
+- Resumo Compacto dos Cards Originais (voc\xEA DEVE: 1) EXCLUIR os IDs de cards duplicados/redundantes/fracos; 2) REFAZER os sobreviventes mantendo o n\xFAmero "id" original daquele conceito; 3) CONVERTER basic <-> cloze para atingir estritamente 45% a 55% basic / 45% a 55% cloze; 4) CRIAR novos cards com IDs >= ${maxExistingId + 1} para cobrir conceitos P1-P4 ausentes):
 ${rawCardsSummary}
 
 MAPA CL\xCDNICO APROVADO (P1 a P4):
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Mapear integralmente P1, P2, P3 e P4 do tema."}
 
 CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
-1. QUANTIDADE ADEQUADA AO TEMA + PROPOR\xC7\xC3O 50/50: N\xE3o devolva o mesmo n\xFAmero de cards por in\xE9rcia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. O baralho final DEVE ter entre 45% e 55% "basic" e entre 45% e 55% "cloze".
+1. QUANTIDADE ADEQUADA AO TEMA + PROPOR\xC7\xC3O 45% A 55%: N\xE3o devolva o mesmo n\xFAmero de cards por in\xE9rcia. Pode excluir IDs redundantes ou criar novos IDs sequenciais. O baralho final DEVE ter estritamente entre 45% e 55% "basic" e entre 45% e 55% "cloze".
 2. Se "basic":
    - "question": no m\xE1ximo 45 a 50 palavras, seguindo a Matriz de Tripla Ancoragem ([CEN\xC1RIO + IDADE/IG] + [CL\xCDNICA + SINAIS VITAIS] + [COMANDO TEMPORAL FECHADO: minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha]). PROIBIDO "Qual a conduta?".
    - "answer": 1 a 12 palavras (M\xC1XIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-v\xEDrgula (;) e SEM tag <b> externo envolvendo toda a resposta.
 3. Se "cloze":
    - "question": cont\xE9m ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposi\xE7\xE3o pendurada no final, SEM "::dica".
    - "answer": "" (string vazia).
-4. Imagens M\xE9dicas Fidedignas:
-   - Nos cards de reconhecimento visual (P2), use "image_mode": "recognition", inclua <img src="NOME_ARQUIVO.jpg"> na "question" e inicie o "hint" com <i>Descri\xE7\xE3o do achado visual...</i><br><br><b>Coment\xE1rio:</b> ...
+4. Zero M\xEDdias \xD3rf\xE3s: NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>.
 5. Duplo Salto Cognitivo Impl\xEDcito: NUNCA fa\xE7a pergunta composta ("Qual o diagn\xF3stico e a conduta?"). Apresente o caso cl\xEDnico e pergunte apenas 1 decis\xE3o at\xF4mica.
-6. "topic": formato "Tema - Subtema", ZERO spoiler (nenhuma palavra da resposta ou sin\xF4nimo pode aparecer no topic) e NUNCA repita o topic em negrito dentro do question.
+6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical (ex.: proibido "Manobras" no topic se a resposta come\xE7a com "Manobra de...") e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre par\xEAnteses e ZERO LaTeX ($...$, \\rightarrow).
 8. "hint": deve conter "<b>Coment\xE1rio:</b> ", ter 1 a 2 frases (entre 180 e 300 caracteres vis\xEDveis medidos AP\xD3S "<b>Coment\xE1rio:</b> ", NUNCA passar de 320 caracteres vis\xEDveis), destacar termos-chave em <b>negrito</b> e trazer contraste diferencial obrigat\xF3rio.
 9. N\xC3O inclua o campo "sources".
@@ -645,13 +1250,13 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
         });
       }
       const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Wozniak/Matuschak e lint.py.
-Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia (<img src="..."> ou <audio>) de cada card. N\xC3O inclua o campo "sources".
+Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia v\xE1lida de cada card. N\xC3O inclua o campo "sources".
 
 REGRAS DE CORRE\xC7\xC3O CIR\xDARGICA:
 - Se "type": "basic" -> "question" com <= 50 palavras e Tripla Ancoragem (comando temporal fechado: minuto zero, exame inicial vs padr\xE3o-ouro, 1\xAA escolha ou 2\xAA linha ap\xF3s falha); "answer" DEVE ter entre 1 e 12 palavras (m\xE1x 15 palavras / 110 chars), terminar com ".", N\xC3O conter ";" e N\xC3O ter <b> envolvendo tudo.
 - Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposi\xE7\xE3o pendurada no final, SEM "::dica", e "answer" DEVE ser "".
 - Se pergunta composta -> transforme em pergunta at\xF4mica com Duplo Salto Cognitivo Impl\xEDcito (apenas 1 ponto de interroga\xE7\xE3o).
-- Se spoiler no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra da resposta ou sin\xF4nimo do topic/par\xEAnteses mantendo formato "Tema - Subtema".
+- Se spoiler por radical ou palavra no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta \xE9 "Manobra de...") mantendo formato "Tema - Subtema".
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (\u2192, \u2265, \u2264).
 - "hint": DEVE conter "<b>Coment\xE1rio:</b> ", ter entre 180 e 295 caracteres vis\xEDveis AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " (PROIBIDO passar de 320 caracteres vis\xEDveis), com termos-chave em <b>negrito</b> e contraste diferencial.
 

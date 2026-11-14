@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { TopBar } from './components/TopBar';
 import { InputPanel } from './components/InputPanel';
 import { ClinicalMapSection } from './components/ClinicalMapSection';
@@ -10,6 +10,8 @@ import {
   ClinicalMapResponse,
   DeckCurationStats,
   ExtractedDeckMetadata,
+  GuidRegistryData,
+  LocalMediaAsset,
   PriorityLevel,
   UploadedPdfFile,
 } from './types/deck';
@@ -19,6 +21,10 @@ import {
   extractDeckMetadata,
   formatCanonicalDeckJson,
   lintCard,
+  removeMissingMediaFromCard,
+  computeDeterministicDeckId,
+  resolveOrCreateNoteGuid,
+  stripHtml,
   surgicalRepairCardLocal,
 } from './utils/wozniakLinter';
 import {
@@ -34,6 +40,40 @@ const EMPTY_META: ExtractedDeckMetadata = {
   rawCards: [],
 };
 
+const STORAGE_DECK_STATE_KEY = 'cards2_deck_state_v2';
+const STORAGE_GUID_REGISTRY_KEY = 'cards2_guid_registry_v2';
+const STORAGE_LOCAL_MEDIA_KEY = 'cards2_local_media_v2';
+
+function loadSavedGuidRegistry(): GuidRegistryData {
+  try {
+    const raw = localStorage.getItem(STORAGE_GUID_REGISTRY_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.entries === 'object' && parsed.entries !== null) {
+        return { version: 1, entries: parsed.entries };
+      }
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return { version: 1, entries: {} };
+}
+
+function loadSavedLocalMedia(): Record<string, LocalMediaAsset> {
+  try {
+    const raw = localStorage.getItem(STORAGE_LOCAL_MEDIA_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return {};
+}
+
 export default function App() {
   const [pdfs, setPdfs] = useState<UploadedPdfFile[]>([]);
   const [rawJsonText, setRawJsonText] = useState<string>('');
@@ -46,11 +86,244 @@ export default function App() {
   const [cards, setCards] = useState<CanonicalCard[]>([]);
   const [curationStats, setCurationStats] = useState<DeckCurationStats | null>(null);
 
+  const [localMediaAssets, setLocalMediaAssets] = useState<Record<string, LocalMediaAsset>>(
+    () => loadSavedLocalMedia()
+  );
+  const [guidRegistry, setGuidRegistry] = useState<GuidRegistryData>(() =>
+    loadSavedGuidRegistry()
+  );
+
   const [isGeneratingMap, setIsGeneratingMap] = useState<boolean>(false);
   const [isGeneratingDeck, setIsGeneratingDeck] = useState<boolean>(false);
   const [isRepairing, setIsRepairing] = useState<boolean>(false);
   const [isExportingBundle, setIsExportingBundle] = useState<boolean>(false);
+  const [isExportingApkg, setIsExportingApkg] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Restore saved deck state on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_DECK_STATE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (parsed && Array.isArray(parsed.cards) && parsed.cards.length > 0) {
+        setCards(parsed.cards);
+        if (typeof parsed.deckKey === 'string') setDeckKey(parsed.deckKey);
+        if (typeof parsed.rawJsonText === 'string') setRawJsonText(parsed.rawJsonText);
+        if (parsed.extractedMeta) setExtractedMeta(parsed.extractedMeta);
+        if (parsed.clinicalMap) setClinicalMap(parsed.clinicalMap);
+        if (parsed.curationStats) setCurationStats(parsed.curationStats);
+      }
+    } catch {
+      // Ignore invalid saved state
+    }
+  }, []);
+
+  // Auto-save deck state & sync deterministic FSRS GUIDs whenever cards or deckKey change
+  useEffect(() => {
+    try {
+      if (cards.length > 0 || deckKey.trim()) {
+        localStorage.setItem(
+          STORAGE_DECK_STATE_KEY,
+          JSON.stringify({
+            deckKey,
+            rawJsonText,
+            extractedMeta,
+            clinicalMap,
+            cards,
+            curationStats,
+          })
+        );
+      }
+    } catch {
+      // Ignore quota exceeded
+    }
+
+    if (cards.length > 0) {
+      const effectiveKey = (deckKey || 'deck').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+      const deckId = computeDeterministicDeckId(effectiveKey);
+      setGuidRegistry((prev) => {
+        const next: GuidRegistryData = {
+          version: 1,
+          entries: { ...prev.entries },
+        };
+        let changed = false;
+        for (const card of cards) {
+          const regKey = `${effectiveKey}:id:${card.id}`;
+          if (!next.entries[regKey]) {
+            resolveOrCreateNoteGuid(effectiveKey, deckId, card.id, next.entries);
+            changed = true;
+          }
+        }
+        if (changed) {
+          try {
+            localStorage.setItem(STORAGE_GUID_REGISTRY_KEY, JSON.stringify(next));
+          } catch {
+            // Ignore storage write error
+          }
+          return next;
+        }
+        return prev;
+      });
+    }
+  }, [cards, deckKey, rawJsonText, extractedMeta, clinicalMap, curationStats]);
+
+  // Persist local media assets (best effort within localStorage quota)
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_LOCAL_MEDIA_KEY, JSON.stringify(localMediaAssets));
+    } catch {
+      // Keep in-memory if total media size exceeds localStorage quota
+    }
+  }, [localMediaAssets]);
+
+  const handleAddLocalMediaFiles = (assets: LocalMediaAsset[]) => {
+    setLocalMediaAssets((prev) => {
+      const next = { ...prev };
+      for (const asset of assets) {
+        next[asset.filename.trim().toLowerCase()] = asset;
+      }
+      return next;
+    });
+    setStatusMessage(
+      `${assets.length} arquivo(s) de mídia local carregado(s) (${assets
+        .map((a) => a.filename)
+        .slice(0, 4)
+        .join(', ')}). As tags MISSING_MEDIA correspondentes foram validadas.`
+    );
+  };
+
+  const handleClearLocalMedia = () => {
+    setLocalMediaAssets({});
+    try {
+      localStorage.removeItem(STORAGE_LOCAL_MEDIA_KEY);
+    } catch {
+      // Ignore
+    }
+    setStatusMessage('Mídias locais em memória removidas.');
+  };
+
+  const handleUploadCardMediaFile = (
+    card: CanonicalCard,
+    file: File,
+    targetFilename?: string
+  ) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUri = typeof reader.result === 'string' ? reader.result : '';
+      if (!dataUri) return;
+
+      const extMatch = file.name.match(/\.[a-z0-9]+$/i);
+      const ext = extMatch ? extMatch[0].toLowerCase() : file.type.includes('audio') ? '.mp3' : '.png';
+      const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
+      const finalFilename = (
+        targetFilename ||
+        file.name ||
+        `${cleanDeckKey}_card_${card.id}${ext}`
+      )
+        .trim()
+        .replace(/[^a-zA-Z0-9._-]+/g, '_');
+
+      const asset: LocalMediaAsset = {
+        filename: finalFilename,
+        mimeType: file.type || (ext === '.mp3' ? 'audio/mpeg' : 'image/png'),
+        dataUri,
+        size: file.size,
+      };
+
+      setLocalMediaAssets((prev) => ({
+        ...prev,
+        [finalFilename.toLowerCase()]: asset,
+      }));
+
+      // If card did not already reference targetFilename, attach it to the card
+      const cardHtml = `${card.question} ${card.hint}`;
+      if (!cardHtml.toLowerCase().includes(finalFilename.toLowerCase())) {
+        if (asset.mimeType.startsWith('audio/')) {
+          const audioTag = `<audio controls preload="none" class="med-audio"><source src="${finalFilename}" type="audio/mpeg"></audio>`;
+          handleUpdateCard({
+            ...card,
+            hint: `${card.hint}<br>${audioTag}`,
+          });
+        } else {
+          const cleanQ = card.question.replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '').trim();
+          const hasItalic = /^<i>[\s\S]*?<\/i>/i.test(card.hint.trim());
+          const nextHint = hasItalic
+            ? card.hint
+            : `<i>Exame complementar referente a ${stripHtml(card.topic)}.</i><br><br>${card.hint}`;
+          handleUpdateCard({
+            ...card,
+            type: 'basic',
+            answer:
+              card.type === 'cloze'
+                ? 'Conduta imediata guiada pelo achado visual.'
+                : card.answer,
+            image_mode: 'recognition',
+            question: `${cleanQ}<br><img src="${finalFilename}">`,
+            hint: nextHint,
+          });
+        }
+      }
+
+      setStatusMessage(
+        `Mídia "${finalFilename}" vinculada ao Card ID ${card.id} e pronta para exportação (.apkg / .zip).`
+      );
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveMissingMediaFromCard = (cardId: number) => {
+    const availableNames = Object.keys(localMediaAssets);
+    setCards((prev) =>
+      prev.map((c) => (c.id === cardId ? removeMissingMediaFromCard(c, availableNames) : c))
+    );
+    setStatusMessage(`Mídia(s) órfã(s) removida(s) do Card ID ${cardId}.`);
+  };
+
+  const handleRemoveAllMissingMedia = () => {
+    const availableNames = Object.keys(localMediaAssets);
+    setCards((prev) => prev.map((c) => removeMissingMediaFromCard(c, availableNames)));
+    setStatusMessage('Todas as referências de mídias órfãs (MISSING_MEDIA) foram limpas do baralho.');
+  };
+
+  const handleImportGuidRegistry = (jsonText: string) => {
+    try {
+      const parsed = JSON.parse(jsonText);
+      const entries = parsed?.entries && typeof parsed.entries === 'object' ? parsed.entries : parsed;
+      if (!entries || typeof entries !== 'object') {
+        throw new Error('Formato inválido para note_guid_registry.json');
+      }
+      const merged: GuidRegistryData = {
+        version: 1,
+        entries: {
+          ...guidRegistry.entries,
+          ...entries,
+        },
+      };
+      setGuidRegistry(merged);
+      localStorage.setItem(STORAGE_GUID_REGISTRY_KEY, JSON.stringify(merged));
+      setStatusMessage(
+        `Registro note_guid_registry.json importado (${Object.keys(merged.entries).length} GUIDs FSRS ativos).`
+      );
+    } catch (err: unknown) {
+      setStatusMessage(
+        err instanceof Error ? err.message : 'Erro ao importar note_guid_registry.json.'
+      );
+    }
+  };
+
+  const handleExportGuidRegistry = () => {
+    const jsonString = JSON.stringify(guidRegistry, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'note_guid_registry.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const handleRawJsonChange = (text: string) => {
     setRawJsonText(text);
@@ -96,7 +369,7 @@ export default function App() {
     setClinicalMap(buildGenericClinicalMap(key, meta.rawCards));
     setCards(meta.rawCards);
     setStatusMessage(
-      `Exemplo genérico carregado (${meta.existingIds.length} IDs FSRS extraídos). Teste a inspeção anti-spoiler da imagem abaixo ou clique em "⚖️ Revisar, Podar & Rebalancear 50/50".`
+      `Exemplo genérico carregado (${meta.existingIds.length} IDs FSRS extraídos). Teste a inspeção de mídias, busca Open-i/Wikimedia ou exportação direta para .apkg.`
     );
   };
 
@@ -164,7 +437,11 @@ export default function App() {
   const handleCurateAndRebalance = () => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
     const activeMap =
-      clinicalMap || buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards);
+      clinicalMap ||
+      buildGenericClinicalMap(
+        effectiveKey,
+        extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards
+      );
     if (!clinicalMap) {
       setClinicalMap(activeMap);
     }
@@ -261,7 +538,11 @@ export default function App() {
   const handleAutoRepairAllFlagged = async () => {
     const effectiveKey = deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato';
     const activeMap =
-      clinicalMap || buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards);
+      clinicalMap ||
+      buildGenericClinicalMap(
+        effectiveKey,
+        extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards
+      );
 
     const { cards: curatedAndRepaired, stats } = curateAndRebalanceDeck(
       cards,
@@ -275,10 +556,11 @@ export default function App() {
       `Deck reparado e rebalanceado (${stats.finalCount} cards · ${stats.basicPct}% basic / ${stats.clozePct}% cloze · ${stats.preservedIdsCount} IDs FSRS mantidos).`
     );
 
-    const flaggedWithWarnings = cards
+    const availableNames = Object.keys(localMediaAssets);
+    const flaggedWithWarnings = curatedAndRepaired
       .map((card) => ({
         card,
-        lint: lintCard(card),
+        lint: lintCard(card, availableNames),
       }))
       .filter((item) => !item.lint.isValid);
 
@@ -416,6 +698,15 @@ export default function App() {
     });
   };
 
+  const buildMediaAssetsPayload = (): Record<string, string> => {
+    const map: Record<string, string> = {};
+    for (const [key, asset] of Object.entries(localMediaAssets)) {
+      map[key] = asset.dataUri;
+      map[asset.filename] = asset.dataUri;
+    }
+    return map;
+  };
+
   const handleDownloadJson = () => {
     const cleanDeckKey = (deckKey || 'deck')
       .trim()
@@ -440,6 +731,7 @@ export default function App() {
       .replace(/\s+/g, '_');
     const notesJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
     const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
+    const mediaAssets = buildMediaAssetsPayload();
 
     setIsExportingBundle(true);
     try {
@@ -450,11 +742,18 @@ export default function App() {
           deckKey: cleanDeckKey,
           notesJson,
           mediaManifest,
+          mediaAssets,
+          guidRegistry,
         }),
       });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
+      const resolvedCount = Number(response.headers.get('X-Resolved-Media-Count') || 0);
+      const missingCount = Number(response.headers.get('X-Missing-Media-Count') || 0);
+      const missingHeader = response.headers.get('X-Missing-Media') || '';
+      const missingList = missingHeader ? decodeURIComponent(missingHeader) : '';
+
       const zipBlob = await response.blob();
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
@@ -464,13 +763,87 @@ export default function App() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      setStatusMessage(
-        `Pacote Anki Offline (${cleanDeckKey}_anki_offline_bundle.zip) baixado com ${cleanDeckKey}_notes.json + ${mediaManifest.length} arquivo(s) em collection.media/ e 04_Mídias/${cleanDeckKey}/.`
-      );
+
+      if (missingCount > 0) {
+        setStatusMessage(
+          `⚠️ Pacote .zip baixado (${resolvedCount}/${mediaManifest.length} mídias embutidas), mas ${missingCount} mídia(s) não possuíam arquivo local (${missingList}). Envie os arquivos em "04_Mídias/" ou clique em "🧹 Limpar Mídias Órfãs".`
+        );
+      } else {
+        setStatusMessage(
+          `✅ Pacote Anki Offline (${cleanDeckKey}_anki_offline_bundle.zip) baixado com ${cleanDeckKey}_notes.json, note_guid_registry.json e ${resolvedCount}/${mediaManifest.length} mídia(s) verificada(s) em collection.media/.`
+        );
+      }
     } catch {
       handleDownloadJson();
     } finally {
       setIsExportingBundle(false);
+    }
+  };
+
+  const handleExportApkg = async () => {
+    if (cards.length === 0) return;
+    const cleanDeckKey = (deckKey || 'deck')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '_');
+    const canonicalJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
+    const canonicalNotes = JSON.parse(canonicalJson);
+    const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
+    const mediaAssets = buildMediaAssetsPayload();
+    const deckTitle = clinicalMap?.themeTitle
+      ? `Internato::${clinicalMap.themeTitle}`
+      : `Internato::${cleanDeckKey}`;
+
+    setIsExportingApkg(true);
+    try {
+      const response = await fetch('/api/export/apkg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deckName: deckTitle,
+          deckKey: cleanDeckKey,
+          notes: canonicalNotes,
+          mediaManifest,
+          mediaAssets,
+          guidRegistry,
+        }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${response.status}`);
+      }
+
+      const resolvedCount = Number(response.headers.get('X-Resolved-Media-Count') || 0);
+      const missingCount = Number(response.headers.get('X-Missing-Media-Count') || 0);
+      const missingHeader = response.headers.get('X-Missing-Media') || '';
+      const missingList = missingHeader ? decodeURIComponent(missingHeader) : '';
+
+      const apkgBlob = await response.blob();
+      const url = URL.createObjectURL(apkgBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${cleanDeckKey}.apkg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      if (missingCount > 0) {
+        setStatusMessage(
+          `⚠️ Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS preservado + ${resolvedCount} mídia(s) embutida(s)), porém ${missingCount} mídia(s) órfã(s) estavam ausentes (${missingList}).`
+        );
+      } else {
+        setStatusMessage(
+          `🎯 Pacote ${cleanDeckKey}.apkg exportado com sucesso! (${cards.length} notes com nid/guid FSRS determinísticos + ${resolvedCount} mídia(s) embutida(s) prontas para importar no Anki Desktop).`
+        );
+      }
+    } catch (err: unknown) {
+      setStatusMessage(
+        err instanceof Error ? `Erro ao gerar .apkg: ${err.message}` : 'Erro ao exportar .apkg.'
+      );
+    } finally {
+      setIsExportingApkg(false);
     }
   };
 
@@ -480,6 +853,8 @@ export default function App() {
         deckKey={deckKey}
         cardCount={cards.length}
         onDownloadJson={handleDownloadJson}
+        onExportApkg={handleExportApkg}
+        isExportingApkg={isExportingApkg}
       />
 
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-8 space-y-6">
@@ -516,6 +891,12 @@ export default function App() {
           onLoadGenericSample={handleLoadGenericSample}
           isGeneratingMap={isGeneratingMap}
           isGeneratingDeck={isGeneratingDeck}
+          localMediaAssets={localMediaAssets}
+          onAddLocalMediaFiles={handleAddLocalMediaFiles}
+          onClearLocalMedia={handleClearLocalMedia}
+          guidCount={Object.keys(guidRegistry.entries).length}
+          onImportGuidRegistry={handleImportGuidRegistry}
+          onExportGuidRegistry={handleExportGuidRegistry}
         />
 
         <ClinicalMapSection
@@ -532,6 +913,10 @@ export default function App() {
           deckKey={deckKey}
           extractedMeta={extractedMeta}
           curationStats={curationStats}
+          localMediaAssets={localMediaAssets}
+          onUploadCardMediaFile={handleUploadCardMediaFile}
+          onRemoveMissingMediaFromCard={handleRemoveMissingMediaFromCard}
+          onRemoveAllMissingMedia={handleRemoveAllMissingMedia}
           onCurateAndRebalance={handleCurateAndRebalance}
           onUpdateCard={handleUpdateCard}
           onDeleteCard={handleDeleteCard}
@@ -542,7 +927,9 @@ export default function App() {
           isRepairing={isRepairing}
           onDownloadJson={handleDownloadJson}
           onDownloadOfflineBundle={handleDownloadOfflineBundle}
+          onExportApkg={handleExportApkg}
           isExportingBundle={isExportingBundle}
+          isExportingApkg={isExportingApkg}
         />
 
         <DoctrineReferenceSection />

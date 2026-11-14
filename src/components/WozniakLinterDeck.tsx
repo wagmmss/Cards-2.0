@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Zap,
   Copy,
@@ -17,6 +17,9 @@ import {
   ShieldCheck,
   Eye,
   Maximize2,
+  Upload,
+  PackageCheck,
+  Volume2,
 } from 'lucide-react';
 import {
   CanonicalCard,
@@ -24,6 +27,7 @@ import {
   CardType,
   DeckCurationStats,
   ExtractedDeckMetadata,
+  LocalMediaAsset,
   MedicalImageResult,
   PriorityLevel,
 } from '../types/deck';
@@ -43,6 +47,10 @@ interface WozniakLinterDeckProps {
   deckKey: string;
   extractedMeta: ExtractedDeckMetadata;
   curationStats?: DeckCurationStats | null;
+  localMediaAssets: Record<string, LocalMediaAsset>;
+  onUploadCardMediaFile: (card: CanonicalCard, file: File, targetFilename?: string) => void;
+  onRemoveMissingMediaFromCard: (cardId: number) => void;
+  onRemoveAllMissingMedia: () => void;
   onCurateAndRebalance: () => void;
   onUpdateCard: (updated: CanonicalCard) => void;
   onDeleteCard: (id: number) => void;
@@ -53,7 +61,9 @@ interface WozniakLinterDeckProps {
   isRepairing: boolean;
   onDownloadJson: () => void;
   onDownloadOfflineBundle: () => void;
+  onExportApkg: () => void;
   isExportingBundle?: boolean;
+  isExportingApkg?: boolean;
 }
 
 interface ParsedCardImage {
@@ -139,6 +149,10 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   deckKey,
   extractedMeta,
   curationStats,
+  localMediaAssets,
+  onUploadCardMediaFile,
+  onRemoveMissingMediaFromCard,
+  onRemoveAllMissingMedia,
   onCurateAndRebalance,
   onUpdateCard,
   onDeleteCard,
@@ -149,13 +163,24 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   isRepairing,
   onDownloadJson,
   onDownloadOfflineBundle,
+  onExportApkg,
   isExportingBundle = false,
+  isExportingApkg = false,
 }) => {
-  const [filterMode, setFilterMode] = useState<'ALL' | 'WARNINGS' | 'BASIC' | 'CLOZE'>('ALL');
+  const [filterMode, setFilterMode] = useState<
+    'ALL' | 'WARNINGS' | 'MISSING_MEDIA' | 'BASIC' | 'CLOZE'
+  >('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [editingCardId, setEditingCardId] = useState<number | null>(null);
   const [viewTab, setViewTab] = useState<'CARDS' | 'RAW_JSON'>('CARDS');
   const [copiedJson, setCopiedJson] = useState(false);
+
+  // Per-card local file upload target state
+  const cardFileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadTargetCard, setUploadTargetCard] = useState<{
+    card: CanonicalCard;
+    targetFilename?: string;
+  } | null>(null);
 
   // Medical Image Picker state per card
   const [imagePickerCardId, setImagePickerCardId] = useState<number | null>(null);
@@ -170,15 +195,20 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const [maskingCardId, setMaskingCardId] = useState<number | null>(null);
 
   const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
+  const availableMediaNames = Object.keys(localMediaAssets);
 
   const lintMap = new Map<number, CardLintResult>();
   let totalFlaggedCards = 0;
+  let totalCardsWithMissingMedia = 0;
 
   cards.forEach((card) => {
-    const res = lintCard(card);
+    const res = lintCard(card, availableMediaNames);
     lintMap.set(card.id, res);
     if (!res.isValid) {
       totalFlaggedCards++;
+    }
+    if (res.metrics.missingMediaFiles.length > 0) {
+      totalCardsWithMissingMedia++;
     }
   });
 
@@ -192,6 +222,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const filteredCards = cards.filter((card) => {
     const lintRes = lintMap.get(card.id);
     if (filterMode === 'WARNINGS' && lintRes?.isValid) return false;
+    if (filterMode === 'MISSING_MEDIA' && (!lintRes || lintRes.metrics.missingMediaFiles.length === 0))
+      return false;
     if (filterMode === 'BASIC' && card.type !== 'basic') return false;
     if (filterMode === 'CLOZE' && card.type !== 'cloze') return false;
 
@@ -257,7 +289,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         const data = await res.json();
         const webImages: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
         if (webImages.length > 0) {
-          setImageResults([...localMatches.slice(0, 3), ...webImages.slice(0, 6)]);
+          setImageResults([...localMatches.slice(0, 3), ...webImages.slice(0, 8)]);
         }
       }
     } catch {
@@ -313,11 +345,12 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const handleApplySpoilerMaskToCard = async (
     card: CanonicalCard,
     imgMeta: ParsedCardImage,
+    resolvedSrc: string,
     region: 'top' | 'bottom' | 'corner'
   ) => {
     setMaskingCardId(card.id);
     try {
-      const maskedPngDataUri = await applyCanvasSpoilerMask(imgMeta.src, region);
+      const maskedPngDataUri = await applyCanvasSpoilerMask(resolvedSrc, region);
       const pngFilename = imgMeta.localFilename.replace(/\.[a-z0-9]+$/i, '') + '_clean.png';
       const newImgTag = `<img src="${maskedPngDataUri}" data-anki-file="${pngFilename}">`;
       const updatedQuestion = card.question.replace(/<img\b[^>]*>/i, newImgTag);
@@ -354,6 +387,32 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     delete updated.image_mode;
     delete updated.imageVerified;
     onUpdateCard(updated);
+  };
+
+  const handleTriggerCardFileInput = (card: CanonicalCard, targetFilename?: string) => {
+    setUploadTargetCard({ card, targetFilename });
+    cardFileInputRef.current?.click();
+  };
+
+  const handleCardPaste = (
+    e: React.ClipboardEvent<HTMLElement>,
+    card: CanonicalCard,
+    missingFiles: string[]
+  ) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/') || item.type.startsWith('audio/')) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          const targetFilename = missingFiles[0] || undefined;
+          onUploadCardMediaFile(card, file, targetFilename);
+          break;
+        }
+      }
+    }
   };
 
   if (cards.length === 0) {
@@ -399,7 +458,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     if (card.type === 'cloze') {
       onUpdateCard(convertClozeToBasic(card));
     } else {
-      onUpdateCard(convertBasicToCloze(card));
+      onUpdateCard(convertBasicToCloze(card, true));
     }
   };
 
@@ -408,6 +467,25 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       id="linter-wozniak"
       className="bg-[#111827] border border-slate-800 rounded-xl p-6 space-y-5"
     >
+      {/* Hidden per-card file upload input */}
+      <input
+        ref={cardFileInputRef}
+        type="file"
+        accept=".png,.jpg,.jpeg,.webp,.svg,.gif,.mp3,.wav,.ogg,image/*,audio/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file && uploadTargetCard) {
+            onUploadCardMediaFile(
+              uploadTargetCard.card,
+              file,
+              uploadTargetCard.targetFilename
+            );
+          }
+          e.target.value = '';
+        }}
+        className="sr-only"
+      />
+
       {/* Clean Header & Actions */}
       <div className="flex flex-col gap-3.5 pb-4 border-b border-slate-800">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -422,11 +500,18 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             <span className={isProportionSkewed ? 'text-amber-400 font-medium' : 'text-slate-400'}>
               Proporção: <strong className="text-slate-100">{basicPct}%</strong> basic /{' '}
               <strong className="text-slate-100">{clozePct}%</strong> cloze
-              {isProportionSkewed ? ' (meta: 50%/50%)' : ''}
+              {isProportionSkewed ? ' (meta: 45%–55%)' : ''}
             </span>
             <span aria-hidden="true">·</span>
-            <span className="text-sky-300">
-              <strong>{mediaManifest.length}</strong> mídia(s) offline (<code className="font-mono">collection.media</code>)
+            <span
+              className={
+                totalCardsWithMissingMedia > 0 ? 'text-red-400 font-semibold' : 'text-sky-300'
+              }
+            >
+              <strong>{mediaManifest.length}</strong> mídia(s) referenciada(s)
+              {totalCardsWithMissingMedia > 0
+                ? ` (${totalCardsWithMissingMedia} card(s) com MISSING_MEDIA)`
+                : ''}
             </span>
             <span aria-hidden="true">·</span>
             <span
@@ -504,9 +589,21 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             <span>
               {isRepairing
                 ? 'Reparando...'
-                : `⚡ Auto-Reparar Avisos com IA (${totalFlaggedCards})`}
+                : `⚡ Auto-Reparar Avisos (${totalFlaggedCards})`}
             </span>
           </button>
+
+          {totalCardsWithMissingMedia > 0 && (
+            <button
+              type="button"
+              onClick={onRemoveAllMissingMedia}
+              title="Remove tags <img> e <audio> órfãs que não possuem arquivo local carregado"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              <span>🧹 Limpar Mídias Órfãs ({totalCardsWithMissingMedia})</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -539,14 +636,29 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             type="button"
             onClick={onDownloadOfflineBundle}
             disabled={isExportingBundle}
-            title="Baixa o JSON com links locais (<img src='arquivo.ext'>) + pasta collection.media com todas as imagens salvas para estudo offline no Anki"
+            title="Baixa o JSON com links locais + pasta collection.media + note_guid_registry.json + RELATORIO_MIDIAS.json"
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Archive className="w-3.5 h-3.5" />
             <span>
               {isExportingBundle
-                ? 'Empacotando mídias...'
-                : `📦 Baixar Pacote Offline (.zip + collection.media)`}
+                ? 'Empacotando .zip...'
+                : '📦 Baixar Pacote Offline (.zip)'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onExportApkg}
+            disabled={isExportingApkg}
+            title="Gera diretamente o pacote .apkg (SQLite collection.anki21 + mídias embutidas) preservando FSRS (nid e guid determinísticos)"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <PackageCheck className="w-3.5 h-3.5" />
+            <span>
+              {isExportingApkg
+                ? 'Gerando .apkg...'
+                : '🎯 Exportar .apkg (Anki)'}
             </span>
           </button>
         </div>
@@ -559,6 +671,10 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             [
               { id: 'ALL', label: `Todos (${cards.length})` },
               { id: 'WARNINGS', label: `Avisos (${totalFlaggedCards})` },
+              {
+                id: 'MISSING_MEDIA',
+                label: `Mídia Ausente (${totalCardsWithMissingMedia})`,
+              },
               { id: 'BASIC', label: `Basic (${basicCount})` },
               { id: 'CLOZE', label: `Cloze (${clozeCount})` },
             ] as const
@@ -620,12 +736,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       ) : (
         <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden">
           {filteredCards.map((card, index) => {
-            const lint = lintMap.get(card.id) || lintCard(card);
+            const lint = lintMap.get(card.id) || lintCard(card, availableMediaNames);
             const isEditing = editingCardId === card.id;
             const isImagePickerOpen = imagePickerCardId === card.id;
             const questionImgs = extractCardImagesWithMeta(card.question, card.id, cleanDeckKey);
             const hintImgs = extractCardImagesWithMeta(card.hint, card.id, cleanDeckKey);
             const hasAnyImage = questionImgs.length > 0 || hintImgs.length > 0;
+            const missingFiles = lint.metrics.missingMediaFiles;
+            const hasMissingMedia = missingFiles.length > 0;
             const isZoomed = zoomedCardId === card.id;
             const isMasking = maskingCardId === card.id;
             const questionTextOnly = card.question
@@ -634,7 +752,12 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
               .trim();
 
             return (
-              <article key={card.id} className="p-4 sm:p-5 bg-[#0F1623] space-y-3">
+              <article
+                key={card.id}
+                onPaste={(e) => handleCardPaste(e, card, missingFiles)}
+                tabIndex={0}
+                className="p-4 sm:p-5 bg-[#0F1623] space-y-3 focus:outline-none focus:ring-1 focus:ring-sky-500/40"
+              >
                 {/* Metadata & Counters Row */}
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                   <div className="flex flex-wrap items-center gap-2 text-slate-400 tabular-nums">
@@ -738,6 +861,16 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
 
                     <button
                       type="button"
+                      onClick={() => handleTriggerCardFileInput(card, missingFiles[0])}
+                      title="Enviar arquivo de imagem ou áudio para este card (ou cole com Ctrl+V)"
+                      className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-emerald-300 cursor-pointer transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Enviar/Colar</span>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => setEditingCardId(isEditing ? null : card.id)}
                       className="text-xs text-slate-400 hover:text-slate-100 inline-flex items-center gap-1 cursor-pointer"
                     >
@@ -756,7 +889,56 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                   </div>
                 </div>
 
-                {/* Warnings List */}
+                {/* Critical Alert Box for MISSING_MEDIA */}
+                {hasMissingMedia && (
+                  <div className="px-3.5 py-2.5 rounded-lg bg-red-950/50 border border-red-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <div className="flex items-start gap-2 text-xs text-red-200">
+                      <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-semibold text-red-300">
+                          MISSING_MEDIA — Arquivo(s) órfão(s) sem mídia local carregada:{' '}
+                        </span>
+                        <code className="font-mono text-red-200">
+                          {missingFiles.join(', ')}
+                        </code>
+                        <span className="block text-[11px] text-red-300/90 mt-0.5">
+                          Você pode buscar uma imagem médica (Wikimedia / NLM Open-i), enviar o arquivo / colar imagem (<kbd className="px-1 py-0.5 bg-red-900/80 rounded font-mono">Ctrl+V</kbd>) neste card, ou remover a tag ausente.
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenImagePicker(card)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer"
+                      >
+                        <Search className="w-3 h-3" />
+                        <span>Buscar imagem</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleTriggerCardFileInput(card, missingFiles[0])}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded cursor-pointer"
+                      >
+                        <Upload className="w-3 h-3" />
+                        <span>Colar/Enviar arquivo</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onRemoveMissingMediaFromCard(card.id)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-200 bg-red-900/70 hover:bg-red-800/80 border border-red-700 rounded cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Remover mídia ausente</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Other Linter Warnings List */}
                 {!lint.isValid && (
                   <div className="px-3 py-2 rounded-md bg-amber-950/40 border border-amber-800/70 space-y-1">
                     {lint.warnings.map((w, wIdx) => (
@@ -773,16 +955,16 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                   </div>
                 )}
 
-                {/* Inline Web Medical Image Search Drawer (Google / Wikimedia Medical / Open-i) */}
+                {/* Inline Web Medical Image Search Drawer (Wikimedia Medical + NLM Open-i + Atlas) */}
                 {isImagePickerOpen && (
                   <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-700 space-y-3">
                     <div className="flex items-center justify-between gap-2">
                       <div>
                         <h4 className="text-xs font-semibold text-slate-100">
-                          Buscar Imagem Médica Fidedigna (Embutida Offline em collection.media)
+                          Buscar Imagem Médica Fidedigna (Wikimedia Commons + NLM Open-i + Atlas)
                         </h4>
                         <p className="text-[11px] text-slate-400">
-                          Ao escolher uma imagem, ela será salva com nome local (<code className="font-mono text-sky-400">&lt;img src=&quot;arquivo.ext&quot;&gt;</code>) e incluída no pacote <code className="font-mono text-sky-400">.zip</code> offline.
+                          Ao escolher uma imagem, ela será salva com nome local (<code className="font-mono text-sky-400">&lt;img src=&quot;arquivo.ext&quot;&gt;</code>) e embutida no pacote <code className="font-mono text-emerald-400">.apkg</code> e <code className="font-mono text-sky-400">.zip</code>.
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -817,7 +999,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                         type="text"
                         value={imageSearchTerm}
                         onChange={(e) => setImageSearchTerm(e.target.value)}
-                        placeholder="Ex.: apendicite aguda TC, IAM supra ST ECG, pneumotórax RX, hematoma epidural..."
+                        placeholder="Ex.: apendicite aguda TC, IAM supra ST ECG, pneumotórax RX, partograma..."
                         className="flex-1 px-3 py-1.5 text-xs bg-slate-900 border border-slate-700 rounded-md text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
                       />
                       <button
@@ -998,104 +1180,146 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                     {/* Visual rendering + Anti-Spoiler & Offline Media Inspector */}
                     {questionImgs.length > 0 && (
                       <div className="space-y-2 pt-1">
-                        {questionImgs.map((imgMeta, i) => (
-                          <div
-                            key={`${imgMeta.localFilename}-${i}`}
-                            className={`rounded-lg overflow-hidden border bg-[#0B0F17] p-2.5 space-y-2 ${
-                              card.imageVerified
-                                ? 'border-emerald-700/70'
-                                : 'border-slate-700/90'
-                            } ${isZoomed ? 'max-w-full' : 'max-w-xl'}`}
-                          >
-                            {imgMeta.src.startsWith('http://') ||
-                            imgMeta.src.startsWith('https://') ||
-                            imgMeta.src.startsWith('data:') ||
-                            imgMeta.src.startsWith('/') ? (
-                              <img
-                                src={imgMeta.src}
-                                alt={`Exame clínico do card ${card.id}`}
-                                className={`${
-                                  isZoomed ? 'max-h-[460px]' : 'max-h-56'
-                                } w-auto rounded object-contain mx-auto transition-all`}
-                              />
-                            ) : (
-                              <div className="px-3 py-2 text-[11px] font-mono text-slate-400 flex items-center gap-2">
-                                <ImageIcon className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                                <span>
-                                  Arquivo local em collection.media: <strong className="text-slate-200">{imgMeta.localFilename}</strong> (clique em &quot;Trocar Imagem&quot; para buscar na web)
-                                </span>
-                              </div>
-                            )}
+                        {questionImgs.map((imgMeta, i) => {
+                          const localAsset =
+                            localMediaAssets[imgMeta.localFilename.toLowerCase()] ||
+                            localMediaAssets[imgMeta.src.toLowerCase()];
+                          const resolvedImgSrc = localAsset
+                            ? localAsset.dataUri
+                            : imgMeta.src.startsWith('http://') ||
+                              imgMeta.src.startsWith('https://') ||
+                              imgMeta.src.startsWith('data:') ||
+                              imgMeta.src.startsWith('/')
+                            ? imgMeta.src
+                            : '';
 
-                            {/* Barra de Inspeção Visual: Offline Filename + Checagem Anti-Spoiler */}
-                            <div className="pt-2 border-t border-slate-800/90 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                              <div className="flex items-center gap-1.5 font-mono text-slate-400 truncate">
-                                <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-sky-300">
-                                  collection.media/{imgMeta.localFilename}
-                                </span>
-                              </div>
+                          return (
+                            <div
+                              key={`${imgMeta.localFilename}-${i}`}
+                              className={`rounded-lg overflow-hidden border bg-[#0B0F17] p-2.5 space-y-2 ${
+                                card.imageVerified
+                                  ? 'border-emerald-700/70'
+                                  : resolvedImgSrc
+                                  ? 'border-slate-700/90'
+                                  : 'border-red-700/80'
+                              } ${isZoomed ? 'max-w-full' : 'max-w-xl'}`}
+                            >
+                              {resolvedImgSrc ? (
+                                <img
+                                  src={resolvedImgSrc}
+                                  alt={`Exame clínico do card ${card.id}`}
+                                  className={`${
+                                    isZoomed ? 'max-h-[460px]' : 'max-h-56'
+                                  } w-auto rounded object-contain mx-auto transition-all`}
+                                />
+                              ) : (
+                                <div className="px-3 py-2 text-[11px] font-mono text-red-300 flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <ImageIcon className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                                    <span>
+                                      Mídia local ausente:{' '}
+                                      <strong className="text-red-200">{imgMeta.localFilename}</strong>
+                                    </span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleTriggerCardFileInput(card, imgMeta.localFilename)
+                                    }
+                                    className="px-2 py-0.5 rounded bg-emerald-400 text-slate-950 font-sans font-semibold cursor-pointer"
+                                  >
+                                    Enviar {imgMeta.localFilename}
+                                  </button>
+                                </div>
+                              )}
 
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setZoomedCardId(isZoomed ? null : card.id)
-                                  }
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
-                                >
-                                  <Maximize2 className="w-3 h-3" />
-                                  <span>{isZoomed ? 'Reduzir' : 'Inspecionar Zoom'}</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  disabled={isMasking}
-                                  onClick={() =>
-                                    handleApplySpoilerMaskToCard(card, imgMeta, 'top')
-                                  }
-                                  title="Aplica uma tarja escura no topo da figura para cobrir títulos ou setas com spoiler e salva como PNG offline"
-                                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
-                                >
-                                  Tarjar Topo
-                                </button>
-
-                                <button
-                                  type="button"
-                                  disabled={isMasking}
-                                  onClick={() =>
-                                    handleApplySpoilerMaskToCard(card, imgMeta, 'bottom')
-                                  }
-                                  title="Aplica uma tarja escura no rodapé da figura para cobrir legendas ou marcas d'água e salva como PNG offline"
-                                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
-                                >
-                                  Tarjar Base
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleImageVerified(card)}
-                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium cursor-pointer border transition-colors ${
-                                    card.imageVerified
-                                      ? 'bg-emerald-950/70 border-emerald-700 text-emerald-300'
-                                      : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
-                                  }`}
-                                >
-                                  {card.imageVerified ? (
-                                    <>
-                                      <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                                      <span>Sem Spoiler ✓</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Eye className="w-3 h-3" />
-                                      <span>Marcar Verificada</span>
-                                    </>
+                              {/* Barra de Inspeção Visual: Offline Filename + Checagem Anti-Spoiler */}
+                              <div className="pt-2 border-t border-slate-800/90 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                <div className="flex items-center gap-1.5 font-mono text-slate-400 truncate">
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-sky-300">
+                                    collection.media/{imgMeta.localFilename}
+                                  </span>
+                                  {localAsset && (
+                                    <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-700 text-emerald-300">
+                                      Local OK
+                                    </span>
                                   )}
-                                </button>
+                                </div>
+
+                                {resolvedImgSrc && (
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setZoomedCardId(isZoomed ? null : card.id)
+                                      }
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
+                                    >
+                                      <Maximize2 className="w-3 h-3" />
+                                      <span>{isZoomed ? 'Reduzir' : 'Inspecionar Zoom'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={isMasking}
+                                      onClick={() =>
+                                        handleApplySpoilerMaskToCard(
+                                          card,
+                                          imgMeta,
+                                          resolvedImgSrc,
+                                          'top'
+                                        )
+                                      }
+                                      title="Aplica uma tarja escura no topo da figura para cobrir títulos ou setas com spoiler e salva como PNG offline"
+                                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
+                                    >
+                                      Tarjar Topo
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={isMasking}
+                                      onClick={() =>
+                                        handleApplySpoilerMaskToCard(
+                                          card,
+                                          imgMeta,
+                                          resolvedImgSrc,
+                                          'bottom'
+                                        )
+                                      }
+                                      title="Aplica uma tarja escura no rodapé da figura para cobrir legendas ou marcas d'água e salva como PNG offline"
+                                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
+                                    >
+                                      Tarjar Base
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleImageVerified(card)}
+                                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium cursor-pointer border transition-colors ${
+                                        card.imageVerified
+                                          ? 'bg-emerald-950/70 border-emerald-700 text-emerald-300'
+                                          : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                                      }`}
+                                    >
+                                      {card.imageVerified ? (
+                                        <>
+                                          <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                          <span>Sem Spoiler ✓</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Eye className="w-3 h-3" />
+                                          <span>Marcar Verificada</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
 
@@ -1107,8 +1331,24 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                     )}
                     <div
                       className="text-slate-300 leading-relaxed pt-1 [&_b]:text-slate-100 [&_i]:text-slate-400 [&_img]:mt-2 [&_img]:max-h-52 [&_img]:rounded-lg [&_img]:border [&_img]:border-slate-700"
-                      dangerouslySetInnerHTML={{ __html: card.hint }}
+                      dangerouslySetInnerHTML={{
+                        __html: card.hint.replace(
+                          /\bsrc=["']([^"']+)["']/gi,
+                          (full, srcVal: string) => {
+                            const asset = localMediaAssets[srcVal.trim().toLowerCase()];
+                            return asset ? `src="${asset.dataUri}"` : full;
+                          }
+                        ),
+                      }}
                     />
+
+                    {/* Audio local preview indicator when audio is loaded */}
+                    {/<audio\b/i.test(`${card.question} ${card.hint}`) && (
+                      <div className="pt-1 flex items-center gap-2 text-[11px] text-slate-400">
+                        <Volume2 className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Tag de áudio presente no card</span>
+                      </div>
+                    )}
                   </div>
                 )}
               </article>

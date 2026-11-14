@@ -1,16 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computeDeterministicDeckId,
   curateAndRebalanceDeck,
   extractDeckMediaManifest,
   extractDeckMetadata,
   formatCanonicalDeckJson,
   lintCard,
   reconcileDeckIdsAndMedia,
-  surgicalRepairCardLocal,
+  removeMissingMediaFromCard,
+  resolveOrCreateNoteGuid,
 } from './wozniakLinter';
 import { buildGenericClinicalMap } from '../data/demoDecks';
-import { CanonicalCard } from '../types/deck';
+import { CanonicalCard, GuidRegistryData } from '../types/deck';
 
 test('extractDeckMetadata extracts existing numeric FSRS IDs and media tags without sources', () => {
   const sampleJson = JSON.stringify({
@@ -84,6 +86,61 @@ test('lintCard flags basic card with > 15 words, semicolon (;), compound questio
   assert.equal(codes.includes('TOPIC_SPOILER'), true);
   assert.equal(codes.includes('QUESTION_PAREN_SPOILER'), true);
   assert.equal(codes.includes('COMMENT_MISSING_PREFIX'), true);
+});
+
+test('lintCard detects stem-based TOPIC_SPOILER (e.g., "Manobras" in topic vs "Manobra de McRoberts" in answer)', () => {
+  const stemSpoilerCard: CanonicalCard = {
+    id: 171000109,
+    type: 'basic',
+    topic: 'Distocia de Ombro - Manobras de Alívio',
+    question:
+      'No Centro Obstétrico, parturiente apresenta sinal da tartaruga após desprendimento cefálico. Qual a conduta obstétrica imediata de primeira linha?',
+    answer: 'Manobra de McRoberts e pressão suprapúbica.',
+    hint: '<b>Comentário:</b> A <b>manobra de McRoberts</b> hiperflexiona as coxas maternas e retifica o promontório sacral, enquanto a <b>pressão fúndica de Kristeller</b> é formalmente proscrita.',
+  };
+
+  const result = lintCard(stemSpoilerCard);
+  assert.equal(result.metrics.hasTopicSpoiler, true);
+  assert.equal(
+    result.warnings.some((w) => w.code === 'TOPIC_SPOILER'),
+    true
+  );
+});
+
+test('lintCard flags MISSING_MEDIA for orphan local <img> and <audio>, resolves when uploaded, and removeMissingMediaFromCard cleans orphan tags', () => {
+  const cardWithOrphanMedia: CanonicalCard = {
+    id: 171000110,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Assistência ao Parto - Monitorização Fetal',
+    question:
+      'No Centro Obstétrico, parturiente realiza o exame abaixo. Qual a classificação fisiológica imediata?<br><img src="ctg_orfa.png">',
+    answer: 'Cardiotocografia categoria I.',
+    hint: '<i>Traçado cardiotocográfico fetal intraparto.</i><br><br><b>Comentário:</b> A <b>categoria I</b> indica equilíbrio ácido-básico fetal normal com variabilidade moderada (6–25 bpm), ao passo que a <b>categoria III</b> exige reanimação intrauterina e resolução obstétrica imediata.<br><audio controls preload="none" class="med-audio"><source src="bcf_orfao.mp3" type="audio/mpeg"></audio>',
+  };
+
+  // Without loaded local assets -> flags MISSING_MEDIA for both ctg_orfa.png and bcf_orfao.mp3
+  const lintMissing = lintCard(cardWithOrphanMedia, []);
+  assert.equal(lintMissing.isValid, false);
+  assert.equal(
+    lintMissing.warnings.some((w) => w.code === 'MISSING_MEDIA'),
+    true
+  );
+  assert.deepEqual(lintMissing.metrics.missingMediaFiles, ['ctg_orfa.png', 'bcf_orfao.mp3']);
+
+  // When both files are loaded in localMediaAssets -> MISSING_MEDIA disappears and card is valid
+  const lintResolved = lintCard(cardWithOrphanMedia, ['ctg_orfa.png', 'bcf_orfao.mp3']);
+  assert.equal(
+    lintResolved.warnings.some((w) => w.code === 'MISSING_MEDIA'),
+    false
+  );
+  assert.equal(lintResolved.isValid, true);
+
+  // Removing missing media cleans both orphan tags and leaves a compliant text card
+  const cleaned = removeMissingMediaFromCard(cardWithOrphanMedia, []);
+  assert.equal(cleaned.question.includes('ctg_orfa.png'), false);
+  assert.equal(cleaned.hint.includes('bcf_orfao.mp3'), false);
+  assert.equal(lintCard(cleaned, []).isValid, true);
 });
 
 test('lintCard flags cloze card with multiple gaps, > 5 words in gap, dangling particle, ::hint, LaTeX, and non-empty answer', () => {
@@ -219,7 +276,7 @@ test('formatCanonicalDeckJson omits sources and rewrites external https:// or da
   assert.equal(parsedExport[1].question.includes('data:image'), false);
 });
 
-test('curateAndRebalanceDeck prunes redundant cards, adds missing P1-P4 concepts with new IDs, and rebalances a 100-card Assistencia ao Parto deck from 90% cloze to 50%/50%', () => {
+test('curateAndRebalanceDeck prunes redundant cards, adds missing P1-P4 concepts with new IDs, and strictly rebalances a 100-card Assistencia ao Parto deck from 90% cloze to 50%/50%', () => {
   const rawHundredCards: CanonicalCard[] = [];
   for (let i = 0; i < 100; i++) {
     const id = 1775500001 + i;
@@ -274,6 +331,28 @@ test('curateAndRebalanceDeck prunes redundant cards, adds missing P1-P4 concepts
   assert.equal(stats.clozePct >= 45 && stats.clozePct <= 55, true);
   assert.equal(stats.convertedCount > 25, true);
 
+  // Even when a card has a recognition image from buildGenericClinicalMap (which is data:image/svg+xml), all curated cards pass lintCard
   const invalidCards = curated.filter((c) => !lintCard(c).isValid);
   assert.equal(invalidCards.length, 0);
+});
+
+test('computeDeterministicDeckId and resolveOrCreateNoteGuid preserve FSRS GUIDs across sessions', () => {
+  const deckId = computeDeterministicDeckId('assistencia_ao_parto');
+  const registry: GuidRegistryData = { version: 1, entries: {} };
+  const res1 = resolveOrCreateNoteGuid(
+    'assistencia_ao_parto',
+    deckId,
+    1775500001,
+    registry.entries
+  );
+  const res2 = resolveOrCreateNoteGuid(
+    'assistencia_ao_parto',
+    deckId,
+    1775500001,
+    registry.entries
+  );
+  assert.equal(res1.guid, res2.guid);
+  assert.equal(res1.guid.length > 0, true);
+  assert.equal(res1.key, 'assistencia_ao_parto:id:1775500001');
+  assert.equal(registry.entries['assistencia_ao_parto:id:1775500001'], res1.guid);
 });

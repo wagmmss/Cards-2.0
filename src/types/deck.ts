@@ -13,6 +13,19 @@ export interface MediaBundleItem {
   sourceUrl: string;
   cardId: number;
   field: 'question' | 'hint';
+  kind?: 'image' | 'audio';
+}
+
+export interface LocalMediaAsset {
+  filename: string;
+  mimeType: string;
+  dataUri: string;
+  size: number;
+}
+
+export interface GuidRegistryData {
+  version: number;
+  entries: Record<string, string>;
 }
 
 export interface CanonicalCard {
@@ -75,6 +88,7 @@ export interface MedicalImageResult {
 }
 
 export type WarningCode =
+  | 'MISSING_MEDIA'
   | 'QUESTION_TOO_LONG'
   | 'VAGUE_TEMPORAL_WINDOW'
   | 'TOPIC_DUPLICATED_IN_QUESTION'
@@ -116,6 +130,7 @@ export interface CardLintMetrics {
   maxClozeWords: number;
   hasCompoundQuestion: boolean;
   hasTopicSpoiler: boolean;
+  missingMediaFiles: string[];
 }
 
 export interface CardLintResult {
@@ -142,4 +157,3 @@ export interface DeckCurationStats {
   basicPct: number;
   clozePct: number;
 }
-
