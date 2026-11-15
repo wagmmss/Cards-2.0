@@ -129,6 +129,25 @@ const LATEX_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\\gamma\b/g, 'γ'],
   [/\\Delta\b/g, 'Δ'],
   [/\\mu\b/g, 'μ'],
+  [/&ge;/gi, '≥'],
+  [/&le;/gi, '≤'],
+  [/&plusmn;/gi, '±'],
+  [/&times;/gi, '×'],
+  [/&divide;/gi, '÷'],
+  [/&deg;/gi, '°'],
+  [/&rarr;/gi, '→'],
+  [/&larr;/gi, '←'],
+  [/&uarr;/gi, '↑'],
+  [/&darr;/gi, '↓'],
+  [/&ndash;/gi, '–'],
+  [/&mdash;/gi, '—'],
+  [/&alpha;/gi, 'α'],
+  [/&beta;/gi, 'β'],
+  [/&gamma;/gi, 'γ'],
+  [/&delta;/g, 'δ'],
+  [/&Delta;/g, 'Δ'],
+  [/&mu;|&micro;/gi, 'μ'],
+  [/&nbsp;/gi, ' '],
 ];
 
 /**
@@ -150,10 +169,37 @@ export function stripHtml(htmlText: string): string {
   return withoutAudio
     .replace(/<\/?[a-zA-Z!][^>]*>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
+    .replace(/&le;/gi, '≤')
+    .replace(/&ge;/gi, '≥')
+    .replace(/&plusmn;/gi, '±')
+    .replace(/&times;/gi, '×')
+    .replace(/&divide;/gi, '÷')
+    .replace(/&deg;/gi, '°')
+    .replace(/&rarr;/gi, '→')
+    .replace(/&larr;/gi, '←')
+    .replace(/&uarr;/gi, '↑')
+    .replace(/&darr;/gi, '↓')
+    .replace(/&ndash;/gi, '–')
+    .replace(/&mdash;/gi, '—')
+    .replace(/&alpha;/gi, 'α')
+    .replace(/&beta;/gi, 'β')
+    .replace(/&gamma;/gi, 'γ')
+    .replace(/&delta;/g, 'δ')
+    .replace(/&Delta;/g, 'Δ')
+    .replace(/&mu;|&micro;/gi, 'μ')
+    .replace(/&apos;|&#0*39;/gi, "'")
+    .replace(/&quot;/gi, '"')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
+    .replace(/&#(\d+);/g, (_m, dec: string) => {
+      const code = Number(dec);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : '';
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex: string) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : '';
+    })
+    .replace(/&amp;/gi, '&')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -205,7 +251,8 @@ export function extractMediaFromString(input: string): string[] {
 
 /**
  * Resolves a deterministic local filename for Anki's collection.media folder from any <img> tag or URL/Data-URI.
- * Ensures that exported Anki cards never point to volatile external https:// URLs or raw inline base64 strings.
+ * Ensures that exported Anki cards never point to volatile external https:// URLs or raw inline base64 strings,
+ * while preserving existing local filenames (including accented Portuguese chars and commas) intact.
  */
 export function resolveLocalMediaFilename(
   rawImgTag: string,
@@ -224,16 +271,15 @@ export function resolveLocalMediaFilename(
   if (attrMatch && attrMatch[1]) {
     const cleanAttr = attrMatch[1]
       .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_.-]+/g, '_');
+      .replace(/[\s"<>|?*\\/]+/g, '_');
     if (cleanAttr) return cleanAttr;
   }
 
   const src = (rawSrc || '').trim();
   // 2. If already a local filename (not http/https/data/blob/pdfimg/buscar_imagem)
   if (src && !/^(?:https?:|data:|blob:|pdfimg:|buscar_imagem:|\/)/i.test(src)) {
-    const base = src.split(/[\\/]/).pop() || src;
-    return base.replace(/[^a-zA-Z0-9_.-]+/g, '_');
+    const base = (src.split(/[\\/]/).pop() || src).trim();
+    return base.replace(/[\s"<>|?*]+/g, '_');
   }
 
   // 3. If data URI
@@ -287,15 +333,14 @@ export function resolveLocalAudioFilename(
   if (attrMatch && attrMatch[1]) {
     const cleanAttr = attrMatch[1]
       .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_.-]+/g, '_');
+      .replace(/[\s"<>|?*\\/]+/g, '_');
     if (cleanAttr) return cleanAttr;
   }
 
   const src = (rawSrc || '').trim();
   if (src && !/^(?:https?:|data:|blob:|\/)/i.test(src)) {
-    const base = src.split(/[\\/]/).pop() || src;
-    return base.replace(/[^a-zA-Z0-9_.-]+/g, '_');
+    const base = (src.split(/[\\/]/).pop() || src).trim();
+    return base.replace(/[\s"<>|?*]+/g, '_');
   }
 
   if (src.startsWith('data:audio/wav')) {
@@ -1199,6 +1244,13 @@ const VISUAL_OVERLAP_STOPWORDS = new Set([
   'palpitacoes', 'semanas', 'meses', 'anos', 'horas', 'minutos', 'tipica', 'tipico',
   'suspeita', 'avaliacao', 'manejo', 'tratamento', 'abordagem', 'classificacao',
   'fisiologica', 'patologica', 'compatível', 'compativel', 'presenca', 'ausencia',
+  'doppler', 'colorido', 'colorida', 'axial', 'coronal', 'sagital', 'transversal',
+  'longitudinal', 'eletrocardiografico', 'eletrocardiografica', 'classico', 'classica',
+  'utero', 'gravidico', 'gravidica', 'biliar', 'vesicula', 'onda', 'ondas',
+  'intervalo', 'complexo', 'segmento', 'taquicardia', 'bradicardia', 'irregular',
+  'regular', 'sinusal', 'ritmo', 'conducao', 'todas', 'todos', 'toda', 'todo',
+  'partograma', 'apresentacao', 'apresentando', 'apresenta', 'contracao', 'contracoes',
+  'eficaz', 'eficazes', 'dilatacao', 'trabalho', 'parto',
 ]);
 
 const VISUAL_FINDING_PATTERNS: RegExp[] = [
@@ -1225,6 +1277,7 @@ const VISUAL_FINDING_PATTERNS: RegExp[] = [
   /\balargamento\s+(?:de\s+|do\s+)?mediastino\b/i,
   /\blente\s+biconvexa\b/i,
   /\bforma\s+de\s+crescente\b/i,
+  /\bcole[cç][aã]o\s+peric[oó]lica\b/i,
 ];
 
 function normalizeImageSrcForDedup(rawSrc: string): string {
@@ -1532,6 +1585,16 @@ export function lintCard(
         availableMediaSet.add(clean);
         const base = clean.split(/[\\/]/).pop();
         if (base) availableMediaSet.add(base);
+        const srcMatch = clean.match(/\bsrc=["']([^"']+)["']/i);
+        if (srcMatch && srcMatch[1]) {
+          const srcBase = srcMatch[1].trim().split(/[\\/]/).pop();
+          if (srcBase) availableMediaSet.add(srcBase);
+        }
+        const soundMatch = clean.match(/\[sound:([^\]]+)\]/i);
+        if (soundMatch && soundMatch[1]) {
+          const soundBase = soundMatch[1].trim().split(/[\\/]/).pop();
+          if (soundBase) availableMediaSet.add(soundBase);
+        }
       }
     }
   }
@@ -2558,7 +2621,8 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
   let hint = replaceLatexWithUnicode((card.hint || '').trim());
   let topic = replaceLatexWithUnicode((card.topic || 'Clínica Médica - Conduta no Internato').trim());
 
-  // 1. Topic format (no ALL CAPS, must contain " - ")
+  // 1. Topic format (no ALL CAPS, normalize em-dash/en-dash separator to " - ")
+  topic = topic.replace(/\s+[—–]\s+/g, ' - ');
   if (topic === topic.toUpperCase() && topic.length > 3) {
     topic = topic.charAt(0).toUpperCase() + topic.slice(1).toLowerCase();
   }
@@ -2955,19 +3019,26 @@ export function convertBasicToCloze(
  */
 export function curateAndRebalanceDeck(
   inputCards: CanonicalCard[],
-  metadata: ExtractedDeckMetadata,
-  deckKey: string,
+  metadata?: ExtractedDeckMetadata | null,
+  deckKey: string = 'internato_deck',
   clinicalMap?: ClinicalMapResponse | null,
   options?: { skipTemplateGapAdditions?: boolean }
 ): { cards: CanonicalCard[]; stats: DeckCurationStats } {
+  const safeMetadata: ExtractedDeckMetadata = metadata || {
+    existingIds: [],
+    mediaTags: [],
+    detectedDeckKey: '',
+    rawCards: [],
+    removedOrphanAudioCount: 0,
+  };
   const originalCount =
-    metadata.rawCards && metadata.rawCards.length > 0
-      ? metadata.rawCards.length
+    safeMetadata.rawCards && safeMetadata.rawCards.length > 0
+      ? safeMetadata.rawCards.length
       : inputCards.length;
 
-  const existingIdSet = new Set<number>(metadata.existingIds || []);
+  const existingIdSet = new Set<number>(safeMetadata.existingIds || []);
   const originalTypeById = new Map<number, 'basic' | 'cloze'>();
-  for (const c of metadata.rawCards || []) {
+  for (const c of safeMetadata.rawCards || []) {
     if (Number.isFinite(c.id)) {
       const numId = Number(c.id);
       existingIdSet.add(numId);
@@ -3025,7 +3096,7 @@ export function curateAndRebalanceDeck(
   }
 
   // Step 3: Add missing high-yield P1-P4 concepts from Clinical Map (if provided and not skipped) with new IDs
-  const cleanDeckKey = (deckKey || metadata.detectedDeckKey || 'internato_deck')
+  const cleanDeckKey = (deckKey || safeMetadata.detectedDeckKey || 'internato_deck')
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, '_');
@@ -3038,7 +3109,9 @@ export function curateAndRebalanceDeck(
   let addedCount = 0;
 
   if (!options?.skipTemplateGapAdditions && clinicalMap && Array.isArray(clinicalMap.items)) {
-    const checkedItems = clinicalMap.items.filter((item) => item.checked !== false);
+    const checkedItems = clinicalMap.items.filter(
+      (item) => item.checked !== false && !(item.id && item.id.startsWith('map-existing-'))
+    );
     for (const item of checkedItems) {
       const itemTokens = tokenizeForSimilarity(`${item.subtopic} ${item.concept}`);
       const alreadyCovered = survivingTokenSets.some(
@@ -3047,7 +3120,7 @@ export function curateAndRebalanceDeck(
 
       if (!alreadyCovered) {
         const newId = nextNewId++;
-        const cleanConcept = item.concept.replace(/\.$/, '').trim();
+        const cleanConcept = stripClozeMarkup(item.concept).replace(/\.$/, '').trim();
         const topicPrefix = (clinicalMap.themeTitle || cleanDeckKey.replace(/_/g, ' '))
           .split(/[—–-]/)[0]
           .trim();
@@ -3119,7 +3192,7 @@ export function curateAndRebalanceDeck(
   }
 
   // Step 4: Reconcile IDs and media by ID preserving each card's natural format (basic vs cloze without rigid 50/50 quota)
-  const reconciled = reconcileDeckIdsAndMedia(survivingCards, metadata, cleanDeckKey).map((c) =>
+  const reconciled = reconcileDeckIdsAndMedia(survivingCards, safeMetadata, cleanDeckKey).map((c) =>
     surgicalRepairCardLocal(c)
   );
 

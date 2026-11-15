@@ -16,7 +16,9 @@ import {
   findDuplicateDeckImages,
   reconcileDeckIdsAndMedia,
   removeMissingMediaFromCard,
+  resolveLocalMediaFilename,
   resolveOrCreateNoteGuid,
+  stripHtml,
   surgicalRepairCardLocal,
 } from './wozniakLinter';
 import { buildGenericClinicalMap } from '../data/demoDecks';
@@ -1130,4 +1132,66 @@ test('convertClozeToBasic strips dangling prepositions before ___TARGET___ to yi
   assert.equal(basic.answer, 'Teste treponêmico rápido.');
   assert.equal(/\b(?:com|por|de|em|feita com)\s*\?/i.test(basic.question), false);
 });
+
+test('real wagmms/Cards compatibility: preserves accented/comma local filenames, decodes HTML medical entities, normalizes em-dash topics, and distinguishes partogram context from pericolic collection narration', () => {
+  assert.equal(
+    resolveLocalMediaFilename(
+      '<img src="Ficha_Resumo_-_Pré-Natal_p8_fig1.png">',
+      'Ficha_Resumo_-_Pré-Natal_p8_fig1.png',
+      1
+    ),
+    'Ficha_Resumo_-_Pré-Natal_p8_fig1.png'
+  );
+  assert.equal(
+    resolveLocalMediaFilename(
+      '<img src="Ficha_Resumo_-_Arritmias,_Síncope_e_PCR_p1_img3_155.png">',
+      'Ficha_Resumo_-_Arritmias,_Síncope_e_PCR_p1_img3_155.png',
+      2
+    ),
+    'Ficha_Resumo_-_Arritmias,_Síncope_e_PCR_p1_img3_155.png'
+  );
+
+  // Medical HTML entities must decode cleanly without triggering false ANSWER_HAS_SEMICOLON
+  assert.equal(stripHtml('Intervalo QRS &lt; 120 ms e PR &ge; 200 ms (&plusmn; 20 ms).'), 'Intervalo QRS < 120 ms e PR ≥ 200 ms (± 20 ms).');
+  const entityCard = surgicalRepairCardLocal({
+    id: 1792354533999,
+    type: 'basic',
+    topic: 'Manobras de Leopold — 1º Tempo',
+    question: 'Qual o parâmetro eletrocardiográfico esperado na condução normal?<br><img src="Ficha_Resumo_-_Pré-Natal_p8_fig1.png">',
+    answer: 'Duração do QRS &le; 120 ms.',
+    hint: '<i>Ilustração do 1º tempo da manobra de Leopold-Zweifel delimitando o fundo uterino.</i><br><br><b>Comentário:</b> O intervalo normal mantém <b>QRS ≤ 120 ms</b>, diferentemente do <b>bloqueio de ramo</b>.',
+  });
+  assert.equal(entityCard.topic, 'Manobras de Leopold - 1º Tempo');
+  assert.equal(entityCard.answer, 'Duração do QRS ≤ 120 ms.');
+  const entityLint = lintCard(entityCard, ['<img src="Ficha_Resumo_-_Pré-Natal_p8_fig1.png">']);
+  assert.equal(entityLint.warnings.some((w) => w.code === 'ANSWER_HAS_SEMICOLON'), false);
+  assert.equal(entityLint.warnings.some((w) => w.code === 'MISSING_MEDIA'), false);
+
+  // Partogram recognition card should NOT flag REDUNDANT_VISUAL_DESCRIPTION on generic words (partograma, contrações, eficazes)
+  const partogramCard: CanonicalCard = {
+    id: 1792354533126,
+    type: 'basic',
+    topic: 'Partograma - Distócias do Período Expulsivo',
+    image_mode: 'recognition',
+    question:
+      'Primigesta de 30 anos, 40 semanas, encontra-se no período expulsivo com 5 contrações eficazes em 10 minutos, evoluindo conforme o partograma abaixo:<br><img src="partograma_30b_parada_sec_descida.png"><br>Qual é a distócia diagnosticada pelo gráfico?',
+    answer: 'Parada secundária da descida.',
+    hint: '<i>Partograma demonstrando dilatação cervical completa (10 cm) mantida por 3 horas com apresentação fetal estacionada no plano 0 de DeLee apesar de contrações eficazes.</i><br><br><b>Comentário:</b> A <b>parada secundária da descida</b> caracteriza-se por altura estacionária por ≥ 1h sob dilatação total, tendo a <b>DCP</b> como principal causa.',
+  };
+  assert.equal(detectRedundantVisualDescription(partogramCard).isRedundant, false);
+
+  // Pericolic collection narration in question MUST flag REDUNDANT_VISUAL_DESCRIPTION
+  const pericolicCard: CanonicalCard = {
+    id: 1788993524897,
+    type: 'basic',
+    topic: 'Abdome Agudo Inflamatório - Diverticulite Complicada',
+    image_mode: 'recognition',
+    question:
+      'Paciente de 64 anos com dor em FIE e febre. A TC de abdome abaixo mostra coleção pericólica de 5,0 cm:<br><img src="tc_diverticulite.png"><br>Qual a conduta imediata?',
+    answer: 'Drenagem percutânea guiada por TC e antibioticoterapia.',
+    hint: '<i>TC de abdome demonstrando coleção pericólica de 5,0 cm.</i><br><br><b>Comentário:</b> No estágio <b>Hinchey Ib/II com abscesso ≥ 4 cm</b>, indica-se drenagem percutânea.',
+  };
+  assert.equal(detectRedundantVisualDescription(pericolicCard).isRedundant, true);
+});
+
 
