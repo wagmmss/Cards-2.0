@@ -125,7 +125,7 @@ export const CardItem: React.FC<CardItemProps> = ({
   const missingFiles = lint.metrics.missingMediaFiles;
   const hasMissingMedia = missingFiles.length > 0;
 
-  const hasDescriptiveLegend = hasImageDescriptiveLegend(card.hint || '');
+  const hasDescriptiveLegend = hasImageDescriptiveLegend(card);
   const isMissingDescriptiveLegend = hasAnyImage && !hasDescriptiveLegend;
 
   const repeatedImageCardIds = Array.from(

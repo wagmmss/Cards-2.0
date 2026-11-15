@@ -26,6 +26,7 @@ import {
   extractUnresolvedLocalImages,
   formatCanonicalDeckJson,
   lintCard,
+  lintDeck,
   removeMissingMediaFromCard,
   resolveOrCreateNoteGuid,
   stripHtml,
@@ -1017,6 +1018,23 @@ export default function App() {
       const missingCount = Number(response.headers.get('X-Missing-Media-Count') || 0);
       const missingHeader = response.headers.get('X-Missing-Media') || '';
       const missingList = missingHeader ? decodeURIComponent(missingHeader) : '';
+      const deckAudit = lintDeck(cards, undefined, cleanDeckKey);
+      const auditNotes: string[] = [];
+      if (deckAudit.duplicateImages.length > 0) {
+        auditNotes.push(`${deckAudit.duplicateImages.length} imagem(ns) repetida(s)`);
+      }
+      const missingLegendErrs = deckAudit.errors.filter((e) => e.code === 'IMAGE_MISSING_LEGEND').length;
+      if (missingLegendErrs > 0) {
+        auditNotes.push(`${missingLegendErrs} legenda(s) <i/> curta(s)/ausente(s)`);
+      }
+      const modalityErrs = deckAudit.errors.filter((e) => e.code === 'MODALITY_CONFLICT').length;
+      if (modalityErrs > 0) {
+        auditNotes.push(`${modalityErrs} conflito(s) de modalidade`);
+      }
+      const auditSuffix =
+        auditNotes.length > 0
+          ? ` | Auditoria visual: ${auditNotes.join(', ')}.`
+          : '';
 
       const apkgBlob = await response.blob();
       const url = URL.createObjectURL(apkgBlob);
@@ -1028,9 +1046,11 @@ export default function App() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      if (missingCount > 0) {
+      if (missingCount > 0 || auditNotes.length > 0) {
         setStatusMessage(
-          `⚠️ Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS preservado + ${resolvedCount} mídia(s) embutida(s)), porém ${missingCount} mídia(s) não foram resolvidas (${missingList}).`
+          `⚠️ Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS preservado + ${resolvedCount} mídia(s) embutida(s))${
+            missingCount > 0 ? `, porém ${missingCount} mídia(s) não foram resolvidas (${missingList})` : ''
+          }.${auditSuffix}`
         );
       } else {
         setStatusMessage(

@@ -27,6 +27,7 @@ import {
   extractDeckMediaManifest,
   formatCanonicalDeckJson,
   lintCard,
+  lintDeck,
   resolveLocalMediaFilename,
   stripHtml,
 } from '../utils/wozniakLinter';
@@ -113,13 +114,17 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
 
   const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
 
+  const deckAudit = useMemo(
+    () => lintDeck(cards, undefined, cleanDeckKey),
+    [cards, cleanDeckKey]
+  );
+
   const lintMap = new Map<number, CardLintResult>();
   let totalFlaggedCards = 0;
   let totalCardsWithMissingMedia = 0;
 
-  cards.forEach((card) => {
-    const res = lintCard(card);
-    lintMap.set(card.id, res);
+  deckAudit.cardResults.forEach((res) => {
+    lintMap.set(res.cardId, res);
     if (!res.isValid) {
       totalFlaggedCards++;
     }
@@ -127,6 +132,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       totalCardsWithMissingMedia++;
     }
   });
+
+  const duplicateImageCount = deckAudit.duplicateImages.length;
+  const missingLegendCount = deckAudit.errors.filter(
+    (e) => e.code === 'IMAGE_MISSING_LEGEND'
+  ).length;
+  const modalityConflictCount = deckAudit.errors.filter(
+    (e) => e.code === 'MODALITY_CONFLICT'
+  ).length;
 
   const basicCount = cards.filter((c) => c.type === 'basic').length;
   const clozeCount = cards.filter((c) => c.type === 'cloze').length;
@@ -299,10 +312,12 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       suggestedFilename?.trim() ||
       resolveLocalMediaFilename('', imgUrl.trim(), card.id, 0, cleanDeckKey);
 
+    const fallbackTopic = stripHtml(card.topic) || 'condição clínica em estudo';
+    const safeLegend =
+      legendText.trim() ||
+      `Exame complementar ilustrativo evidenciando achado característico de ${fallbackTopic}.`;
+
     if (mode === 'recognition') {
-      const safeLegend =
-        legendText.trim() ||
-        `Exame complementar evidenciando achado característico de ${stripHtml(card.topic)}.`;
       onUpdateCard({
         ...card,
         type: 'basic',
@@ -320,7 +335,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         imageVerified: false,
         imageAlternatives: imageResults.slice(0, 6),
         question: cleanQ,
-        hint: `${cleanHintWithoutImgs}<br><img src="${imgUrl.trim()}" data-anki-file="${localFile}">`,
+        hint: `<img src="${imgUrl.trim()}" data-anki-file="${localFile}"><br><i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`,
       });
     }
     setImagePickerCardId(null);
@@ -464,6 +479,27 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             </span>
           </div>
         </div>
+
+        {(duplicateImageCount > 0 || missingLegendCount > 0 || modalityConflictCount > 0) && (
+          <div className="px-3.5 py-2 rounded-lg bg-amber-950/35 border border-amber-800/60 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-amber-200 tabular-nums">
+            <span className="font-semibold text-amber-300">Auditoria Visual pré-.apkg:</span>
+            {duplicateImageCount > 0 && (
+              <span>
+                <strong>{duplicateImageCount}</strong> imagem(ns) repetida(s) no deck
+              </span>
+            )}
+            {missingLegendCount > 0 && (
+              <span>
+                <strong>{missingLegendCount}</strong> imagem(ns) sem legenda &lt;i&gt; (≥6 pal.)
+              </span>
+            )}
+            {modalityConflictCount > 0 && (
+              <span>
+                <strong>{modalityConflictCount}</strong> conflito(s) de modalidade exame×legenda
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Relatório de Curadoria & Rebalanceamento */}
         {curationStats && (

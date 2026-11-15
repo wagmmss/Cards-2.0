@@ -152,7 +152,7 @@ test('extractUnresolvedLocalImages and applyResolvedWebImageToCard resolve orpha
     question:
       'No Centro Obstétrico, parturiente realiza o exame abaixo. Qual a classificação fisiológica imediata?<br><img src="ctg_orfa.png">',
     answer: 'Cardiotocografia categoria I.',
-    hint: '<i>Traçado cardiotocográfico fetal intraparto.</i><br><br><b>Comentário:</b> A <b>categoria I</b> indica equilíbrio ácido-básico fetal normal com variabilidade moderada (6–25 bpm), ao passo que a <b>categoria III</b> exige reanimação intrauterina e resolução obstétrica imediata.',
+    hint: '<i>Traçado cardiotocográfico fetal intraparto com variabilidade moderada preservada.</i><br><br><b>Comentário:</b> A <b>categoria I</b> indica equilíbrio ácido-básico fetal normal com variabilidade moderada (6–25 bpm), ao passo que a <b>categoria III</b> exige reanimação intrauterina e resolução obstétrica imediata.',
   };
 
   const unresolved = extractUnresolvedLocalImages(cardWithOrphanMedia, []);
@@ -176,7 +176,7 @@ test('extractUnresolvedLocalImages and applyResolvedWebImageToCard resolve orpha
     fullUrl: 'https://upload.wikimedia.org/wikipedia/commons/ctg_cat1.jpg',
     description: 'CTG normal',
     suggestedFilename: 'ctg_orfa.png',
-    defaultLegend: 'Traçado cardiotocográfico fetal intraparto.',
+    defaultLegend: 'Traçado cardiotocográfico fetal intraparto com variabilidade moderada preservada.',
     source: 'Google Search Grounding',
   };
 
@@ -930,3 +930,19 @@ test('lintCard and lintDeck warn with REDUNDANT_VISUAL_DESCRIPTION when Med_Basi
   );
 });
 
+test('surgicalRepairCardLocal abbreviates long clozes in-place without leaking overflow words outside {{c1::...}}', () => {
+  const longClozeCard: CanonicalCard = {
+    id: 171000601,
+    type: 'cloze',
+    topic: 'Obstetrícia - Pré-eclâmpsia Grave',
+    question:
+      'Na pré-eclâmpsia com sinais de gravidade, a conduta imediata envolve {{c1::internação hospitalar e sulfato de magnésio por via intravenosa}}.',
+    answer: '',
+    hint: '<b>Comentário:</b> O <b>sulfato de magnésio IV</b> previne eclâmpsia e deve ser iniciado imediatamente na admissão, diferente dos <b>anti-hipertensivos isolados</b> que não protegem contra convulsões.',
+  };
+
+  const repaired = surgicalRepairCardLocal(longClozeCard);
+  // Must keep "magnésio IV" inside {{c1::...}} instead of spilling outside `}}` as a spoiler
+  assert.equal(repaired.question.includes('}} magnésio'), false);
+  assert.equal(repaired.question.includes('{{c1::internação hospitalar e sulfato de magnésio IV}}'), true);
+});

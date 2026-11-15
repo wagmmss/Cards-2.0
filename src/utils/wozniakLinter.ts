@@ -2385,23 +2385,36 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
 
   if (card.type === 'cloze') {
     answer = '';
-    // Keep only 1 {{c1::...}}, convert 2nd+ clozes to <b>...</b> (from generator.py auto_heal_note)
     let seenFirstCloze = false;
     question = question.replace(/\{\{c\d+::([\s\S]*?)\}\}/g, (_match, inner: string) => {
       const targetOnly = (inner.split('::')[0] || '').trim();
-      const words = stripHtml(targetOnly).split(/\s+/).filter(Boolean);
-      let cut = Math.min(words.length, MAX_CLOZE_WORDS);
-      while (cut > 1 && DANGLING_STOPWORDS.has(words[cut - 1].toLowerCase().replace(/[,;:.]/g, ''))) {
-        cut--;
+      let cleanTarget = stripHtml(targetOnly).replace(/\s+/g, ' ').trim();
+      let words = cleanTarget.split(/\s+/).filter(Boolean);
+
+      if (words.length > MAX_CLOZE_WORDS) {
+        cleanTarget = cleanTarget
+          .replace(/\bpor\s+via\s+intravenosa\b/gi, 'IV')
+          .replace(/\bvia\s+intravenosa\b/gi, 'IV')
+          .replace(/\bpor\s+via\s+oral\b/gi, 'VO')
+          .replace(/\bvia\s+oral\b/gi, 'VO')
+          .replace(/\bpor\s+via\s+intramuscular\b/gi, 'IM')
+          .replace(/\bvia\s+intramuscular\b/gi, 'IM')
+          .replace(/\bdose\s+[úu]nica\b/gi, 'DU')
+          .replace(/\bassociad[ao]s?\s+[àa]o?\b/gi, '+');
+        for (const [pattern, repl] of MEDICAL_ABBREVIATIONS) {
+          cleanTarget = cleanTarget.replace(pattern, repl);
+        }
+        cleanTarget = cleanTarget.replace(/\s+/g, ' ').trim();
+        words = cleanTarget.split(/\s+/).filter(Boolean);
       }
-      const clamped = words.slice(0, cut).join(' ');
-      const overflow = words.length > cut ? ' ' + words.slice(cut).join(' ') : '';
 
       if (!seenFirstCloze) {
         seenFirstCloze = true;
-        return `{{c1::${clamped}}}${overflow}`;
+        // Never leak overflow words outside `}}` as a spoiler in the question stem;
+        // if still > MAX_CLOZE_WORDS, keep intact so lintCard flags CLOZE_TOO_LONG cleanly.
+        return `{{c1::${cleanTarget}}}`;
       }
-      return `<b>${clamped}</b>${overflow}`;
+      return `<b>${cleanTarget}</b>`;
     });
 
     if (!seenFirstCloze) {

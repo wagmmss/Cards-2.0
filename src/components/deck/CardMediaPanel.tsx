@@ -9,7 +9,11 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { CanonicalCard, MedicalImageResult } from '../../types/deck';
-import { resolveLocalMediaFilename, stripHtml } from '../../utils/wozniakLinter';
+import {
+  extractVisualLegendEntries,
+  MIN_VISUAL_LEGEND_WORDS,
+  resolveLocalMediaFilename,
+} from '../../utils/wozniakLinter';
 
 export interface ParsedCardImage {
   src: string;
@@ -65,10 +69,20 @@ export function extractCardImagesWithMeta(
   return results;
 }
 
-export function hasImageDescriptiveLegend(hint: string): boolean {
-  if (!hint) return false;
-  const matches = Array.from(hint.matchAll(/<i\b[^>]*>([\s\S]*?)<\/i>/gi));
-  return matches.some((m) => stripHtml(m[1] || '').trim().length > 0);
+export function hasImageDescriptiveLegend(hintOrCard: string | CanonicalCard): boolean {
+  const cardObj: CanonicalCard =
+    typeof hintOrCard === 'string'
+      ? {
+          id: 0,
+          type: 'basic',
+          topic: '',
+          question: '',
+          answer: '',
+          hint: hintOrCard,
+        }
+      : hintOrCard;
+  const entries = extractVisualLegendEntries(cardObj);
+  return entries.some((entry) => entry.wordCount >= MIN_VISUAL_LEGEND_WORDS);
 }
 
 export function buildDeckImageUsageMap(
@@ -283,11 +297,11 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
 
                 {!hasDescriptiveLegend && (
                   <span
-                    title="Esta imagem está sem legenda descritiva (<i>...</i>) no campo hint"
+                    title={`Esta imagem está sem legenda descritiva em <i>...</i> com pelo menos ${MIN_VISUAL_LEGEND_WORDS} palavras no campo hint`}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] font-medium text-amber-200"
                   >
                     <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
-                    <span>Sem legenda descritiva</span>
+                    <span>Sem legenda descritiva (mín. {MIN_VISUAL_LEGEND_WORDS} pal.)</span>
                     <code className="font-mono text-[10px] text-amber-300/90">
                       &lt;i&gt;...&lt;/i&gt;
                     </code>

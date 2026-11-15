@@ -1136,7 +1136,7 @@ var ANKI_CLINICAL_CSS = `.card {
 }
 b, strong { color: #0284c7; font-weight: 700; }
 .cloze { font-weight: 700; color: #0284c7; border-bottom: 2px solid #38bdf8; padding: 0 2px; }
-.front-content { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
+.front-content, .cloze-text { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
 .back-content { font-size: 18.5px; color: #0f172a; line-height: 1.58; margin-top: 10px; }
 .main-answer { font-size: 20px; font-weight: 700; color: #0f172a; margin-bottom: 12px; }
 .extra-box {
@@ -1144,12 +1144,18 @@ b, strong { color: #0284c7; font-weight: 700; }
   border-radius: 8px; border-left: 4px solid #0284c7;
   font-size: 16px; color: #334155; line-height: 1.52;
 }
+.extra-box i {
+  display: block; margin-top: 6px; margin-bottom: 6px;
+  font-size: 14px; color: #64748b; text-align: center;
+}
 hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
 img {
   max-width: 100%; max-height: 65vh; height: auto; border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.12); margin: 14px auto 0;
   background: #ffffff; padding: 4px; display: block; object-fit: contain;
 }
+img:first-child { margin-top: 0; }
+audio.med-audio { width: 100%; height: 36px; margin: 8px 0; display: block; }
 table.med-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
 table.med-table th, table.med-table td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
 table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700; }
@@ -1160,6 +1166,7 @@ table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700
 .nightMode b, .nightMode strong, .night_mode b, .night_mode strong { color: #38bdf8 !important; }
 .nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
 .nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
+.nightMode .extra-box i, .night_mode .extra-box i { color: #94a3b8 !important; }
 .nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
 .nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46; }
 .nightMode table.med-table th, .night_mode table.med-table th { background-color: #0c4a6e !important; color: #e0f2fe !important; border-color: #3f3f46 !important; }
@@ -1167,11 +1174,12 @@ table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700
 @media (max-width: 600px) {
   .card { padding: 14px; font-size: 16.5px; }
   .med-card { max-width: 100%; }
-  .front-content { font-size: 17.5px; }
+  .front-content, .cloze-text { font-size: 17.5px; }
   .back-content { font-size: 16.5px; }
   .main-answer { font-size: 18px; }
   .extra-box { padding: 10px 14px; font-size: 15px; }
   img { max-height: 55vh; margin-top: 10px; }
+  img:first-child { margin-top: 0; }
 }`;
 var BASE91_TABLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~";
 function genankiGuidFor(deckId, deckKey, noteId) {
