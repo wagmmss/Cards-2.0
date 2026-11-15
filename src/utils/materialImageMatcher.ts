@@ -14,20 +14,34 @@ export type ModalityKey =
   | 'ecg'
   | 'rx'
   | 'tc'
+  | 'rm'
   | 'usg'
   | 'laparoscopy'
+  | 'eda'
+  | 'colonoscopia'
   | 'ctg'
+  | 'fundus'
+  | 'smear'
   | 'derm'
+  | 'partograma'
+  | 'obstetric_maneuver'
   | 'flowchart';
 
 const VISUAL_DIAGNOSTIC_MODALITIES = new Set<ModalityKey>([
   'ecg',
   'rx',
   'tc',
+  'rm',
   'usg',
   'laparoscopy',
+  'eda',
+  'colonoscopia',
   'ctg',
+  'fundus',
+  'smear',
   'derm',
+  'partograma',
+  'obstetric_maneuver',
 ]);
 
 const MODALITY_PATTERNS: Array<{
@@ -57,6 +71,13 @@ const MODALITY_PATTERNS: Array<{
       /\b(tc|tomografia|ct|corte\s+axial|contraste|hipodens|hiperdens|hematoma|tomografico)\b/i,
   },
   {
+    key: 'rm',
+    trigger:
+      /\b(rm|rnm|ressonancia(?:\s+magnetica)?|colangiorressonancia|angiorressonancia|mri|magnetic\s+resonance)\b/i,
+    candidate:
+      /\b(rm|rnm|ressonancia(?:\s+magnetica)?|mri|magnetic\s+resonance|t1|t2|flair|difusao|colangiorressonancia)\b/i,
+  },
+  {
     key: 'usg',
     trigger:
       /\b(usg|ultrassom|ultrassonografia|ecografia|fast|e-fast|colecistite|ectopica|intussuscepcao|transvaginal|roda dentada|contas de rosario)\b/i,
@@ -66,21 +87,65 @@ const MODALITY_PATTERNS: Array<{
   {
     key: 'laparoscopy',
     trigger:
-      /\b(videolaparoscopia|laparoscopia|laparotomia|histeroscopia|endoscopia|colonoscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico)\b/i,
+      /\b(videolaparoscopia|laparoscopia|laparotomia|histeroscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico)\b/i,
     candidate:
-      /\b(videolaparoscopia|laparoscopia|laparoscopy|laparoscopica|laparoscopico|laparotomia|histeroscopia|endoscopia|colonoscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico|tuba inflamada)\b/i,
+      /\b(videolaparoscopia|laparoscopia|laparoscopy|laparoscopica|laparoscopico|laparotomia|histeroscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico|tuba inflamada)\b/i,
+  },
+  {
+    key: 'eda',
+    trigger:
+      /\b(eda|endoscopia(?:\s+digestiva(?:\s+alta)?)?|esofagite|forrest|ulcera\s+peptica|varizes\s+esofagicas)\b/i,
+    candidate:
+      /\b(eda|endoscopia|endoscopy|endoscopica|endoscopico|mucosa\s+gastrica|ulcera|forrest|esofagite)\b/i,
+  },
+  {
+    key: 'colonoscopia',
+    trigger:
+      /\b(colonoscopia|retossigmoidoscopia|coloscopia|polipo\s+colonico|pseudomembrana)\b/i,
+    candidate:
+      /\b(colonoscopia|colonoscopy|retossigmoidoscopia|colonoscopico|mucosa\s+colonica|polipo)\b/i,
   },
   {
     key: 'ctg',
-    trigger: /\b(ctg|cardiotocografia|desaceleracao|taquissistolia|fetal)\b/i,
-    candidate: /\b(ctg|cardiotocografia|desaceleracao|bcf|variabilidade|dip\s*[i123])\b/i,
+    trigger:
+      /\b(ctg|cardiotocografia|desaceleracao|desaceleracoes|taquissistolia|dip\s*[i123]|variabilidade\s+(?:ausente|minima|moderada)|linha\s+de\s+base\s+fetal|sofrimento\s+fetal\s+agudo|monitorizacao\s+fetal)\b/i,
+    candidate:
+      /\b(ctg|cardiotocografia|cardiotocography|desaceleracao|desaceleracoes|bcf|variabilidade|dip\s*[i123]|taquissistolia|linha\s+de\s+base)\b/i,
+  },
+  {
+    key: 'fundus',
+    trigger:
+      /\b(fundoscopia|fundo\s+de\s+olho|retinografia|retinopatia|papiledema|mancha\s+cereja|hemorragia\s+en\s+chama)\b/i,
+    candidate:
+      /\b(fundoscopia|fundoscopy|retina|retinografia|disco\s+optico|papila|macula|fundus)\b/i,
+  },
+  {
+    key: 'smear',
+    trigger:
+      /\b(esfregaco|lamina\s+histologica|hematoscopia|histopatologia|histologia|esquizocito|drepanocito|blasto|bastonete\s+de\s+auer|papanicolaou|colpocitologia)\b/i,
+    candidate:
+      /\b(esfregaco|blood\s+smear|histologia|histology|histopatol|lamina|microscopia|biopsia|giemsa|hematoxilina)\b/i,
   },
   {
     key: 'derm',
     trigger:
       /\b(dermatoscopia|melanoma|lesao|pele|rash|exantema|herpes|zoster|sifilis|basocelular|eritema)\b/i,
     candidate:
-      /\b(pele|cutanea|lesao|exantema|macula|papula|vesicula|melanoma|dermatoscopia)\b/i,
+      /\b(pele|cutanea|lesao|exantema|macula|papula|vesicula|melanoma|dermatoscopia|dermoscopy)\b/i,
+  },
+  {
+    key: 'partograma',
+    trigger:
+      /\b(partograma|partogram|linha\s+de\s+alerta|linha\s+de\s+acao|parada\s+secundaria\s+da\s+(?:dilatacao|descida)|fase\s+ativa\s+prolongada)\b/i,
+    candidate:
+      /\b(partograma|partogram|linha\s+de\s+alerta|linha\s+de\s+acao|curva\s+de\s+friedman|dilatacao\s+cervical)\b/i,
+  },
+  {
+    key: 'obstetric_maneuver',
+    trigger:
+      /\b(manobras?\s+de\s+leopold|leopold[\s-]?zweifel|distocia\s+de\s+ombro|mcroberts|rubin|woods|jacquemier|zavanelli|kristeller|ritgen|brandt[\s-]?andrews|forcipe|kielland|simpson|piper|vacuo[\s-]?extrator|pelvimetria|bacia\s+obstetrica|conjugata|episiotomia|estatica\s+fetal|sinclitismo|assinclitismo)\b/i,
+    candidate:
+      /\b(leopold|distocia\s+de\s+ombro|shoulder\s+dystocia|mcroberts|rubin|woods|jacquemier|zavanelli|forcipe|forceps|vacuum|pelvimetria|pelvimetry|bacia|conjugata|episiotomia|episiotomy|estatica\s+fetal|apresentacao\s+(?:cefalica|pelvica|cormica)|manobra|maneuver)\b/i,
   },
   {
     key: 'flowchart',

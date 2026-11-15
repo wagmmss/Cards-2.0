@@ -12,6 +12,8 @@ import {
   INTERNATO_SYSTEM_INSTRUCTION,
   isRetryableGeminiError,
   parseGeminiApiKeys,
+  parseOrRecoverClinicalMapJson,
+  parseOrRecoverJsonArrayField,
   parseOrRecoverNotesJsonWithMeta,
   PRIMARY_GEMINI_MODEL,
   resolveDocumentPartsForGemini,
@@ -48,11 +50,11 @@ function createRequestAbortSignal(req: Request, res: Response, maxMs: number): {
   };
 }
 
-function isSafeExternalImageUrl(rawUrl: string): boolean {
+export function isSafeExternalImageUrl(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname.toLowerCase();
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (
       host === 'localhost' ||
       host === '::1' ||
@@ -62,12 +64,40 @@ function isSafeExternalImageUrl(rawUrl: string): boolean {
     ) {
       return false;
     }
-    if (/^(127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return false;
+    if (/^(127\.|10\.|169\.254\.|192\.168\.|0\.)/.test(host)) return false;
     if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    if (/^(?:fc00:|fd[0-9a-f]{2}:|fe80:)/i.test(host)) return false;
     return true;
   } catch {
     return false;
   }
+}
+
+export async function safeFetchWithRedirectValidation(
+  rawUrl: string,
+  init: RequestInit,
+  maxRedirects = 3
+): Promise<globalThis.Response> {
+  let currentUrl = rawUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    if (!isSafeExternalImageUrl(currentUrl)) {
+      throw new Error('URL externa inválida ou bloqueada por política SSRF.');
+    }
+    const resp = await fetch(currentUrl, {
+      ...init,
+      redirect: 'manual',
+    });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get('location');
+      if (!location || hop === maxRedirects) {
+        throw new Error('Redirecionamento excessivo ou inválido ao buscar URL externa.');
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    return resp;
+  }
+  throw new Error('Falha ao seguir redirecionamento seguro.');
 }
 
 type FetchedImageResult =
@@ -84,19 +114,57 @@ async function resolveImageForMultimodalValidation(
   if (!src) return { status: 'broken', reason: 'Fonte de imagem vazia.' };
 
   if (/^data:image\//i.test(src)) {
-    const match = src.match(/^data:(image\/[a-zA-Z0-9+.-]+)(?:;[^,]*)?;base64,(.+)$/i);
-    if (!match) {
+    const commaIdx = src.indexOf(',');
+    if (commaIdx === -1) {
       return { status: 'broken', reason: 'Data URI de imagem inválido.' };
     }
-    let mimeType = match[1].toLowerCase();
+    const header = src.slice(5, commaIdx);
+    const body = src.slice(commaIdx + 1);
+    const isBase64 = /;base64(?:;|$)/i.test(header);
+    let mimeType = header.split(';')[0].trim().toLowerCase();
+    if (!mimeType.startsWith('image/')) {
+      return { status: 'broken', reason: 'Data URI não possui MIME image/*.' };
+    }
     if (mimeType === 'image/jpg') mimeType = 'image/jpeg';
-    if (mimeType.includes('svg')) return { status: 'svg' };
+
+    if (mimeType.includes('svg')) {
+      let decoded: Buffer;
+      try {
+        if (isBase64) {
+          const cleanB64 = body.replace(/\s+/g, '');
+          if (!cleanB64) return { status: 'broken', reason: 'SVG data URI vazio.' };
+          decoded = Buffer.from(cleanB64, 'base64');
+        } else {
+          decoded = Buffer.from(decodeURIComponent(body), 'utf8');
+        }
+      } catch {
+        return { status: 'broken', reason: 'Data URI SVG malformado.' };
+      }
+      if (decoded.length < 64) {
+        return { status: 'broken', reason: 'SVG embutido vazio ou corrompido.' };
+      }
+      if (decoded.length > 6 * 1024 * 1024) {
+        return { status: 'fetch_error', reason: 'SVG embutido excede limite de 6MB.' };
+      }
+      return { status: 'svg' };
+    }
+
+    if (!isBase64) {
+      return { status: 'broken', reason: 'Data URI raster precisa estar em base64.' };
+    }
     if (!/^image\/(?:jpeg|png|webp|gif)$/.test(mimeType)) {
       return { status: 'fetch_error', reason: `MIME não suportado para visão: ${mimeType}` };
     }
-    const base64Body = match[2].replace(/\s+/g, '');
+    const base64Body = body.replace(/\s+/g, '');
+    if (base64Body.length < 16) {
+      return { status: 'broken', reason: 'Imagem base64 vazia ou corrompida.' };
+    }
     if (base64Body.length > 8_200_000) {
       return { status: 'fetch_error', reason: 'Imagem base64 excede limite de 6MB.' };
+    }
+    const decodedRaster = Buffer.from(base64Body, 'base64');
+    if (decodedRaster.length < 64) {
+      return { status: 'broken', reason: 'Imagem base64 truncada ou corrompida.' };
     }
     return { status: 'ok', mimeType, data: base64Body };
   }
@@ -115,13 +183,12 @@ async function resolveImageForMultimodalValidation(
   parentSignal.addEventListener('abort', onParentAbort, { once: true });
 
   try {
-    const upstream = await fetch(src, {
+    const upstream = await safeFetchWithRedirectValidation(src, {
       headers: {
         'User-Agent':
           'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-        Accept: 'image/jpeg,image/png,image/webp,image/gif,image/*;q=0.8',
+        Accept: 'image/jpeg,image/png,image/webp,image/gif,image/svg+xml,image/*;q=0.8',
       },
-      redirect: 'follow',
       signal: controller.signal,
     });
 
@@ -129,12 +196,29 @@ async function resolveImageForMultimodalValidation(
       return { status: 'broken', reason: `URL retornou HTTP ${upstream.status}.` };
     }
     if (!upstream.ok) {
-      return { status: 'fetch_error', reason: `Falha temporária ao baixar imagem (HTTP ${upstream.status}).` };
+      return {
+        status: 'fetch_error',
+        reason: `Falha temporária ao baixar imagem (HTTP ${upstream.status}).`,
+      };
     }
 
     let contentType = (upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
     if (contentType === 'image/jpg') contentType = 'image/jpeg';
-    if (contentType.includes('svg')) return { status: 'svg' };
+
+    if (contentType.includes('svg')) {
+      const svgBuf = Buffer.from(await upstream.arrayBuffer());
+      if (svgBuf.length < 128) {
+        return { status: 'broken', reason: 'Arquivo SVG vazio ou corrompido.' };
+      }
+      if (svgBuf.length > 6 * 1024 * 1024) {
+        return { status: 'fetch_error', reason: 'SVG externo excede 6MB.' };
+      }
+      const head = svgBuf.subarray(0, 512).toString('utf8').toLowerCase();
+      if (head.includes('<!doctype html') || head.includes('<html')) {
+        return { status: 'broken', reason: 'URL retornou página HTML em vez de SVG.' };
+      }
+      return { status: 'svg' };
+    }
 
     if (!contentType.startsWith('image/')) {
       if (contentType.includes('text/html') || contentType.includes('application/json')) {
@@ -160,10 +244,11 @@ async function resolveImageForMultimodalValidation(
     }
     return { status: 'ok', mimeType: contentType, data: buf.toString('base64') };
   } catch (err: unknown) {
-    return {
-      status: 'fetch_error',
-      reason: err instanceof Error ? err.message : 'Erro ao baixar imagem externa.',
-    };
+    const msg = err instanceof Error ? err.message : 'Erro ao baixar imagem externa.';
+    if (/política SSRF|Redirecionamento/i.test(msg)) {
+      return { status: 'broken', reason: msg };
+    }
+    return { status: 'fetch_error', reason: msg };
   } finally {
     clearTimeout(timer);
     parentSignal.removeEventListener('abort', onParentAbort);
@@ -277,6 +362,8 @@ export function createGeminiRouter(): express.Router {
         fileUri: uploaded.uri,
         fileName: uploaded.name,
         mimeType: uploaded.mimeType,
+        fileSha256: uploaded.fileSha256,
+        keyFingerprint: uploaded.keyFingerprint,
       });
     } catch (error: unknown) {
       if (res.writableEnded) return;
@@ -440,8 +527,7 @@ Gere entre 10 e 16 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil
 
       if (res.writableEnded) return;
       const rawText = result.text || '{}';
-      const cleanedJson = extractJsonBlock(rawText);
-      const parsed = JSON.parse(cleanedJson);
+      const parsed = parseOrRecoverClinicalMapJson(rawText, deckKey);
 
       const mergedSources =
         groundedSources.length > 0
@@ -661,7 +747,8 @@ Retorne EXCLUSIVAMENTE um JSON válido:
       const runDeckBatch = async (
         subsetCards: Array<Record<string, unknown>>,
         subsetNewIdStart: number,
-        depth = 0
+        depth = 0,
+        stride = 100
       ): Promise<Array<Record<string, unknown>>> => {
         if (signal.aborted) {
           throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
@@ -789,9 +876,15 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
             `[generate-deck] Sub-lote dividido (recebido ${parsedNotes.length}/${subsetCards.length}, finish=${String(finishReason)}, truncated=${wasTruncated}, depth=${depth})`
           );
           const mid = Math.ceil(subsetCards.length / 2);
+          const halfStride = Math.max(10, Math.floor(stride / 2));
           const [leftNotes, rightNotes] = await Promise.all([
-            runDeckBatch(subsetCards.slice(0, mid), subsetNewIdStart, depth + 1),
-            runDeckBatch(subsetCards.slice(mid), subsetNewIdStart + 50, depth + 1),
+            runDeckBatch(subsetCards.slice(0, mid), subsetNewIdStart, depth + 1, halfStride),
+            runDeckBatch(
+              subsetCards.slice(mid),
+              subsetNewIdStart + halfStride,
+              depth + 1,
+              halfStride
+            ),
           ]);
           return [...leftNotes, ...rightNotes];
         }
@@ -1003,15 +1096,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
 
       if (res.writableEnded) return;
       const rawText = response.text || '{}';
-      const cleanedJson = extractJsonBlock(rawText);
-      const parsed = JSON.parse(cleanedJson);
-      const repairedCards = sanitizeReturnedNotes(
-        Array.isArray(parsed)
-          ? parsed
-          : Array.isArray(parsed.repairedCards)
-          ? parsed.repairedCards
-          : []
+      const { items: rawRepaired } = parseOrRecoverJsonArrayField(
+        rawText,
+        'repairedCards',
+        ['id', 'question']
       );
+      const repairedCards = sanitizeReturnedNotes(rawRepaired);
 
       return res.json({ repairedCards, deckKey, modelUsed: response.modelUsed });
     } catch (error: unknown) {
@@ -1120,15 +1210,12 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
       );
 
       if (res.writableEnded) return;
-      const parsed = JSON.parse(extractJsonBlock(response.text || '{}')) as {
-        suggestions?: Array<Record<string, unknown>>;
-      };
+      const { items: rawList } = parseOrRecoverJsonArrayField(
+        response.text || '{}',
+        'suggestions',
+        ['cardId', 'searchQuery']
+      );
       const validIds = new Set(candidateCards.map((c: { id?: unknown }) => Number(c.id)));
-      const rawList = Array.isArray(parsed?.suggestions)
-        ? parsed.suggestions
-        : Array.isArray(parsed)
-        ? parsed
-        : [];
 
       const suggestions = rawList
         .map((item: Record<string, unknown>) => {
@@ -1171,6 +1258,7 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
   // Validação Multimodal com Gemini Flash — Inspeciona pixels reais da imagem (PDF ou Web)
   router.post('/validate-image', async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 35_000);
+    let mediaReachableRaster = false;
     try {
       const {
         imageSource = '',
@@ -1193,6 +1281,8 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
       if (resolvedMedia.status === 'broken') {
         return res.json({
           validated: true,
+          reachable: false,
+          isSvg: false,
           isCompatible: false,
           detectedModality: 'broken',
           conflictReason: resolvedMedia.reason,
@@ -1200,21 +1290,40 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
         });
       }
 
-      if (resolvedMedia.status !== 'ok') {
+      if (resolvedMedia.status === 'fetch_error') {
         return res.json({
           validated: false,
           fallback: true,
+          reachable: false,
+          isSvg: false,
+          isCompatible: false,
+          detectedModality: 'unreachable',
+          conflictReason: resolvedMedia.reason,
+          visualLegend: '',
+        });
+      }
+
+      if (resolvedMedia.status === 'svg') {
+        return res.json({
+          validated: false,
+          fallback: true,
+          reachable: true,
+          isSvg: true,
           isCompatible: true,
-          detectedModality: 'unverified',
+          detectedModality: 'svg_vector',
           conflictReason: '',
           visualLegend: '',
         });
       }
 
+      mediaReachableRaster = true;
+
       if (parseGeminiApiKeys().length === 0) {
         return res.json({
           validated: false,
           fallback: true,
+          reachable: true,
+          isSvg: false,
           isCompatible: true,
           detectedModality: 'unverified',
           conflictReason: '',
@@ -1292,7 +1401,7 @@ REGRAS DE INSPEÇÃO VISUAL:
       };
 
       const detectedModality = String(parsed.detectedModality || 'clinical_image').trim().slice(0, 60);
-      const isCompatible = parsed.isCompatible !== false;
+      const isCompatible = parsed.isCompatible === true;
       const conflictReason = String(parsed.conflictReason || '').trim().slice(0, 220);
       const visualLegend = String(parsed.visualLegend || '')
         .replace(/^legenda\s+visual\s*:\s*/i, '')
@@ -1301,6 +1410,8 @@ REGRAS DE INSPEÇÃO VISUAL:
 
       return res.json({
         validated: true,
+        reachable: true,
+        isSvg: false,
         isCompatible,
         detectedModality,
         conflictReason,
@@ -1312,9 +1423,11 @@ REGRAS DE INSPEÇÃO VISUAL:
       return res.status(200).json({
         validated: false,
         fallback: true,
-        isCompatible: true,
-        detectedModality: 'unverified',
-        conflictReason: '',
+        reachable: mediaReachableRaster,
+        isSvg: false,
+        isCompatible: mediaReachableRaster,
+        detectedModality: mediaReachableRaster ? 'unverified' : 'unreachable',
+        conflictReason: mediaReachableRaster ? '' : 'Falha ao validar imagem.',
         visualLegend: '',
         error: formatGeminiError(error, 'Falha na validação multimodal da imagem.'),
       });

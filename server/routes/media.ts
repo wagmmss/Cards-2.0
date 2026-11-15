@@ -6,6 +6,7 @@ import {
 } from '../ankiExport';
 import { getAiClient } from '../geminiClient';
 import { searchMedicalImages } from '../mediaSearch';
+import { isSafeExternalImageUrl, safeFetchWithRedirectValidation } from './gemini';
 
 function sanitizeDeckKeyServer(raw: unknown): string {
   return (
@@ -92,10 +93,10 @@ export function createMediaRouter(): express.Router {
     const { signal, cleanup } = attachRequestAbort(req, res, 6000);
     try {
       const targetUrl = String(req.query.url || '').trim();
-      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-        return res.status(400).send('Invalid image URL');
+      if (!isSafeExternalImageUrl(targetUrl)) {
+        return res.status(400).send('Invalid or blocked image URL');
       }
-      const upstream = await fetch(targetUrl, {
+      const upstream = await safeFetchWithRedirectValidation(targetUrl, {
         headers: {
           'User-Agent':
             'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
@@ -110,6 +111,9 @@ export function createMediaRouter(): express.Router {
         return res.status(415).send('Upstream resource is not an image');
       }
       const buffer = Buffer.from(await upstream.arrayBuffer());
+      if (buffer.length < 64) {
+        return res.status(502).send('Upstream image is empty or corrupted');
+      }
       if (buffer.length > 10 * 1024 * 1024) {
         return res.status(413).send('Image exceeds 10MB limit');
       }

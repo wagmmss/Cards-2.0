@@ -52,6 +52,7 @@ export default function App() {
   const [initialSnapshot] = useState(() => loadSavedDeckSnapshot());
 
   const [pdfs, setPdfs] = useState<UploadedPdfFile[]>([]);
+  const [localMediaAssets, setLocalMediaAssets] = useState<Record<string, string>>({});
   const [rawJsonText, setRawJsonText] = useState<string>(
     () => initialSnapshot?.rawJsonText ?? ''
   );
@@ -80,6 +81,11 @@ export default function App() {
   const [isQuickReviewOpen, setIsQuickReviewOpen] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<'info' | 'success' | 'error'>('info');
+
+  const availableMediaNames = useMemo(
+    () => Object.keys(localMediaAssets),
+    [localMediaAssets]
+  );
 
   const showStatus = useCallback(
     (message: string, tone: 'info' | 'success' | 'error' = 'info') => {
@@ -138,6 +144,8 @@ export default function App() {
     isSuggestingVisuals,
     autoResolveDeckMissingImages,
     suggestAndAttachVisualCards,
+    cancelAutoResolve,
+    cancelSuggestVisuals,
   } = useImageAutoResolver({
     materialImages,
     selectedModel,
@@ -147,11 +155,13 @@ export default function App() {
 
   const {
     isGeneratingMap,
+    isDeepeningGuidelines,
     isGeneratingDeck,
     isRepairing,
     progress,
     cancelGeneration,
     handleGenerateClinicalMap,
+    handleDeepenGuidelines,
     handleRecreateCanonicalDeck,
     handleAutoRepairAllFlagged,
   } = useBatchDeckGenerator({
@@ -168,6 +178,7 @@ export default function App() {
     cards,
     setCards,
     setCurationStats,
+    availableMediaNames,
     autoResolveDeckMissingImages,
     showStatus,
   });
@@ -186,20 +197,40 @@ export default function App() {
     extractedMeta,
     clinicalMap,
     guidRegistry,
+    localMediaAssets,
     mergeGuidEntries,
     showStatus,
   });
 
   const handleRemoveMissingMediaFromCard = (cardId: number) => {
     setCards((prev) =>
-      prev.map((c) => (c.id === cardId ? removeMissingMediaFromCard(c) : c))
+      prev.map((c) =>
+        c.id === cardId ? removeMissingMediaFromCard(c, availableMediaNames) : c
+      )
     );
     showStatus(`Referência de mídia ausente removida do Card ID ${cardId}.`, 'info');
   };
 
   const handleRemoveAllMissingMedia = () => {
-    setCards((prev) => prev.map((c) => removeMissingMediaFromCard(c)));
+    setCards((prev) =>
+      prev.map((c) => removeMissingMediaFromCard(c, availableMediaNames))
+    );
     showStatus('Todas as referências de mídias órfãs foram limpas do baralho.', 'info');
+  };
+
+  const handleAddLocalMedia = (newAssets: Record<string, string>) => {
+    const mergedAssets = { ...localMediaAssets, ...newAssets };
+    setLocalMediaAssets(mergedAssets);
+    const addedCount = Object.keys(newAssets).length;
+    showStatus(
+      `${addedCount} arquivo(s) de mídia local carregado(s) (${Object.keys(mergedAssets).length} no total) para preview e empacotamento .apkg.`,
+      'success'
+    );
+  };
+
+  const handleClearLocalMedia = () => {
+    setLocalMediaAssets({});
+    showStatus('Mídias locais removidas da sessão.', 'info');
   };
 
   const handleImportGuidRegistry = (jsonText: string) => {
@@ -249,7 +280,7 @@ export default function App() {
           `Deck carregado (${meta.rawCards.length} cards · ${rawBasicPct}% basic / ${rawClozePct}% cloze)${audioMsg}. Imagens locais sem arquivo estão sendo resolvidas automaticamente.`,
           'success'
         );
-        void autoResolveDeckMissingImages(meta.rawCards);
+        void autoResolveDeckMissingImages(meta.rawCards, availableMediaNames);
       }
     } catch (err: unknown) {
       setJsonError(err instanceof Error ? err.message : 'Erro ao analisar JSON.');
@@ -270,7 +301,7 @@ export default function App() {
       `Exemplo carregado (${meta.existingIds.length} IDs FSRS). Teste a Galeria de Troca Rápida (4–6 miniaturas), a "👁️ Revisão Rápida (Anki)" ou a exportação direta para .apkg.`,
       'info'
     );
-    void autoResolveDeckMissingImages(meta.rawCards);
+    void autoResolveDeckMissingImages(meta.rawCards, availableMediaNames);
   };
 
   const handleAddPdfs = (newFiles: UploadedPdfFile[]) => {
@@ -317,7 +348,7 @@ export default function App() {
       `Curadoria concluída: ${stats.originalCount} cards originais → ${stats.finalCount} cards finais (${stats.prunedCount} podados, +${stats.addedCount} novos P1–P4, ${stats.basicPct}% basic / ${stats.clozePct}% cloze).`,
       'success'
     );
-    void autoResolveDeckMissingImages(curated);
+    void autoResolveDeckMissingImages(curated, availableMediaNames);
   };
 
   const handleAutoRepairSingleCard = (cardId: number) => {
@@ -467,6 +498,9 @@ export default function App() {
           onAddPdfs={handleAddPdfs}
           onRemovePdf={handleRemovePdf}
           onClearPdfs={handleClearPdfs}
+          localMediaAssets={localMediaAssets}
+          onAddLocalMedia={handleAddLocalMedia}
+          onClearLocalMedia={handleClearLocalMedia}
           rawJsonText={rawJsonText}
           onRawJsonChange={handleRawJsonChange}
           jsonError={jsonError}
@@ -499,6 +533,8 @@ export default function App() {
           onToggleMapItem={handleToggleMapItem}
           onToggleItemCardType={handleToggleItemCardType}
           onAddCustomMapItem={handleAddCustomMapItem}
+          onDeepenGuidelines={(focusQuery) => void handleDeepenGuidelines(focusQuery)}
+          isDeepeningGuidelines={isDeepeningGuidelines}
           onRecreateCanonicalDeck={() => void handleRecreateCanonicalDeck()}
           isGeneratingDeck={isGeneratingDeck}
         />
@@ -508,9 +544,14 @@ export default function App() {
           deckKey={deckKey}
           extractedMeta={extractedMeta}
           curationStats={curationStats}
+          localMediaAssets={localMediaAssets}
+          availableMediaNames={availableMediaNames}
           onRemoveMissingMediaFromCard={handleRemoveMissingMediaFromCard}
           onRemoveAllMissingMedia={handleRemoveAllMissingMedia}
-          onAutoResolveMissingImages={() => void autoResolveDeckMissingImages(cards)}
+          onAutoResolveMissingImages={() =>
+            void autoResolveDeckMissingImages(cards, availableMediaNames)
+          }
+          onCancelAutoResolve={cancelAutoResolve}
           isAutoResolvingImages={isAutoResolvingImages}
           pdfExtractedImages={pdfExtractedImages}
           onSuggestVisualCards={() =>
@@ -519,6 +560,7 @@ export default function App() {
               deckKey || extractedMeta.detectedDeckKey || 'internato_deck'
             )
           }
+          onCancelSuggestVisuals={cancelSuggestVisuals}
           isSuggestingVisuals={isSuggestingVisuals}
           onOpenQuickReview={() => setIsQuickReviewOpen(true)}
           onSyncAnkiConnect={() => void handleSyncAnkiConnect()}
@@ -543,6 +585,7 @@ export default function App() {
           onClose={() => setIsQuickReviewOpen(false)}
           cards={cards}
           deckKey={deckKey}
+          localMediaAssets={localMediaAssets}
           onUpdateCard={handleUpdateCard}
         />
 

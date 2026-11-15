@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildEnglishMedicalSearchQueries,
   isSpamOrLogoImageUrl,
+  isSvgImageUrl,
   normalizeImageCanonicalKey,
   scoreImageRelevance,
 } from './mediaSearch';
@@ -363,6 +364,298 @@ test('applyResolvedWebImageToCard enforces Legenda visual >= 6 words before Come
       '<img src="https://litfl.com/ecg/anterior.jpg" data-anki-file="anterior_stemi.jpg"><br><i>Legenda visual: Traçado de 12 derivações evidenciando supradesnivelamento do segmento ST em V1 a V4.</i><br><br><b>Comentário:</b>'
     )
   );
+});
+
+test('CTG modality ignores bare fetal word while firing on cardiotocografia / DIP II / desaceleracao tardia', () => {
+  const ctgCandidate = {
+    title: 'Cardiotocography trace deceleration',
+    description: 'CTG monitoring showing late deceleration',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/ctg_trace.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/ctg_trace.jpg',
+    isSvg: false,
+  };
+  const nonCtgCandidate = {
+    title: 'Biometria abdominal pelvica obstetrica',
+    description: 'Medidas clinicas obstétricas sem monitorização eletrônica',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/obstetric_biometry.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/obstetric_biometry.jpg',
+    isSvg: false,
+  };
+
+  // Query containing bare "fetal" ("estática fetal" / "biometria fetal") MUST NOT trigger CTG +36 / non-CTG -10 penalty
+  const bareFetalCtg = scoreImageRelevance(ctgCandidate, {
+    query: 'estatica fetal apresentacao',
+    topic: 'Obstetrícia - Estática Fetal',
+    question: 'Qual o parâmetro avaliado na estática e biometria fetal?',
+    answer: 'Situação longitudinal e apresentação cefálica.',
+    enQueries: ['fetal lie obstetric'],
+  });
+  const bareFetalNonCtg = scoreImageRelevance(nonCtgCandidate, {
+    query: 'estatica fetal apresentacao',
+    topic: 'Obstetrícia - Estática Fetal',
+    question: 'Qual o parâmetro avaliado na estática e biometria fetal?',
+    answer: 'Situação longitudinal e apresentação cefálica.',
+    enQueries: ['fetal lie obstetric'],
+  });
+  assert.ok(
+    bareFetalCtg <= bareFetalNonCtg + 15,
+    `Bare "fetal" should not give CTG an unfair modality edge (ctg=${bareFetalCtg}, nonCtg=${bareFetalNonCtg})`
+  );
+
+  // Explicit CTG triggers ("cardiotocografia", "DIP II", "desaceleração tardia") MUST reward CTG (+36) and penalize non-CTG (-10)
+  for (const trigger of ['cardiotocografia basal', 'DIP II intraparto', 'desaceleração tardia']) {
+    const triggeredCtg = scoreImageRelevance(ctgCandidate, {
+      query: trigger,
+      topic: 'Obstetrícia - Vitalidade',
+      question: `Avaliação com ${trigger}.`,
+      answer: 'Sofrimento fetal agudo.',
+      enQueries: ['cardiotocography late deceleration'],
+    });
+    const triggeredNonCtg = scoreImageRelevance(nonCtgCandidate, {
+      query: trigger,
+      topic: 'Obstetrícia - Vitalidade',
+      question: `Avaliação com ${trigger}.`,
+      answer: 'Sofrimento fetal agudo.',
+      enQueries: ['cardiotocography late deceleration'],
+    });
+    assert.ok(
+      triggeredCtg >= triggeredNonCtg + 46,
+      `Trigger "${trigger}" must strongly favor CTG (${triggeredCtg}) over non-CTG (${triggeredNonCtg})`
+    );
+  }
+});
+
+test('obstetric sub-modalities prevent episiotomy/breech/leopold pollution on shoulder dystocia and De Lee pelvimetry queries', () => {
+  const mcrobertsCandidate = {
+    title: 'McRoberts maneuver for shoulder dystocia',
+    description: 'Hyperflexion of maternal thighs with suprapubic pressure',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/McRoberts_maneuver.svg/960px-McRoberts_maneuver.svg.png',
+    fullUrl: 'https://upload.wikimedia.org/wikipedia/commons/a/ab/McRoberts_maneuver.svg',
+    isSvg: false,
+  };
+  const episiotomyCandidate = {
+    title: 'Mediolateral episiotomy surgical incision',
+    description: 'Perineal laceration repair diagram',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/episiotomy.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/episiotomy.jpg',
+    isSvg: false,
+  };
+  const breechCandidate = {
+    title: 'Frank breech presentation delivery',
+    description: 'Mauriceau maneuver for breech extraction',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/frank_breech.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/frank_breech.jpg',
+    isSvg: false,
+  };
+  const pelvimetryCandidate = {
+    title: 'Pelvimetry fetal station De Lee planes',
+    description: 'Pelvic inlet diagonal conjugate and synclitism',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/de_lee_station.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/de_lee_station.jpg',
+    isSvg: false,
+  };
+
+  const sdCtx = {
+    query: 'manobra de McRoberts Rubin distocia de ombro',
+    topic: 'Obstetrícia - Emergência',
+    question: 'Qual a sequência de primeira linha na distócia de espáduas?',
+    answer: 'Manobra de McRoberts e pressão suprapúbica.',
+    enQueries: ['McRoberts maneuver shoulder dystocia'],
+  };
+  const mcScore = scoreImageRelevance(mcrobertsCandidate, sdCtx);
+  const epiScore = scoreImageRelevance(episiotomyCandidate, sdCtx);
+  const breechScore = scoreImageRelevance(breechCandidate, sdCtx);
+  assert.ok(mcScore > epiScore + 40, `McRoberts (${mcScore}) >> Episiotomy (${epiScore})`);
+  assert.ok(mcScore > breechScore + 40, `McRoberts (${mcScore}) >> Breech (${breechScore})`);
+
+  const deLeeCtx = {
+    query: 'planos de De Lee pelvimetria estreito medio',
+    topic: 'Obstetrícia - Bacia Obstétrica',
+    question: 'Qual a altura das espinhas isquiáticas nos planos de De Lee?',
+    answer: 'Plano zero de De Lee.',
+    enQueries: ['fetal station De Lee pelvimetry'],
+  };
+  const pelviScore = scoreImageRelevance(pelvimetryCandidate, deLeeCtx);
+  const mcOnDeLeeScore = scoreImageRelevance(mcrobertsCandidate, deLeeCtx);
+  assert.ok(
+    pelviScore > mcOnDeLeeScore + 40,
+    `De Lee pelvimetry (${pelviScore}) >> McRoberts (${mcOnDeLeeScore}) without cross-firing shoulder_dystocia`
+  );
+});
+
+test('isSvgImageUrl distinguishes rasterized Wikimedia .svg.png thumbnails from raw .svg and scores schematic diagrams appropriately', () => {
+  const thumbSvgPng =
+    'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/McRoberts_maneuver.svg/960px-McRoberts_maneuver.svg.png';
+  const rawSvg = 'https://upload.wikimedia.org/wikipedia/commons/a/ab/McRoberts_maneuver.svg';
+
+  assert.equal(isSvgImageUrl(thumbSvgPng, 'image/svg+xml'), false);
+  assert.equal(isSvgImageUrl(rawSvg, 'image/svg+xml'), true);
+
+  const svgPngSchematic = {
+    title: 'McRoberts maneuver diagram',
+    description: 'Shoulder dystocia McRoberts maneuver schematic',
+    source: 'Wikimedia Commons',
+    thumbUrl: thumbSvgPng,
+    fullUrl: rawSvg,
+    isSvg: false,
+  };
+  const rawSvgSchematic = {
+    ...svgPngSchematic,
+    thumbUrl: rawSvg,
+    isSvg: true,
+  };
+  const genericNonMatchPhoto = {
+    title: 'Obstetric ward corridor',
+    description: 'Clinical scene unrelated photo',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/obstetric_photo.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/obstetric_photo.jpg',
+    isSvg: false,
+  };
+
+  const diagramCtx = {
+    query: 'manobra McRoberts esquema',
+    topic: 'Obstetrícia - Distócia',
+    question: 'Como executar a manobra de McRoberts?',
+    answer: 'Hiperflexão das coxas sobre o abdome.',
+    enQueries: ['McRoberts maneuver'],
+  };
+  const svgPngDiagramScore = scoreImageRelevance(svgPngSchematic, diagramCtx);
+  const rawSvgDiagramScore = scoreImageRelevance(rawSvgSchematic, diagramCtx);
+  const photoDiagramScore = scoreImageRelevance(genericNonMatchPhoto, diagramCtx);
+  assert.equal(svgPngDiagramScore - rawSvgDiagramScore, 22);
+  assert.ok(svgPngDiagramScore > photoDiagramScore + 40);
+
+  // Raw SVG on ECG still carries -22 SVG penalty
+  const ecgRawSvg = {
+    title: 'Right bundle branch block ECG',
+    description: 'Vector ECG trace RBBB',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/rbbb.svg',
+    fullUrl: 'https://upload.wikimedia.org/commons/rbbb.svg',
+    isSvg: true,
+  };
+  const ecgRaster = {
+    ...ecgRawSvg,
+    thumbUrl: 'https://upload.wikimedia.org/commons/rbbb.png',
+    fullUrl: 'https://upload.wikimedia.org/commons/rbbb.png',
+    isSvg: false,
+  };
+  const ecgCtx = {
+    query: 'bloqueio de ramo direito ECG',
+    topic: 'Cardiologia - ECG',
+    question: 'Qual achado esperado em V1?',
+    answer: 'Padrão rSR em V1.',
+    enQueries: ['right bundle branch block ECG'],
+  };
+  assert.equal(
+    scoreImageRelevance(ecgRaster, ecgCtx) - scoreImageRelevance(ecgRawSvg, ecgCtx),
+    22
+  );
+});
+
+test('Partogramm matches partograma modality and prefix token matching while religious Bishop portraits are blocked', () => {
+  const partogrammCand = {
+    title: 'Partogramm Modell NSIONI 2005',
+    description: 'Clinical cervical labor curve chart',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/Partogramm_Modell_NSIONI_2005.JPG',
+    fullUrl: 'https://upload.wikimedia.org/commons/Partogramm_Modell_NSIONI_2005.JPG',
+    isSvg: false,
+  };
+  const baselineUnrelated = {
+    title: 'Medical chart empty paper',
+    description: 'Clinical empty sheet',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/empty_sheet.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/empty_sheet.jpg',
+    isSvg: false,
+  };
+  const partoCtx = {
+    query: 'partograma linha de alerta',
+    topic: 'Obstetrícia - Parto',
+    question: 'Como interpretar a linha de alerta no partograma?',
+    answer: 'Partograma com traçado à direita da linha de alerta.',
+    enQueries: ['partogram labor curve'],
+  };
+  const pScore = scoreImageRelevance(partogrammCand, partoCtx);
+  const bScore = scoreImageRelevance(baselineUnrelated, partoCtx);
+  assert.ok(pScore >= bScore + 50, `Partogramm (${pScore}) should beat unrelated (${bScore}) via modality + prefix hits`);
+
+  assert.equal(
+    isSpamOrLogoImageUrl(
+      'https://upload.wikimedia.org/wikipedia/commons/Bishop_consecration_ceremony.jpg',
+      'Archbishop ordination in diocese cathedral'
+    ),
+    true
+  );
+});
+
+test('scoreImageRelevance penalizes laterality and ST polarity contradictions by -75', () => {
+  const rbbbCand = {
+    title: 'ECG tracing bundle branch block',
+    description: '12-lead ECG demonstrating RBBB pattern',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/ecg_rbbb.png',
+    fullUrl: 'https://upload.wikimedia.org/commons/ecg_rbbb.png',
+    isSvg: false,
+  };
+  const lbbbCand = {
+    title: 'ECG tracing bundle branch block',
+    description: '12-lead ECG demonstrating LBBB pattern',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/ecg_lbbb.png',
+    fullUrl: 'https://upload.wikimedia.org/commons/ecg_lbbb.png',
+    isSvg: false,
+  };
+  const baseSideCtx = {
+    query: 'bloqueio de ramo',
+    topic: 'Cardiologia - ECG',
+    question: 'Qual bloqueio de ramo aparece no traçado?',
+    answer: 'Bloqueio de ramo direito.',
+    enQueries: ['bundle branch block ECG'],
+  };
+  const neutralSideCtx = {
+    ...baseSideCtx,
+    answer: 'Bloqueio de ramo.',
+  };
+  const lbbbNeutral = scoreImageRelevance(lbbbCand, neutralSideCtx);
+  const lbbbContra = scoreImageRelevance(lbbbCand, baseSideCtx);
+  assert.equal(lbbbNeutral - lbbbContra, 75);
+  assert.equal(scoreImageRelevance(rbbbCand, baseSideCtx) - lbbbContra, 75);
+
+  const supraCand = {
+    title: 'Myocardial ischemia ECG',
+    description: '12-lead ECG showing ST elevation',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/ecg_st_elev.png',
+    fullUrl: 'https://upload.wikimedia.org/commons/ecg_st_elev.png',
+    isSvg: false,
+  };
+  const infraCand = {
+    title: 'Myocardial ischemia ECG',
+    description: '12-lead ECG showing ST depression',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/ecg_st_depr.png',
+    fullUrl: 'https://upload.wikimedia.org/commons/ecg_st_depr.png',
+    isSvg: false,
+  };
+  const supraCtx = {
+    query: 'IAMCSST supradesnivelamento ECG',
+    topic: 'Cardiologia - Isquemia',
+    question: 'Qual alteração isquêmica aguda aparece no ECG?',
+    answer: 'Supradesnivelamento do segmento ST.',
+    enQueries: ['myocardial ischemia ECG'],
+  };
+  const supraMatch = scoreImageRelevance(supraCand, supraCtx);
+  const infraContra = scoreImageRelevance(infraCand, supraCtx);
+  assert.equal(supraMatch - infraContra, 75);
 });
 
 

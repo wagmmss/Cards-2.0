@@ -160,6 +160,7 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
   * Se não houver figura correspondente nos PDFs, mas o card ganhar valor com imagem clínica real, insira <img src="buscar_imagem: termo clínico específico em PT ou EN"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">, <img src="buscar_imagem: pneumotorax hipertensivo radiografia torax">).
   * Coloque <img ...> na "question" ("image_mode": "recognition") quando o estudante precisa reconhecer o achado visual para responder; ou coloque no início do "hint" ("image_mode": "feedback", antes de <b>Comentário:</b>) quando a imagem reforça a explicação, classificação ou algoritmo sem entregar a resposta na frente.
   * Em cards puramente normativos, de dose ou cálculo simples onde imagem não acrescenta, NÃO force <img>.
+  * Para escores ou classificações estruturadas em tabela (ex.: Índice de Bishop, Apgar, Wells, CURB-65) sem figura correspondente nos PDFs, prefira renderizar uma tabela HTML compacta <table class="med-table"> no "hint" em vez de forçar busca de imagem externa.
 - FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato, ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>).
 - PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X").
@@ -219,35 +220,150 @@ export function buildFullCardsDigest(rawCards: Array<Record<string, unknown>>): 
     .join('\n');
 }
 
-export function parseOrRecoverNotesJsonWithMeta(rawText: string): {
-  notes: Array<Record<string, unknown>>;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function extractBalancedJsonObjects(
+  rawText: string,
+  requiredKeys: string[] = []
+): Array<Record<string, unknown>> {
+  if (!rawText || typeof rawText !== 'string') return [];
+
+  const candidates: Array<{ start: number; end: number; obj: Record<string, unknown> }> = [];
+  const braceStack: number[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < rawText.length; i++) {
+    const ch = rawText[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      braceStack.push(i);
+    } else if (ch === '}') {
+      const start = braceStack.pop();
+      if (start === undefined) continue;
+      // Skip outer wrappers when an already-matched item sits completely inside this span
+      if (candidates.some((c) => start <= c.start && i >= c.end)) {
+        continue;
+      }
+      const slice = rawText.slice(start, i + 1);
+      try {
+        const parsed = JSON.parse(slice);
+        if (!isPlainObject(parsed)) continue;
+        const hasAllRequired = requiredKeys.every((k) => {
+          if (!Object.prototype.hasOwnProperty.call(parsed, k)) return false;
+          const v = parsed[k];
+          return v !== undefined && v !== null && v !== '';
+        });
+        if (!hasAllRequired) continue;
+        candidates.push({ start, end: i, obj: parsed });
+      } catch {
+        // Ignore malformed partial object
+      }
+    }
+  }
+
+  return candidates.map((c) => c.obj);
+}
+
+export function parseOrRecoverJsonArrayField(
+  rawText: string,
+  arrayFieldName: string,
+  requiredKeys: string[] = ['id', 'question']
+): {
+  items: Array<Record<string, unknown>>;
   wasTruncated: boolean;
 } {
   const cleanedJson = extractJsonBlock(rawText);
   try {
     const parsed = JSON.parse(cleanedJson);
-    if (Array.isArray(parsed)) return { notes: parsed, wasTruncated: false };
-    if (parsed && Array.isArray(parsed.notes)) {
-      return { notes: parsed.notes, wasTruncated: false };
+    if (Array.isArray(parsed)) {
+      return { items: parsed.filter(isPlainObject), wasTruncated: false };
+    }
+    if (isPlainObject(parsed) && Array.isArray(parsed[arrayFieldName])) {
+      return {
+        items: (parsed[arrayFieldName] as unknown[]).filter(isPlainObject),
+        wasTruncated: false,
+      };
     }
   } catch {
-    const recovered: Array<Record<string, unknown>> = [];
-    const objRegex = /\{[^{}]*"id"\s*:\s*\d+[^{}]*"question"\s*:\s*"[\s\S]*?"[^{}]*\}/g;
-    let match: RegExpExecArray | null;
-    while ((match = objRegex.exec(rawText)) !== null) {
-      try {
-        const obj = JSON.parse(match[0]);
-        if (obj && typeof obj === 'object' && obj.question) {
-          recovered.push(obj);
-        }
-      } catch {
-        // skip malformed fragment
-      }
+    const recovered = extractBalancedJsonObjects(rawText, requiredKeys);
+    if (recovered.length > 0) {
+      return { items: recovered, wasTruncated: true };
     }
-    if (recovered.length > 0) return { notes: recovered, wasTruncated: true };
     throw new Error('Resposta JSON truncada ou inválida do modelo.');
   }
-  return { notes: [], wasTruncated: false };
+  return { items: [], wasTruncated: false };
+}
+
+export function parseOrRecoverNotesJsonWithMeta(rawText: string): {
+  notes: Array<Record<string, unknown>>;
+  wasTruncated: boolean;
+} {
+  const { items, wasTruncated } = parseOrRecoverJsonArrayField(rawText, 'notes', [
+    'id',
+    'question',
+  ]);
+  return {
+    notes: items.filter((obj) => Boolean(obj.question)),
+    wasTruncated,
+  };
+}
+
+export function parseOrRecoverClinicalMapJson(
+  rawText: string,
+  fallbackDeckKey: string
+): Record<string, unknown> {
+  const cleanedJson = extractJsonBlock(rawText);
+  try {
+    const parsed = JSON.parse(cleanedJson);
+    if (isPlainObject(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Recover partial clinical map if truncated near the end of output
+    const recoveredItems = extractBalancedJsonObjects(rawText, ['subtopic', 'concept']);
+    if (recoveredItems.length > 0) {
+      const themeMatch = rawText.match(/"themeTitle"\s*:\s*"([^"]+)"/);
+      const specMatch = rawText.match(/"specialty"\s*:\s*"([^"]+)"/);
+      const profileMatch = rawText.match(/"profile"\s*:\s*"([^"]+)"/);
+      const updatesBlockMatch = rawText.match(/"guidelineUpdates"\s*:\s*\[([\s\S]*?)\]/);
+      const guidelineUpdates: string[] = [];
+      if (updatesBlockMatch?.[1]) {
+        const strMatches = updatesBlockMatch[1].matchAll(/"((?:[^"\\]|\\.)*)"/g);
+        for (const m of strMatches) {
+          try {
+            guidelineUpdates.push(JSON.parse(`"${m[1]}"`));
+          } catch {
+            // ignore malformed string
+          }
+        }
+      }
+      return {
+        themeTitle: themeMatch?.[1] || fallbackDeckKey.replace(/_/g, ' '),
+        specialty: specMatch?.[1] || 'Clínica',
+        deckKey: fallbackDeckKey,
+        ...(profileMatch?.[1] ? { profile: profileMatch[1] } : {}),
+        guidelineUpdates,
+        items: recoveredItems,
+        wasTruncated: true,
+      };
+    }
+  }
+  throw new Error('Resposta JSON do Mapa Clínico truncada ou inválida.');
 }
 
 export function extractErrorDetails(error: unknown): string {
@@ -313,7 +429,7 @@ export function isRetryableGeminiError(error: unknown): boolean {
 
 function isModelOverloadOrQuotaError(error: unknown): boolean {
   const raw = extractErrorDetails(error);
-  return /429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|timed out|TimeoutError/i.test(
+  return /429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|timed out|TimeoutError|404|NOT_FOUND|is not found|not supported/i.test(
     raw
   );
 }
@@ -572,11 +688,51 @@ export interface UploadedFileCacheEntry {
   mimeType: string;
   name: string;
   uploadedAt: number;
+  fileSha256: string;
+  keyFingerprint: string;
 }
 
 const GEMINI_FILE_CACHE_TTL_MS = 1000 * 60 * 60 * 24;
 const geminiUploadedFileCache = new Map<string, UploadedFileCacheEntry>();
 const geminiUploadInFlight = new Map<string, Promise<UploadedFileCacheEntry>>();
+
+const PDF_RAW_BYTES_CACHE_MAX_BYTES = 120 * 1024 * 1024;
+const pdfRawBytesCache = new Map<
+  string,
+  { base64Data: string; mimeType: string; name: string; approxBytes: number }
+>();
+let pdfRawBytesCacheTotalBytes = 0;
+
+function rememberPdfRawBytes(
+  sha256: string,
+  base64Data: string,
+  mimeType: string,
+  name: string
+): void {
+  if (!sha256 || !base64Data) return;
+  const approxBytes = Math.ceil((base64Data.length * 3) / 4);
+  if (approxBytes > 60 * 1024 * 1024) return;
+  const existing = pdfRawBytesCache.get(sha256);
+  if (existing) {
+    pdfRawBytesCache.delete(sha256);
+    pdfRawBytesCache.set(sha256, existing);
+    return;
+  }
+  while (
+    pdfRawBytesCacheTotalBytes + approxBytes > PDF_RAW_BYTES_CACHE_MAX_BYTES &&
+    pdfRawBytesCache.size > 0
+  ) {
+    const oldestKey = pdfRawBytesCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldestVal = pdfRawBytesCache.get(oldestKey);
+    pdfRawBytesCache.delete(oldestKey);
+    if (oldestVal) {
+      pdfRawBytesCacheTotalBytes = Math.max(0, pdfRawBytesCacheTotalBytes - oldestVal.approxBytes);
+    }
+  }
+  pdfRawBytesCache.set(sha256, { base64Data, mimeType, name, approxBytes });
+  pdfRawBytesCacheTotalBytes += approxBytes;
+}
 
 export interface InputDocumentPayload {
   name?: string;
@@ -584,6 +740,8 @@ export interface InputDocumentPayload {
   base64Data?: string;
   fileUri?: string;
   fileName?: string;
+  fileSha256?: string;
+  keyFingerprint?: string;
   textContent?: string;
   docRole?: string;
 }
@@ -597,6 +755,8 @@ export async function uploadSinglePdfToGeminiFiles(
   const base64Data = String(doc.base64Data || '');
   const mimeType = doc.mimeType || 'application/pdf';
   const hash = crypto.createHash('sha256').update(base64Data).digest('hex');
+  rememberPdfRawBytes(hash, base64Data, mimeType, doc.name || `documento_${hash.slice(0, 8)}.pdf`);
+
   const cacheKey = `${keyFingerprint}:${hash}`;
 
   const cached = geminiUploadedFileCache.get(cacheKey);
@@ -648,6 +808,8 @@ export async function uploadSinglePdfToGeminiFiles(
           mimeType: uploaded.mimeType || mimeType,
           name: uploaded.name || '',
           uploadedAt: Date.now(),
+          fileSha256: hash,
+          keyFingerprint,
         };
         geminiUploadedFileCache.set(cacheKey, entry);
         return entry;
@@ -694,16 +856,76 @@ export async function resolveDocumentPartsForGemini(
       parts.push({
         text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
       });
-    } else if (pdf?.fileUri && typeof pdf.fileUri === 'string') {
-      parts.push(createPartFromUri(pdf.fileUri, pdf.mimeType || 'application/pdf'));
-    } else if (pdf?.base64Data && typeof pdf.base64Data === 'string') {
-      const mimeType = pdf.mimeType || 'application/pdf';
+      continue;
+    }
+
+    const mimeType = pdf?.mimeType || 'application/pdf';
+    const base64Data = typeof pdf?.base64Data === 'string' ? pdf.base64Data : '';
+    const sha256 =
+      (typeof pdf?.fileSha256 === 'string' && pdf.fileSha256.trim()) ||
+      (base64Data ? crypto.createHash('sha256').update(base64Data).digest('hex') : '');
+
+    if (base64Data && sha256) {
+      rememberPdfRawBytes(sha256, base64Data, mimeType, pdf.name || 'documento.pdf');
+    }
+
+    if (pdf?.fileUri && typeof pdf.fileUri === 'string') {
+      if (!pdf.keyFingerprint || pdf.keyFingerprint === keyFingerprint) {
+        parts.push(createPartFromUri(pdf.fileUri, mimeType));
+        continue;
+      }
+
+      if (sha256) {
+        const keyCached = geminiUploadedFileCache.get(`${keyFingerprint}:${sha256}`);
+        if (keyCached && Date.now() - keyCached.uploadedAt < GEMINI_FILE_CACHE_TTL_MS) {
+          parts.push(createPartFromUri(keyCached.uri, keyCached.mimeType));
+          continue;
+        }
+      }
+
+      const cachedRaw = sha256 ? pdfRawBytesCache.get(sha256)?.base64Data : undefined;
+      const availableBase64 = base64Data || cachedRaw || '';
+      if (!availableBase64) {
+        throw new Error(
+          `O arquivo "${pdf.name || 'PDF'}" pertence a outra chave Gemini e seus bytes não estão mais em cache; reenvie o arquivo.`
+        );
+      }
+
+      try {
+        const uploaded = await uploadSinglePdfToGeminiFiles(
+          ai,
+          { ...pdf, base64Data: availableBase64, mimeType },
+          signal,
+          keyFingerprint
+        );
+        parts.push(createPartFromUri(uploaded.uri, uploaded.mimeType));
+      } catch (uploadErr) {
+        if (signal?.aborted) throw uploadErr;
+        if (availableBase64.length < 13_500_000) {
+          console.warn(
+            `[gemini] Falling back to inlineData after cross-key re-upload error for ${pdf.name || 'PDF'}:`,
+            extractErrorDetails(uploadErr)
+          );
+          parts.push({
+            inlineData: {
+              mimeType,
+              data: availableBase64,
+            },
+          });
+        } else {
+          throw uploadErr;
+        }
+      }
+      continue;
+    }
+
+    if (base64Data) {
       try {
         const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf, signal, keyFingerprint);
         parts.push(createPartFromUri(uploaded.uri, uploaded.mimeType));
       } catch (uploadErr) {
         if (signal?.aborted) throw uploadErr;
-        if (pdf.base64Data.length < 13_500_000) {
+        if (base64Data.length < 13_500_000) {
           console.warn(
             `[gemini] Falling back to inlineData for ${pdf.name || 'PDF'}:`,
             extractErrorDetails(uploadErr)
@@ -711,7 +933,7 @@ export async function resolveDocumentPartsForGemini(
           parts.push({
             inlineData: {
               mimeType,
-              data: pdf.base64Data,
+              data: base64Data,
             },
           });
         } else {

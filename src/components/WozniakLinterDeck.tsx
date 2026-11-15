@@ -44,12 +44,16 @@ interface WozniakLinterDeckProps {
   deckKey: string;
   extractedMeta: ExtractedDeckMetadata;
   curationStats?: DeckCurationStats | null;
+  localMediaAssets?: Record<string, string>;
+  availableMediaNames?: string[];
   onRemoveMissingMediaFromCard: (cardId: number) => void;
   onRemoveAllMissingMedia: () => void;
   onAutoResolveMissingImages: () => void;
+  onCancelAutoResolve?: () => void;
   isAutoResolvingImages?: boolean;
   pdfExtractedImages?: MedicalImageResult[];
   onSuggestVisualCards?: () => void;
+  onCancelSuggestVisuals?: () => void;
   isSuggestingVisuals?: boolean;
   onOpenQuickReview: () => void;
   onSyncAnkiConnect: () => void;
@@ -74,12 +78,16 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   deckKey,
   extractedMeta,
   curationStats,
+  localMediaAssets,
+  availableMediaNames = [],
   onRemoveMissingMediaFromCard,
   onRemoveAllMissingMedia,
   onAutoResolveMissingImages,
+  onCancelAutoResolve,
   isAutoResolvingImages = false,
   pdfExtractedImages = [],
   onSuggestVisualCards,
+  onCancelSuggestVisuals,
   isSuggestingVisuals = false,
   onOpenQuickReview,
   onSyncAnkiConnect,
@@ -122,8 +130,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
 
   const deckAudit = useMemo(
-    () => lintDeck(cards, undefined, cleanDeckKey),
-    [cards, cleanDeckKey]
+    () => lintDeck(cards, availableMediaNames, cleanDeckKey),
+    [cards, availableMediaNames, cleanDeckKey]
   );
 
   const lintMap = new Map<number, CardLintResult>();
@@ -207,7 +215,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     setImageSearchTerm(defaultQuery);
     setCustomImageUrl('');
     setCustomImageLegend('');
-    await triggerMedicalImageSearch(card, defaultQuery, card.topic, card.question, card.hint);
+    await triggerMedicalImageSearch(
+      card,
+      defaultQuery,
+      card.topic,
+      card.question,
+      card.hint,
+      card.answer
+    );
   };
 
   const triggerMedicalImageSearch = async (
@@ -215,7 +230,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     queryText: string,
     topicText: string = '',
     questionText: string = '',
-    hintText: string = ''
+    hintText: string = '',
+    answerText: string = ''
   ) => {
     setImageResults([]);
     setIsSearchingImages(true);
@@ -227,6 +243,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           query: queryText,
           topic: topicText,
           question: stripHtml(questionText),
+          answer: stripHtml(answerText),
           hint: stripHtml(hintText),
           preferGoogleGrounding: true,
         }),
@@ -262,6 +279,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           query: q,
           topic: card.topic,
           question: stripHtml(card.question),
+          answer: stripHtml(card.answer),
           hint: stripHtml(card.hint),
           preferGoogleGrounding: true,
         }),
@@ -309,9 +327,17 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     suggestedFilename?: string
   ) => {
     if (!imgUrl.trim()) return;
-    const cleanQ = card.question.replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '').trim();
-    const cleanHintWithoutImgs = card.hint
-      .replace(/<img\b[^>]*>/gi, '')
+    const convertedBase =
+      mode === 'recognition' && card.type === 'cloze'
+        ? convertClozeToBasic(card)
+        : card;
+
+    const cleanQ = (convertedBase.question || card.question)
+      .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+      .trim();
+    const cleanHintWithoutImgs = (convertedBase.hint || card.hint)
+      .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+      .replace(/^(?:\s*<br\s*\/?>\s*)+/i, '')
       .replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '')
       .trim();
 
@@ -325,15 +351,20 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       `Exame complementar ilustrativo evidenciando achado característico de ${fallbackTopic}.`;
 
     if (mode === 'recognition') {
+      const nextAnswer =
+        (convertedBase.answer || '').trim() ||
+        'Achado clínico característico evidenciado no exame.';
       onUpdateCard({
-        ...card,
+        ...convertedBase,
         type: 'basic',
-        answer: card.type === 'cloze' ? 'Conduta imediata guiada pelo achado visual.' : card.answer,
+        answer: nextAnswer,
         image_mode: 'recognition',
         imageVerified: false,
         imageAlternatives: imageResults.slice(0, 6),
         question: `${cleanQ}<br><img src="${imgUrl.trim()}" data-anki-file="${localFile}">`,
-        hint: `<i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`,
+        hint: cleanHintWithoutImgs
+          ? `<i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`
+          : `<i>${safeLegend}</i>`,
       });
     } else {
       onUpdateCard({
@@ -342,7 +373,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         imageVerified: false,
         imageAlternatives: imageResults.slice(0, 6),
         question: cleanQ,
-        hint: `<img src="${imgUrl.trim()}" data-anki-file="${localFile}"><br><i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`,
+        hint: cleanHintWithoutImgs
+          ? `<img src="${imgUrl.trim()}" data-anki-file="${localFile}"><br><i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`
+          : `<img src="${imgUrl.trim()}" data-anki-file="${localFile}"><br><i>${safeLegend}</i>`,
       });
     }
     setImagePickerCardId(null);
@@ -383,6 +416,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     const cleanQ = card.question.replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '').trim();
     const cleanHint = card.hint
       .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+      .replace(/^(?:\s*<br\s*\/?>\s*)+/i, '')
       .replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '')
       .trim();
     const updated: CanonicalCard = {
@@ -519,6 +553,15 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             <span>
               Podados (IDs excluídos):{' '}
               <strong className="text-amber-400">-{curationStats.prunedCount}</strong>
+              {curationStats.prunedIds && curationStats.prunedIds.length > 0 && (
+                <span className="ml-1 font-mono text-[11px] text-amber-300/90">
+                  (IDs: {curationStats.prunedIds.slice(0, 8).join(', ')}
+                  {curationStats.prunedIds.length > 8
+                    ? `, +${curationStats.prunedIds.length - 8}`
+                    : ''}
+                  )
+                </span>
+              )}
             </span>
             <span aria-hidden="true" className="text-slate-600">·</span>
             <span>
@@ -601,6 +644,16 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             </button>
           )}
 
+          {isSuggestingVisuals && onCancelSuggestVisuals && (
+            <button
+              type="button"
+              onClick={onCancelSuggestVisuals}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Cancelar IA
+            </button>
+          )}
+
           {totalCardsWithMissingMedia > 0 && (
             <>
               <button
@@ -612,10 +665,19 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                 <Search className="w-3.5 h-3.5" />
                 <span>
                   {isAutoResolvingImages
-                    ? 'Buscando no Google...'
-                    : `🔍 Auto-Buscar Imagens no Google (${totalCardsWithMissingMedia})`}
+                    ? 'Buscando Imagens...'
+                    : `🔍 Auto-Buscar Imagens (${totalCardsWithMissingMedia})`}
                 </span>
               </button>
+              {isAutoResolvingImages && onCancelAutoResolve && (
+                <button
+                  type="button"
+                  onClick={onCancelAutoResolve}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Cancelar Busca
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onRemoveAllMissingMedia}
@@ -782,6 +844,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                 card={card}
                 index={index}
                 cleanDeckKey={cleanDeckKey}
+                localMediaAssets={localMediaAssets}
                 lint={lint}
                 isEditing={editingCardId === card.id}
                 isImagePickerOpen={imagePickerCardId === card.id}

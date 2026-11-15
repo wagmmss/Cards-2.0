@@ -178,6 +178,8 @@ export interface UploadedPdfFile {
   base64Data: string;
   fileUri?: string;
   fileName?: string;
+  fileSha256?: string;
+  keyFingerprint?: string;
   textContent?: string;
   docRole?: 'diretriz' | 'resumo' | 'questoes' | 'documento';
   extractedImages?: PdfExtractedImage[];
@@ -187,6 +189,7 @@ export interface DeckCurationStats {
   originalCount: number;
   finalCount: number;
   prunedCount: number;
+  prunedIds?: number[];
   addedCount: number;
   convertedCount: number;
   preservedIdsCount: number;

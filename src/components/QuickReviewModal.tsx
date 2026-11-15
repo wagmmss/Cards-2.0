@@ -13,6 +13,7 @@ import { CanonicalCard, MedicalImageResult } from '../types/deck';
 import {
   applyResolvedWebImageToCard,
   resolveLocalMediaFilename,
+  sanitizeMedicalHtml,
   stripHtml,
 } from '../utils/wozniakLinter';
 
@@ -21,26 +22,8 @@ interface QuickReviewModalProps {
   onClose: () => void;
   cards: CanonicalCard[];
   deckKey: string;
+  localMediaAssets?: Record<string, string>;
   onUpdateCard: (updated: CanonicalCard) => void;
-}
-
-function formatClozeFront(questionHtml: string): string {
-  return questionHtml.replace(
-    /\{\{c\d+::([\s\S]*?)(?:::([\s\S]*?))?\}\}/gi,
-    (_m, _target: string, hintText?: string) => {
-      const label = hintText ? `[...${hintText}...]` : '[...]';
-      return `<span class="px-1.5 py-0.5 rounded bg-sky-950/90 border border-sky-500/60 text-sky-300 font-semibold">${label}</span>`;
-    }
-  );
-}
-
-function formatClozeBack(questionHtml: string): string {
-  return questionHtml.replace(
-    /\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/gi,
-    (_m, target: string) => {
-      return `<span class="px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/70 text-emerald-300 font-bold">${target}</span>`;
-    }
-  );
 }
 
 export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
@@ -48,6 +31,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   onClose,
   cards,
   deckKey,
+  localMediaAssets,
   onUpdateCard,
 }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -116,6 +100,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           query: q,
           topic: currentCard.topic,
           question: stripHtml(currentCard.question),
+          answer: stripHtml(currentCard.answer),
           hint: stripHtml(currentCard.hint),
           preferGoogleGrounding: true,
         }),
@@ -175,15 +160,28 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
     }
   };
 
-  const frontHtml =
-    currentCard.type === 'cloze'
-      ? formatClozeFront(currentCard.question)
-      : currentCard.question;
+  const frontHtml = sanitizeMedicalHtml(currentCard.question, {
+    highlightCloze: currentCard.type === 'cloze',
+    clozeMode: 'front',
+    localMediaAssets,
+    stripUnresolvedPlaceholderImgs: false,
+  });
 
-  const backQuestionHtml =
-    currentCard.type === 'cloze'
-      ? formatClozeBack(currentCard.question)
-      : currentCard.question;
+  const backQuestionHtml = sanitizeMedicalHtml(currentCard.question, {
+    highlightCloze: currentCard.type === 'cloze',
+    clozeMode: 'back',
+    localMediaAssets,
+    stripUnresolvedPlaceholderImgs: false,
+  });
+
+  const answerHtml = sanitizeMedicalHtml(currentCard.answer || '', {
+    stripImgs: true,
+  });
+
+  const hintHtml = sanitizeMedicalHtml(currentCard.hint || '', {
+    localMediaAssets,
+    stripUnresolvedPlaceholderImgs: false,
+  });
 
   return (
     <div
@@ -301,15 +299,18 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
               {isBackShown ? (
                 <div className="pt-4 border-t border-slate-800 space-y-3">
                   {currentCard.type === 'basic' && (
-                    <div className="p-3.5 rounded-lg bg-emerald-950/30 border border-emerald-800/60 text-sm font-semibold text-emerald-300">
-                      {currentCard.answer}
-                    </div>
+                    <div
+                      className="p-3.5 rounded-lg bg-emerald-950/30 border border-emerald-800/60 text-sm font-semibold text-emerald-300"
+                      dangerouslySetInnerHTML={{
+                        __html: answerHtml,
+                      }}
+                    />
                   )}
 
                   <div
-                    className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 text-xs text-slate-300 leading-relaxed [&_b]:text-slate-100 [&_i]:text-slate-400 [&_img]:mt-2 [&_img]:max-h-56 [&_img]:rounded-lg"
+                    className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 text-xs text-slate-300 leading-relaxed [&_b]:text-slate-100 [&_strong]:text-slate-100 [&_i]:text-slate-400 [&_img]:mt-2 [&_img]:max-h-56 [&_img]:rounded-lg"
                     dangerouslySetInnerHTML={{
-                      __html: currentCard.hint,
+                      __html: hintHtml,
                     }}
                   />
                 </div>
@@ -377,6 +378,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                       src={alt.thumbUrl}
                       alt={alt.title}
                       loading="lazy"
+                      referrerPolicy="no-referrer"
                       className="max-h-full max-w-full object-contain group-hover:scale-105 transition-transform"
                     />
                   </button>

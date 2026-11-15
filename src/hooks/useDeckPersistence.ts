@@ -42,7 +42,12 @@ export function loadSavedDeckSnapshot(): Partial<SavedDeckSnapshot> | null {
     if (!saved) return null;
     const parsed = JSON.parse(saved);
     if (parsed && Array.isArray(parsed.cards) && parsed.cards.length > 0) {
-      return parsed as Partial<SavedDeckSnapshot>;
+      const cleanedCards = (parsed.cards as CanonicalCard[]).map((card) => {
+        if (!card || !card.isResolvingImage) return card;
+        const { isResolvingImage: _omitResolving, ...rest } = card;
+        return rest;
+      });
+      return { ...(parsed as Partial<SavedDeckSnapshot>), cards: cleanedCards };
     }
   } catch {
     // Ignore invalid saved state
@@ -52,17 +57,18 @@ export function loadSavedDeckSnapshot(): Partial<SavedDeckSnapshot> | null {
 
 function buildSafeStorageSnapshot(snapshot: SavedDeckSnapshot): SavedDeckSnapshot {
   const safeCards = snapshot.cards.map((card) => {
-    if (!card.imageAlternatives || card.imageAlternatives.length === 0) {
-      return card;
+    const { isResolvingImage: _omitResolving, ...baseCard } = card;
+    if (!baseCard.imageAlternatives || baseCard.imageAlternatives.length === 0) {
+      return baseCard;
     }
-    const nonInlineAlts = card.imageAlternatives.filter(
+    const nonInlineAlts = baseCard.imageAlternatives.filter(
       (alt) => !alt.thumbUrl.startsWith('data:') && !alt.fullUrl.startsWith('data:')
     );
-    if (nonInlineAlts.length === card.imageAlternatives.length) {
-      return card;
+    if (nonInlineAlts.length === baseCard.imageAlternatives.length) {
+      return baseCard;
     }
     return {
-      ...card,
+      ...baseCard,
       imageAlternatives: nonInlineAlts.length > 0 ? nonInlineAlts : undefined,
     };
   });

@@ -42,10 +42,6 @@ i, em { font-style: italic; color: #334155; }
   border-radius: 8px; border-left: 4px solid #0284c7;
   font-size: 16px; color: #334155; line-height: 1.52;
 }
-.extra-box i {
-  display: block; margin-top: 6px; margin-bottom: 6px;
-  font-size: 14px; color: #64748b; text-align: center;
-}
 hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
 img {
   max-width: 100%; max-height: 62vh; height: auto; border-radius: 8px;
@@ -75,7 +71,6 @@ table.med-table tbody tr:nth-child(even) td { background-color: #f8fafc; }
 .nightMode i, .nightMode em, .night_mode i, .night_mode em { color: #cbd5e1 !important; }
 .nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
 .nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
-.nightMode .extra-box i, .night_mode .extra-box i { color: #94a3b8 !important; }
 .nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
 .nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46 !important; }
 .nightMode img + br + i, .night_mode img + br + i, .nightMode img + i, .night_mode img + i, .nightMode .extra-box > i:first-child, .night_mode .extra-box > i:first-child { color: #cbd5e1 !important; }
@@ -92,6 +87,8 @@ table.med-table tbody tr:nth-child(even) td { background-color: #f8fafc; }
   .extra-box { padding: 10px 14px; font-size: 15px; }
   img { max-height: 55vh; margin-top: 10px; }
   img:first-child { margin-top: 0; }
+  table.med-table { font-size: 13.5px; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table.med-table th, table.med-table td { padding: 7px 9px; }
 }`;
 
 function extractSanitizedGuidEntries(guidRegistry: GuidRegistryData): Record<string, string> {
@@ -125,6 +122,7 @@ export function useDeckExporter(params: {
   extractedMeta: ExtractedDeckMetadata;
   clinicalMap: ClinicalMapResponse | null;
   guidRegistry: GuidRegistryData;
+  localMediaAssets?: Record<string, string>;
   mergeGuidEntries: (entries: Record<string, string>) => void;
   showStatus: (message: string, tone?: 'info' | 'success' | 'error') => void;
 }) {
@@ -134,6 +132,7 @@ export function useDeckExporter(params: {
     extractedMeta,
     clinicalMap,
     guidRegistry,
+    localMediaAssets = {},
     mergeGuidEntries,
     showStatus,
   } = params;
@@ -142,17 +141,64 @@ export function useDeckExporter(params: {
   const [isExportingApkg, setIsExportingApkg] = useState(false);
   const [isSyncingAnkiConnect, setIsSyncingAnkiConnect] = useState(false);
 
+  const confirmExportIfVisualAuditFails = useCallback(
+    (cleanDeckKey: string, exportLabel: string): boolean => {
+      const deckAudit = lintDeck(cards, Object.keys(localMediaAssets), cleanDeckKey);
+      if (deckAudit.canExport) return true;
+
+      const reasons: string[] = [];
+      if (deckAudit.duplicateImages.length > 0) {
+        reasons.push(
+          `• ${deckAudit.duplicateImages.length} imagem(ns) repetida(s) entre cards`
+        );
+      }
+      const missingLegendErrs = deckAudit.errors.filter(
+        (e) => e.code === 'IMAGE_MISSING_LEGEND'
+      );
+      if (missingLegendErrs.length > 0) {
+        const ids = missingLegendErrs.slice(0, 6).map((e) => `#${e.cardId}`).join(', ');
+        reasons.push(
+          `• ${missingLegendErrs.length} imagem(ns) sem legenda descritiva <i> (mín. 3 palavras) [${ids}]`
+        );
+      }
+      const modalityErrs = deckAudit.errors.filter((e) => e.code === 'MODALITY_CONFLICT');
+      if (modalityErrs.length > 0) {
+        const ids = modalityErrs.slice(0, 6).map((e) => `#${e.cardId}`).join(', ');
+        reasons.push(
+          `• ${modalityErrs.length} conflito(s) de modalidade exame×legenda [${ids}]`
+        );
+      }
+
+      if (typeof window === 'undefined' || typeof window.confirm !== 'function') {
+        return true;
+      }
+
+      const proceed = window.confirm(
+        `A auditoria visual detectou pendências antes de exportar ${exportLabel}:\n\n${reasons.join(
+          '\n'
+        )}\n\nDeseja exportar mesmo assim? (Clique em "Cancelar" para revisar os cards antes.)`
+      );
+      if (!proceed) {
+        showStatus(`Exportação ${exportLabel} cancelada para revisão da auditoria visual.`, 'info');
+      }
+      return proceed;
+    },
+    [cards, localMediaAssets, showStatus]
+  );
+
   const handleDownloadJson = useCallback(() => {
     if (cards.length === 0) return;
     const cleanDeckKey = sanitizeDeckKey(deckKey);
+    if (!confirmExportIfVisualAuditFails(cleanDeckKey, 'JSON')) return;
     const jsonString = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
     const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
     triggerBlobDownload(blob, `${cleanDeckKey}_notes.json`);
-  }, [cards, deckKey, extractedMeta]);
+  }, [cards, confirmExportIfVisualAuditFails, deckKey, extractedMeta]);
 
   const handleDownloadOfflineBundle = useCallback(async () => {
     if (cards.length === 0) return;
     const cleanDeckKey = sanitizeDeckKey(deckKey);
+    if (!confirmExportIfVisualAuditFails(cleanDeckKey, 'ZIP Offline')) return;
     const notesJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
     const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
     const flatGuidEntries = extractSanitizedGuidEntries(guidRegistry);
@@ -166,7 +212,7 @@ export function useDeckExporter(params: {
           deckKey: cleanDeckKey,
           notesJson,
           mediaManifest,
-          mediaAssets: {},
+          mediaAssets: localMediaAssets,
           guidRegistry: flatGuidEntries,
         }),
         timeoutMs: 90_000,
@@ -196,11 +242,12 @@ export function useDeckExporter(params: {
     } finally {
       setIsExportingBundle(false);
     }
-  }, [cards, deckKey, extractedMeta, guidRegistry, handleDownloadJson, showStatus]);
+  }, [cards, confirmExportIfVisualAuditFails, deckKey, extractedMeta, guidRegistry, handleDownloadJson, localMediaAssets, showStatus]);
 
   const handleExportApkg = useCallback(async () => {
     if (cards.length === 0) return;
     const cleanDeckKey = sanitizeDeckKey(deckKey);
+    if (!confirmExportIfVisualAuditFails(cleanDeckKey, '.apkg')) return;
     const deterministicDeckId = computeDeterministicDeckId(cleanDeckKey);
     const canonicalJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
     const canonicalNotes: Array<{ id: number }> = JSON.parse(canonicalJson);
@@ -209,7 +256,7 @@ export function useDeckExporter(params: {
       ? `Internato::${clinicalMap.themeTitle}`
       : `Internato::${cleanDeckKey}`;
 
-    const deckAudit = lintDeck(cards, undefined, cleanDeckKey);
+    const deckAudit = lintDeck(cards, Object.keys(localMediaAssets), cleanDeckKey);
     const auditNotes: string[] = [];
     if (deckAudit.duplicateImages.length > 0) {
       auditNotes.push(`${deckAudit.duplicateImages.length} imagem(ns) repetida(s)`);
@@ -251,7 +298,7 @@ export function useDeckExporter(params: {
           deckId: deterministicDeckId,
           notes: canonicalNotes,
           mediaManifest,
-          mediaAssets: {},
+          mediaAssets: localMediaAssets,
           guidRegistry: flatGuidEntries,
         }),
         timeoutMs: 90_000,
@@ -309,7 +356,7 @@ export function useDeckExporter(params: {
     } finally {
       setIsExportingApkg(false);
     }
-  }, [cards, clinicalMap, deckKey, extractedMeta, guidRegistry, mergeGuidEntries, showStatus]);
+  }, [cards, clinicalMap, deckKey, extractedMeta, guidRegistry, localMediaAssets, mergeGuidEntries, showStatus]);
 
   // Ponte Opcional para AnkiConnect Local com sincronização de modelos CSS, mídias e campos (['Question', 'Topic', 'Answer', 'Hint'])
   const handleSyncAnkiConnect = useCallback(async () => {
@@ -319,6 +366,16 @@ export function useDeckExporter(params: {
     const deckTitle = clinicalMap?.themeTitle
       ? `Internato::${clinicalMap.themeTitle}`
       : `Internato::${cleanDeckKey}`;
+
+    const normalizedLocalAssets = new Map<string, string>();
+    for (const [k, v] of Object.entries(localMediaAssets)) {
+      if (k && typeof v === 'string' && v.trim()) {
+        const lower = k.trim().toLowerCase();
+        normalizedLocalAssets.set(lower, v.trim());
+        const base = lower.split(/[\\/]/).pop();
+        if (base) normalizedLocalAssets.set(base, v.trim());
+      }
+    }
 
     const invokeAnkiConnect = async <R,>(
       action: string,
@@ -377,20 +434,24 @@ export function useDeckExporter(params: {
       const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
       for (const item of mediaManifest) {
         const src = (item.sourceUrl || '').trim();
-        if (!item.filename || !src) continue;
-        if (/^data:/i.test(src)) {
-          const commaIdx = src.indexOf(',');
-          const b64 = commaIdx !== -1 ? src.slice(commaIdx + 1) : '';
+        const localAssetUri =
+          normalizedLocalAssets.get(item.filename.toLowerCase()) ||
+          normalizedLocalAssets.get(src.toLowerCase());
+        const effectiveSrc = localAssetUri || src;
+        if (!item.filename || !effectiveSrc) continue;
+        if (/^data:/i.test(effectiveSrc)) {
+          const commaIdx = effectiveSrc.indexOf(',');
+          const b64 = commaIdx !== -1 ? effectiveSrc.slice(commaIdx + 1) : '';
           if (b64) {
             await invokeAnkiConnect('storeMediaFile', {
               filename: item.filename,
               data: b64,
             }).catch(() => undefined);
           }
-        } else if (/^https?:\/\//i.test(src)) {
+        } else if (/^https?:\/\//i.test(effectiveSrc)) {
           await invokeAnkiConnect('storeMediaFile', {
             filename: item.filename,
-            url: src,
+            url: effectiveSrc,
           }).catch(() => undefined);
         }
       }
@@ -454,7 +515,7 @@ export function useDeckExporter(params: {
     } finally {
       setIsSyncingAnkiConnect(false);
     }
-  }, [cards, clinicalMap, deckKey, extractedMeta, showStatus]);
+  }, [cards, clinicalMap, deckKey, extractedMeta, localMediaAssets, showStatus]);
 
   return {
     isExportingBundle,

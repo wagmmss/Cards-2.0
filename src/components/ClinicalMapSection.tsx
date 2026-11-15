@@ -19,6 +19,8 @@ interface ClinicalMapSectionProps {
     concept: string,
     targetCardType: CardType
   ) => void;
+  onDeepenGuidelines?: (focusQuery?: string) => void;
+  isDeepeningGuidelines?: boolean;
   onRecreateCanonicalDeck: () => void;
   isGeneratingDeck: boolean;
 }
@@ -28,6 +30,8 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   onToggleMapItem,
   onToggleItemCardType,
   onAddCustomMapItem,
+  onDeepenGuidelines,
+  isDeepeningGuidelines = false,
   onRecreateCanonicalDeck,
   isGeneratingDeck,
 }) => {
@@ -37,6 +41,7 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   const [newConcept, setNewConcept] = useState('');
   const [newCardType, setNewCardType] = useState<CardType>('basic');
   const [showAddForm, setShowAddForm] = useState(false);
+  const [deepenFocusQuery, setDeepenFocusQuery] = useState('');
 
   if (!clinicalMap || clinicalMap.items.length === 0) {
     return (
@@ -111,22 +116,51 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
         </button>
       </div>
 
-      {/* Guideline Updates (Compact) */}
+      {/* Guideline Updates & Interactive Deepening */}
       {(clinicalMap.guidelineUpdates.length > 0 ||
-        clinicalMap.groundingSources.length > 0) && (
-        <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2 text-xs">
-          <div className="font-semibold text-sky-400">
-            Síntese de Diretrizes (Google Search Grounding)
+        clinicalMap.groundingSources.length > 0 ||
+        Boolean(onDeepenGuidelines)) && (
+        <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2.5 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold text-sky-400">
+              Síntese de Diretrizes (Google Search Grounding)
+            </div>
+            {onDeepenGuidelines && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  onDeepenGuidelines(deepenFocusQuery);
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={deepenFocusQuery}
+                  onChange={(e) => setDeepenFocusQuery(e.target.value)}
+                  placeholder="Foco opcional (ex.: FEBRASGO 2024, dose...)"
+                  className="px-2.5 py-1 text-[11px] bg-slate-900 border border-slate-700 rounded text-slate-100 placeholder:text-slate-500 w-56"
+                />
+                <button
+                  type="submit"
+                  disabled={isDeepeningGuidelines}
+                  className="px-2.5 py-1 text-[11px] font-semibold text-sky-300 bg-sky-950/70 hover:bg-sky-900/80 border border-sky-700/60 disabled:opacity-50 rounded whitespace-nowrap cursor-pointer"
+                >
+                  {isDeepeningGuidelines ? 'Buscando diretrizes...' : '+ Aprofundar Web'}
+                </button>
+              </form>
+            )}
           </div>
-          <ul className="space-y-1 text-slate-300">
-            {clinicalMap.guidelineUpdates.map((upd, idx) => (
-              <li key={idx} className="leading-relaxed">
-                • {upd}
-              </li>
-            ))}
-          </ul>
+          {clinicalMap.guidelineUpdates.length > 0 && (
+            <ul className="space-y-1 text-slate-300">
+              {clinicalMap.guidelineUpdates.map((upd, idx) => (
+                <li key={idx} className="leading-relaxed">
+                  • {upd}
+                </li>
+              ))}
+            </ul>
+          )}
           {clinicalMap.groundingSources.length > 0 && (
-            <div className="pt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+            <div className="pt-1 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
               {clinicalMap.groundingSources.map((src, i) => (
                 <a
                   key={`${src.uri}-${i}`}

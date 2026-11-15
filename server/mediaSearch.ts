@@ -52,13 +52,19 @@ export const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
   [/\bbloqueio\s+atrioventricular|bav\s+total|bavt|mobitz\b/gi, 'third degree AV block complete heart block ECG'],
   [/\bpericardite\b/gi, 'acute pericarditis diffuse ST elevation ECG'],
   [/\bhipercalemia\b/gi, 'hyperkalemia peaked T waves ECG'],
-  [/\bcardiotocografia|dip\s+ii|desacelera[cç][aã]o|sofrimento\s+fetal|taquissistolia|uterot[oô]nic/gi, 'cardiotocography fetal heart rate late deceleration CTG'],
-  [/\bindu[cç][aã]o\s+do\s+parto|misoprostol|ocitocina\b/gi, 'cardiotocography uterine tachysystole labor induction'],
+  [/\bcardiotocografia|dip\s+ii|desacelera[cç][aã]o|sofrimento\s+fetal|taquissistolia|hiperestimula[cç][aã]o\s+uterina\b/gi, 'cardiotocography fetal heart rate late deceleration CTG'],
+  [/\b[íi]ndice\s+de\s+bishop|\bescore\s+de\s+bishop|\bamadurecimento\s+cervical|\bcolo\s+(?:favor[áa]vel|desfavor[áa]vel)\b/gi, 'Bishop score cervical ripening obstetrics'],
+  [/\bindu[cç][aã]o\s+do\s+parto|misoprostol|ocitocina\b/gi, 'labor induction cervical ripening obstetrics'],
   [/\bpr[eé][-\s]?ecl[aâ]mpsia|ecl[aâ]mpsia|s[ií]ndrome\s+hellp\b/gi, 'HELLP syndrome schistocytes peripheral blood smear'],
   [/\bhemorragia\s+p[oó]s[-\s]?parto|bal[aã]o\s+de\s+bakri|atonia\s+uterina\b/gi, 'postpartum hemorrhage Bakri balloon tamponade'],
   [/\bgravidez\s+ect[oó]pica\b/gi, 'ectopic pregnancy transvaginal ultrasound'],
   [/\bdescolamento\s+prematuro\s+de\s+placenta|placenta\s+pr[eé]via\b/gi, 'placental abruption placenta previa ultrasound'],
-  [/\bpartograma\b/gi, 'partogram labor progression WHO curve'],
+  [/\bpartograma|\bparada\s+secund[aá]ria|\bdist[oó]cia\s+funcional\b/gi, 'partogram labor dystocia cervical dilation curve'],
+  [/\bmanobras?\s+de\s+leopold\b/gi, "Leopold's maneuvers abdominal palpation obstetrics"],
+  [/\bdist[oó]cia\s+de\s+ombro|\bmcroberts|\brubin|\bwoods|\bjacquemier|\bsinal\s+da\s+tartaruga\b/gi, 'shoulder dystocia McRoberts maneuver obstetrics'],
+  [/\bf[oó]rcipe|\bsimpson|\bkielland|\bpiper|\bv[aá]cuo[-\s]?extrator\b/gi, 'obstetric forceps operative vaginal delivery'],
+  [/\bplanos?\s+de\s+de\s?lee|\bpelvimetria|\bbacia\s+obst[eé]trica|\bestreito\s+(?:superior|m[eé]dio|inferior)\b/gi, 'fetal station De Lee planes pelvimetry pelvis'],
+  [/\bepisiotomia|\blacera[cç][aã]o\s+perineal\b/gi, 'episiotomy perineal laceration obstetrics'],
   [/\bpneumonia\b/gi, 'lobar pneumonia consolidation chest x-ray'],
   [/\btuberculose\b/gi, 'pulmonary tuberculosis cavitation chest x-ray'],
   [/\bderrame\s+pleural\b/gi, 'pleural effusion chest x-ray meniscus sign'],
@@ -84,7 +90,7 @@ export const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
 ];
 
 const BLOCKED_IMAGE_URL_PATTERN =
-  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid)/i;
+  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800)/i;
 
 const WIKIMEDIA_USER_AGENT =
   'Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)';
@@ -116,8 +122,44 @@ const MODALITY_KEYWORDS: Array<{
   },
   {
     name: 'ctg',
-    ptEnTrigger: /\b(ctg|cardiotocografia|desaceleracao|dip|taquissistolia|fetal)\b/i,
+    ptEnTrigger:
+      /\b(ctg|cardiotocografia|desaceleracao|desaceleracoes|dip\s*[i123]?|taquissistolia|variabilidade\s+(?:ausente|minima|moderada)|sofrimento\s+fetal|monitorizacao\s+fetal|frequencia\s+cardiaca\s+fetal|linha\s+de\s+base\s+fetal)\b/i,
     candidateMatch: /\b(ctg|cardiotocography|fetal|deceleration|tachysystole|contraction|trace)\b/i,
+  },
+  {
+    name: 'partograma',
+    ptEnTrigger: /\b(partograma|dilatacao\s+cervical|linha\s+de\s+alerta|linha\s+de\s+acao|curva\s+de\s+friedman|parada\s+secundaria)\b/i,
+    candidateMatch: /\b(partogra\w*|cervical\s+dilation|friedman|alert\s+line|action\s+line|labor\s+curve|who)\b/i,
+  },
+  {
+    name: 'shoulder_dystocia',
+    ptEnTrigger: /\b(distocia\s+de\s+ombro|mcroberts|rubin|woods|jacquemier|zavanelli|sinal\s+da\s+tartaruga)\b/i,
+    candidateMatch: /\b(shoulder\s+dystocia|mcroberts|rubin|woods|suprapubic|clavicle\s+fracture|dystocia)\b/i,
+  },
+  {
+    name: 'leopold_maneuver',
+    ptEnTrigger: /\b(manobras?\s+de\s+leopold|leopold|handgriff)\b/i,
+    candidateMatch: /\b(leopold|handgriff|abdominal\s+palpation)\b/i,
+  },
+  {
+    name: 'operative_delivery',
+    ptEnTrigger: /\b(forcipe|forceps|simpson|kielland|piper|vacuo[-\s]?extrator|parto\s+instrumental)\b/i,
+    candidateMatch: /\b(forceps|vacuum\s+extractor|ventouse|operative\s+vaginal\s+delivery)\b/i,
+  },
+  {
+    name: 'episiotomy_perineal',
+    ptEnTrigger: /\b(episiotomia|episiotomy|laceracao\s+perineal)\b/i,
+    candidateMatch: /\b(episiotomy|perineal\s+laceration|mediolateral)\b/i,
+  },
+  {
+    name: 'breech_presentation',
+    ptEnTrigger: /\b(apresentacao\s+pelvica|parto\s+pelvico|breech|brach|mauriceau)\b/i,
+    candidateMatch: /\b(breech|brach|mauriceau)\b/i,
+  },
+  {
+    name: 'pelvimetry',
+    ptEnTrigger: /\b(pelvimetria|bacia\s+obstetrica|sinclitismo|assinclitismo|estreito\s+(?:superior|medio|inferior)|planos?\s+de\s+de\s?lee)\b/i,
+    candidateMatch: /\b(pelvimetry|pelvic\s+inlet|conjugate|synclitism|asynclitism|fetal\s+station|de\s+lee)\b/i,
   },
   {
     name: 'derm',
@@ -135,6 +177,14 @@ const MODALITY_KEYWORDS: Array<{
     candidateMatch: /\b(smear|microscopy|schistocyte|sickle|histology|hematology|auer|cell|blood)\b/i,
   },
 ];
+
+export function isSvgImageUrl(url: string, mime = ''): boolean {
+  const cleanPath = (url || '').split('?')[0].split('#')[0].toLowerCase();
+  if (/\.(?:png|jpe?g|webp|gif|avif)$/.test(cleanPath)) {
+    return false;
+  }
+  return mime.toLowerCase().includes('svg') || /\.svg(?:\/|$)/.test(cleanPath);
+}
 
 export function isSpamOrLogoImageUrl(url: string, title = ''): boolean {
   const combined = `${url} ${title}`;
@@ -256,19 +306,27 @@ export function scoreImageRelevance(
   const ptTokens = new Set(
     tokenizeNormalized(`${context.query} ${context.topic || ''}`)
   );
-  const candTokens = new Set(tokenizeNormalized(candidateText));
+  const candTokenList = tokenizeNormalized(candidateText);
+  const candTokens = new Set(candTokenList);
+  const hasTokenHit = (tok: string): boolean => {
+    if (candTokens.has(tok)) return true;
+    if (tok.length < 6) return false;
+    return candTokenList.some(
+      (ctok) => ctok.length >= 6 && (ctok.startsWith(tok) || tok.startsWith(ctok))
+    );
+  };
 
   let answerHits = 0;
   for (const tok of answerTokens) {
-    if (candTokens.has(tok)) answerHits++;
+    if (hasTokenHit(tok)) answerHits++;
   }
   let enHits = 0;
   for (const tok of enTokens) {
-    if (candTokens.has(tok)) enHits++;
+    if (hasTokenHit(tok)) enHits++;
   }
   let ptHits = 0;
   for (const tok of ptTokens) {
-    if (candTokens.has(tok)) ptHits++;
+    if (hasTokenHit(tok)) ptHits++;
   }
   score += Math.min(44, answerHits * 11 + enHits * 9 + ptHits * 6);
   if (!expectedModalityMatched && answerHits + enHits + ptHits === 0) {
@@ -285,14 +343,42 @@ export function scoreImageRelevance(
   else if (/wikimedia/.test(srcLower)) score += 10;
   else if (/google/.test(srcLower)) score += 8;
 
+  // 3b) Critical contradiction penalties (laterality & ST polarity mismatches)
+  const qLower = queryContextText.toLowerCase();
+  const cLower = candidateText.toLowerCase();
+  const qRight = /\b(direita|direito|right|brd|rbbb|dextro)\b/.test(qLower);
+  const qLeft = /\b(esquerda|esquerdo|left|bre|lbbb|sinistro)\b/.test(qLower);
+  const cRight = /\b(direita|direito|right|brd|rbbb|dextro)\b/.test(cLower);
+  const cLeft = /\b(esquerda|esquerdo|left|bre|lbbb|sinistro)\b/.test(cLower);
+  if ((qRight && !qLeft && cLeft && !cRight) || (qLeft && !qRight && cRight && !cLeft)) {
+    score -= 75;
+  }
+
+  const qSupra = /\b(supra|supradesnivelamento|st[\s_-]?elevation|stemi|iamcsst)\b/.test(qLower);
+  const qInfra = /\b(infra|infradesnivelamento|st[\s_-]?depression|iamssst|subendocardic)\b/.test(qLower);
+  const cSupra = /\b(supra|supradesnivelamento|st[\s_-]?elevation|stemi)\b/.test(cLower);
+  const cInfra = /\b(infra|infradesnivelamento|st[\s_-]?depression|nstemi)\b/.test(cLower);
+  if ((qSupra && !qInfra && cInfra && !cSupra) || (qInfra && !qSupra && cSupra && !cInfra)) {
+    score -= 75;
+  }
+
   // 4) Raster vs SVG & non-clinical artifacts
-  if (candidate.isSvg || /\.svg(?:\?|$)/i.test(candidate.thumbUrl)) {
+  const expectsSchematicOrDiagram =
+    /\b(?:manobra|leopold|mcroberts|rubin|woods|jacquemier|partograma|partogram|pelve|pelvimetria|de\s?lee|plano\s+de\s+de\s?lee|mecanismo\s+de\s+parto|forcipe|fluxograma|algoritmo|esquema|curva)\b/i.test(
+      queryContextText
+    );
+  const isThumbRawSvg = Boolean(candidate.isSvg) || isSvgImageUrl(candidate.thumbUrl);
+  const isSourceSvgOnly = !isThumbRawSvg && isSvgImageUrl(candidate.fullUrl);
+  if (isThumbRawSvg || (!expectsSchematicOrDiagram && isSourceSvgOnly)) {
     score -= 22;
   }
-  if (/\b(diagram|schematic|flowchart|cartoon|illustration|map|chart|graph)\b/i.test(candidateText)) {
+  if (
+    !expectsSchematicOrDiagram &&
+    /\b(diagram|schematic|flowchart|cartoon|illustration|map|chart|graph)\b/i.test(candidateText)
+  ) {
     score -= 14;
   }
-  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape|biography|scientist|inventor|nobel|pill|tablet|capsule|bottle|packaging|stethoscope|syringe|stock[\s_-]?photo)\b/i.test(candidateText)) {
+  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape|biography|scientist|inventor|nobel|pill|tablet|capsule|bottle|packaging|stethoscope|syringe|stock[\s_-]?photo|consecration|archbishop|cathedral|diocese|clergy|ordained|catholic|anglican)\b/i.test(candidateText)) {
     score -= 80;
   }
   if (
@@ -414,14 +500,49 @@ Exemplo de saída: ["right bundle branch block ECG", "RBBB V1 ECG LITFL"]`,
   return fallbackQueries;
 }
 
+function buildSuggestedMediaFilename(
+  rawBaseName: string,
+  targetUrl: string,
+  mime = '',
+  fallbackSlug = 'med_image'
+): string {
+  const urlPath = (targetUrl || '').split('?')[0].split('#')[0];
+  const extMatch = urlPath.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i);
+  const mimeLower = (mime || '').toLowerCase();
+  const resolvedExt = extMatch
+    ? `.${extMatch[1].toLowerCase() === 'jpeg' ? 'jpg' : extMatch[1].toLowerCase()}`
+    : mimeLower.includes('png')
+      ? '.png'
+      : mimeLower.includes('webp')
+        ? '.webp'
+        : mimeLower.includes('gif')
+          ? '.gif'
+          : mimeLower.includes('svg')
+            ? '.svg'
+            : '.jpg';
+  const cleanStem = (rawBaseName || fallbackSlug)
+    .toLowerCase()
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 50);
+  return `${cleanStem || fallbackSlug}${resolvedExt}`;
+}
+
 export async function searchWikipediaMedicalImages(
   enQueries: string[],
   ptQuery: string,
   signal?: AbortSignal
 ): Promise<MedicalImageCandidate[]> {
-  const primaryEn = (enQueries[0] || '').split(/\s+/).slice(0, 4).join(' ');
+  const enCandidates = Array.from(
+    new Set(
+      enQueries
+        .map((q) => (q || '').split(/\s+/).slice(0, 4).join(' ').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 2);
   const searches: Array<{ lang: 'en' | 'pt'; query: string }> = [
-    ...(primaryEn ? [{ lang: 'en' as const, query: primaryEn }] : []),
+    ...enCandidates.map((query) => ({ lang: 'en' as const, query })),
     ...(ptQuery ? [{ lang: 'pt' as const, query: ptQuery }] : []),
   ];
 
@@ -503,21 +624,21 @@ export async function searchWikipediaMedicalImages(
           const canonicalKey = normalizeImageCanonicalKey(leadUrl, page.title || '');
           if (!seenKeys.has(canonicalKey)) {
             seenKeys.add(canonicalKey);
-            const safeSlug = (page.title || query)
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, '_')
-              .replace(/^_|_$/g, '')
-              .slice(0, 44);
             results.push({
               id: `wp-${lang}-lead-${page.pageid || results.length}`,
               title: (page.title || query).slice(0, 85),
               thumbUrl: leadUrl,
               fullUrl: page.original?.source || leadUrl,
               description: `Imagem principal do artigo médico "${page.title || query}" (${lang}.wikipedia.org).`,
-              suggestedFilename: `${safeSlug || 'wikipedia_med'}.jpg`,
+              suggestedFilename: buildSuggestedMediaFilename(
+                page.title || query,
+                leadUrl,
+                '',
+                'wikipedia_med'
+              ),
               defaultLegend: `Imagem clínica referente a ${page.title || query}.`,
               source: `Wikipedia Medical (${lang.toUpperCase()})`,
-              isSvg: leadUrl.toLowerCase().endsWith('.svg'),
+              isSvg: isSvgImageUrl(leadUrl),
             });
           }
         }
@@ -592,10 +713,6 @@ export async function searchWikipediaMedicalImages(
           /^(?:File|Ficheiro|Arquivo):/i,
           ''
         );
-        const cleanName = rawTitle
-          .toLowerCase()
-          .replace(/[^a-z0-9.]+/g, '_')
-          .replace(/^_|_$/g, '');
         const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
         const cleanDesc = descHtml
           .replace(/<[^>]*>/g, ' ')
@@ -609,14 +726,17 @@ export async function searchWikipediaMedicalImages(
           thumbUrl: targetUrl,
           fullUrl: info.url,
           description: cleanDesc || `Imagem médica enciclopédica (${lang}.wikipedia.org).`,
-          suggestedFilename: /\.(jpg|jpeg|png|webp|gif)$/i.test(cleanName)
-            ? cleanName.slice(0, 60)
-            : `${cleanName.slice(0, 52)}.jpg`,
+          suggestedFilename: buildSuggestedMediaFilename(
+            rawTitle,
+            targetUrl,
+            mime,
+            `wikipedia_${page.pageid || idx}`
+          ),
           defaultLegend: cleanDesc
             ? `Imagem clínica demonstrando ${cleanDesc.slice(0, 130)}.`
             : `Imagem clínica real referente a ${query}.`,
           source: `Wikipedia Medical (${lang.toUpperCase()})`,
-          isSvg: mime.includes('svg') || targetUrl.toLowerCase().endsWith('.svg'),
+          isSvg: isSvgImageUrl(targetUrl, mime),
         });
       }
     } catch {
@@ -634,12 +754,20 @@ export async function searchWikimediaCommonsMedical(
   const results: MedicalImageCandidate[] = [];
   const seenKeys = new Set<string>();
   const baseWords = (enQueries[0] || '').split(/\s+/).filter(Boolean);
+  const firstClean = (baseWords[0] || '').replace(/[^a-z0-9-]/gi, '').toLowerCase();
+  const singleSpecificFallback =
+    /^(?:partogra\w*|cardiotocograph\w*|episiotomy|mcroberts|pelvimetry|electrocardiogra\w*|pneumothorax|pneumoperitoneum|intussusception|retinopathy|papilledema|cholecystitis|appendicitis|diverticulitis|pancreatitis)$/i.test(
+      firstClean
+    )
+      ? [firstClean]
+      : [];
   const candidateSearches = Array.from(
     new Set(
       [
         baseWords.slice(0, 3).join(' '),
         baseWords.slice(0, 2).join(' '),
         ...(enQueries[1] ? [enQueries[1].split(/\s+/).slice(0, 3).join(' ')] : []),
+        ...singleSpecificFallback,
       ].filter((q) => q.length >= 3)
     )
   );
@@ -707,10 +835,6 @@ export async function searchWikimediaCommonsMedical(
         if (seenKeys.has(canonicalKey)) continue;
         seenKeys.add(canonicalKey);
 
-        const cleanName = rawTitle
-          .toLowerCase()
-          .replace(/[^a-z0-9.]+/g, '_')
-          .replace(/^_|_$/g, '');
         const descHtml = info.extmetadata?.ImageDescription?.value || rawTitle;
         const cleanDesc = descHtml
           .replace(/<[^>]*>/g, ' ')
@@ -724,14 +848,17 @@ export async function searchWikimediaCommonsMedical(
           thumbUrl: targetUrl,
           fullUrl: info.url,
           description: cleanDesc || 'Imagem médica real obtida no Wikimedia Commons.',
-          suggestedFilename: /\.(jpg|jpeg|png|webp|gif)$/i.test(cleanName)
-            ? cleanName.slice(0, 60)
-            : `${cleanName.slice(0, 52)}.jpg`,
+          suggestedFilename: buildSuggestedMediaFilename(
+            rawTitle,
+            targetUrl,
+            mime,
+            `wikimedia_${p.pageid || idx}`
+          ),
           defaultLegend: cleanDesc
             ? `Exame complementar demonstrando ${cleanDesc.slice(0, 130)}.`
             : `Imagem diagnóstica demonstrando achado clínico real de ${enQuery}.`,
           source: 'Wikimedia Commons Medical',
-          isSvg: mime.includes('svg') || targetUrl.toLowerCase().endsWith('.svg'),
+          isSvg: isSvgImageUrl(targetUrl, mime),
         });
       }
     } catch {
@@ -774,7 +901,7 @@ async function validateCandidateImageUrl(
     if (!contentType.startsWith('image/')) {
       return { ok: false, contentType, byteLength: 0, isSvg: false };
     }
-    const isSvg = contentType.includes('svg');
+    const isSvg = isSvgImageUrl(url, contentType);
     const buf = Buffer.from(await resp.arrayBuffer());
     const minBytes = isSvg ? 1500 : 3000;
     if (buf.length < minBytes) {
@@ -1102,7 +1229,7 @@ export async function searchMedicalImages(
 
   const allScored = Array.from(dedupedMap.values());
   const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
-  const minThreshold = maxScore >= 18 ? 12 : 1;
+  const minThreshold = maxScore >= 24 ? 14 : 6;
 
   const ranked = allScored
     .filter((c) => (c.relevanceScore ?? 0) >= minThreshold)

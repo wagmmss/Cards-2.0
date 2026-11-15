@@ -26,11 +26,13 @@ import {
   ParsedCardImage,
 } from './CardMediaPanel';
 import { ImageSearchDrawer } from './ImageSearchDrawer';
+import { sanitizeMedicalHtml } from '../../utils/wozniakLinter';
 
 interface CardItemProps {
   card: CanonicalCard;
   index: number;
   cleanDeckKey: string;
+  localMediaAssets?: Record<string, string>;
   lint: CardLintResult;
   isEditing: boolean;
   isImagePickerOpen: boolean;
@@ -81,28 +83,11 @@ interface CardItemProps {
   onRefreshQuickGallery: (card: CanonicalCard) => void;
 }
 
-function formatInlineMedicalHtml(raw: string, highlightCloze: boolean): string {
-  let formatted = (raw || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/&lt;(\/?(?:b|strong|i|em|u|sub|sup))&gt;/gi, '<$1>')
-    .replace(/&lt;br\s*\/?&gt;/gi, '<br />');
-
-  if (highlightCloze) {
-    formatted = formatted.replace(/\{\{c\d+::([\s\S]*?)\}\}/g, (_match, inner) => {
-      const target = String(inner).split('::')[0].trim();
-      return `<span class="inline-block px-1.5 py-0.5 mx-0.5 rounded bg-sky-500/15 border border-sky-400/40 text-sky-300 font-semibold">${target}</span>`;
-    });
-  }
-
-  return formatted;
-}
-
 export const CardItem: React.FC<CardItemProps> = ({
   card,
   index,
   cleanDeckKey,
+  localMediaAssets,
   lint,
   isEditing,
   isImagePickerOpen,
@@ -457,13 +442,18 @@ export const CardItem: React.FC<CardItemProps> = ({
           <div
             className="text-sm text-slate-100 font-medium leading-relaxed [&_b]:text-sky-300 [&_strong]:text-sky-300 [&_i]:text-slate-300 [&_em]:text-slate-300"
             dangerouslySetInnerHTML={{
-              __html: formatInlineMedicalHtml(questionTextOnly, true),
+              __html: sanitizeMedicalHtml(questionTextOnly, {
+                highlightCloze: true,
+                clozeMode: 'inline',
+                stripImgs: true,
+              }),
             }}
           />
 
           <CardMediaPanel
             card={card}
             allCardImgs={allCardImgs}
+            localMediaAssets={localMediaAssets}
             isZoomed={isZoomed}
             isMasking={isMasking}
             refreshingStripCardId={refreshingStripCardId}
@@ -482,15 +472,19 @@ export const CardItem: React.FC<CardItemProps> = ({
               <span
                 className="[&_b]:text-emerald-200 [&_strong]:text-emerald-200 [&_i]:text-emerald-200/80"
                 dangerouslySetInnerHTML={{
-                  __html: formatInlineMedicalHtml(card.answer || '', false),
+                  __html: sanitizeMedicalHtml(card.answer || '', {
+                    stripImgs: true,
+                  }),
                 }}
               />
             </div>
           )}
           <div
-            className="text-slate-300 leading-relaxed pt-1 [&_b]:text-slate-100 [&_i]:text-slate-400 [&_img]:hidden"
+            className="text-slate-300 leading-relaxed pt-1 [&_b]:text-slate-100 [&_strong]:text-slate-100 [&_i]:text-slate-400"
             dangerouslySetInnerHTML={{
-              __html: card.hint,
+              __html: sanitizeMedicalHtml(card.hint || '', {
+                stripImgs: true,
+              }),
             }}
           />
         </div>

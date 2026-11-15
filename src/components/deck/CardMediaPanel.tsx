@@ -202,6 +202,7 @@ export async function applyCanvasSpoilerMask(
 interface CardMediaPanelProps {
   card: CanonicalCard;
   allCardImgs: ParsedCardImage[];
+  localMediaAssets?: Record<string, string>;
   isZoomed: boolean;
   isMasking: boolean;
   refreshingStripCardId: number | null;
@@ -224,9 +225,45 @@ interface CardMediaPanelProps {
   onRefreshQuickGallery: (card: CanonicalCard) => void;
 }
 
+function resolvePreviewImageSrc(
+  rawSrc: string,
+  localFilename: string,
+  localMediaAssets?: Record<string, string>
+): string {
+  const trimmed = (rawSrc || '').trim();
+  if (!trimmed) return '';
+  if (/^(?:https?:\/\/|data:image\/|blob:|\/)/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^(?:pdfimg|buscar_imagem):/i.test(trimmed)) {
+    return '';
+  }
+  if (localMediaAssets) {
+    const candidates = [
+      trimmed,
+      localFilename,
+      trimmed.split(/[\\/]/).pop() || trimmed,
+      localFilename.split(/[\\/]/).pop() || localFilename,
+    ]
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    for (const [k, v] of Object.entries(localMediaAssets)) {
+      if (!v) continue;
+      const lowerK = k.trim().toLowerCase();
+      const baseK = lowerK.split(/[\\/]/).pop() || lowerK;
+      if (candidates.includes(lowerK) || candidates.includes(baseK)) {
+        return v;
+      }
+    }
+  }
+  return '';
+}
+
 export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
   card,
   allCardImgs,
+  localMediaAssets,
   isZoomed,
   isMasking,
   refreshingStripCardId,
@@ -248,13 +285,11 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
   return (
     <div className="space-y-2 pt-1">
       {allCardImgs.map((imgMeta, i) => {
-        const resolvedImgSrc =
-          imgMeta.src.startsWith('http://') ||
-          imgMeta.src.startsWith('https://') ||
-          imgMeta.src.startsWith('data:') ||
-          imgMeta.src.startsWith('/')
-            ? imgMeta.src
-            : '';
+        const resolvedImgSrc = resolvePreviewImageSrc(
+          imgMeta.src,
+          imgMeta.localFilename,
+          localMediaAssets
+        );
 
         const otherCardIds = getOtherCardIdsForImage(
           deckImageUsage,
@@ -265,6 +300,14 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
             (Boolean(imgMeta.src) && !/^(?:https?:|data:|blob:|\/)/i.test(imgMeta.src.trim()))
         );
         const isRepeatedImage = otherCardIds.length > 0;
+
+        const isInQuestion =
+          card.image_mode === 'recognition' ||
+          (imgMeta.src
+            ? card.question.includes(imgMeta.src)
+            : imgMeta.localFilename
+            ? card.question.includes(imgMeta.localFilename)
+            : false);
 
         return (
           <div
@@ -279,41 +322,55 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
                 : 'border-amber-700/80'
             } ${isZoomed ? 'max-w-full' : 'max-w-xl'}`}
           >
-            {/* Discreet clinical media alerts */}
-            {(isRepeatedImage || !hasDescriptiveLegend) && (
-              <div className="flex flex-wrap items-center gap-1.5 pb-1">
-                {isRepeatedImage && (
-                  <span
-                    title={`Esta imagem também está sendo usada no(s) card(s) ID ${otherCardIds.join(', ')}`}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/70 border border-amber-700/70 text-[11px] font-medium text-amber-300"
-                  >
-                    <Copy className="w-3 h-3 text-amber-400 shrink-0" />
-                    <span>Imagem repetida</span>
-                    <span className="font-mono text-[10px] text-amber-400/90">
-                      (ID {otherCardIds.join(', ')})
-                    </span>
-                  </span>
-                )}
+            {/* Image placement & clinical media alerts */}
+            <div className="flex flex-wrap items-center gap-1.5 pb-1">
+              <span
+                title={
+                  isInQuestion
+                    ? 'Imagem posicionada na FRENTE do card (Recognition — diagnóstico visual na pergunta)'
+                    : 'Imagem posicionada no VERSO do card (Feedback/Hint — apoio visual após resposta)'
+                }
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-semibold tracking-wide uppercase ${
+                  isInQuestion
+                    ? 'bg-sky-950/70 border-sky-700/70 text-sky-300'
+                    : 'bg-slate-800/80 border-slate-700 text-slate-300'
+                }`}
+              >
+                {isInQuestion ? 'FRENTE (Recognition)' : 'VERSO (Feedback)'}
+              </span>
 
-                {!hasDescriptiveLegend && (
-                  <span
-                    title={`Esta imagem está sem legenda descritiva em <i>...</i> com pelo menos ${MIN_VISUAL_LEGEND_WORDS} palavras no campo hint`}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] font-medium text-amber-200"
-                  >
-                    <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
-                    <span>Sem legenda descritiva (mín. {MIN_VISUAL_LEGEND_WORDS} pal.)</span>
-                    <code className="font-mono text-[10px] text-amber-300/90">
-                      &lt;i&gt;...&lt;/i&gt;
-                    </code>
+              {isRepeatedImage && (
+                <span
+                  title={`Esta imagem também está sendo usada no(s) card(s) ID ${otherCardIds.join(', ')}`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/70 border border-amber-700/70 text-[11px] font-medium text-amber-300"
+                >
+                  <Copy className="w-3 h-3 text-amber-400 shrink-0" />
+                  <span>Imagem repetida</span>
+                  <span className="font-mono text-[10px] text-amber-400/90">
+                    (ID {otherCardIds.join(', ')})
                   </span>
-                )}
-              </div>
-            )}
+                </span>
+              )}
+
+              {!hasDescriptiveLegend && (
+                <span
+                  title={`Esta imagem está sem legenda descritiva em <i>...</i> com pelo menos ${MIN_VISUAL_LEGEND_WORDS} palavras no campo hint`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] font-medium text-amber-200"
+                >
+                  <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+                  <span>Sem legenda descritiva (mín. {MIN_VISUAL_LEGEND_WORDS} pal.)</span>
+                  <code className="font-mono text-[10px] text-amber-300/90">
+                    &lt;i&gt;...&lt;/i&gt;
+                  </code>
+                </span>
+              )}
+            </div>
 
             {resolvedImgSrc ? (
               <img
                 src={resolvedImgSrc}
                 alt={`Exame clínico do card ${card.id}`}
+                referrerPolicy="no-referrer"
                 className={`${
                   isZoomed ? 'max-h-[460px]' : 'max-h-56'
                 } w-auto rounded object-contain mx-auto transition-all`}
@@ -395,6 +452,7 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
                           src={alt.thumbUrl}
                           alt={alt.title}
                           loading="lazy"
+                          referrerPolicy="no-referrer"
                           className="max-h-full max-w-full object-contain"
                         />
                         {isAltInUseElsewhere && !isSelected && (

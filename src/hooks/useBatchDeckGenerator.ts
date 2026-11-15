@@ -40,6 +40,7 @@ export function useBatchDeckGenerator(params: {
   cards: CanonicalCard[];
   setCards: React.Dispatch<React.SetStateAction<CanonicalCard[]>>;
   setCurationStats: React.Dispatch<React.SetStateAction<DeckCurationStats | null>>;
+  availableMediaNames?: string[];
   autoResolveDeckMissingImages: (cards: CanonicalCard[], names?: string[]) => Promise<void>;
   showStatus: (message: string, tone?: 'info' | 'success' | 'error') => void;
 }) {
@@ -57,6 +58,7 @@ export function useBatchDeckGenerator(params: {
     cards,
     setCards,
     setCurationStats,
+    availableMediaNames,
     autoResolveDeckMissingImages,
     showStatus,
   } = params;
@@ -141,6 +143,8 @@ export function useBatchDeckGenerator(params: {
             fileUri?: string;
             fileName?: string;
             mimeType?: string;
+            fileSha256?: string;
+            keyFingerprint?: string;
             fallback?: boolean;
           }>('/api/gemini/upload-file', {
             method: 'POST',
@@ -159,6 +163,8 @@ export function useBatchDeckGenerator(params: {
               fileUri: data.fileUri,
               fileName: data.fileName,
               mimeType: data.mimeType || pdf.mimeType,
+              fileSha256: data.fileSha256 || pdf.fileSha256,
+              keyFingerprint: data.keyFingerprint || pdf.keyFingerprint,
             };
             updated[idx] = enriched;
             // Functional state update prevents race conditions if user adds/removes PDFs concurrently
@@ -170,6 +176,8 @@ export function useBatchDeckGenerator(params: {
                       fileUri: enriched.fileUri,
                       fileName: enriched.fileName,
                       mimeType: enriched.mimeType,
+                      fileSha256: enriched.fileSha256,
+                      keyFingerprint: enriched.keyFingerprint,
                     }
                   : item
               )
@@ -195,6 +203,8 @@ export function useBatchDeckGenerator(params: {
           mimeType: p.mimeType,
           fileUri: p.fileUri,
           fileName: p.fileName,
+          fileSha256: p.fileSha256,
+          keyFingerprint: p.keyFingerprint,
           docRole: p.docRole,
         };
       }
@@ -646,7 +656,7 @@ export function useBatchDeckGenerator(params: {
           `Reconstrução concluída: ${finalStats.originalCount} → ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS mantidos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
           'success'
         );
-        void autoResolveDeckMissingImages(finalCurated);
+        void autoResolveDeckMissingImages(finalCurated, availableMediaNames);
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
           return;
@@ -663,6 +673,7 @@ export function useBatchDeckGenerator(params: {
     },
     [
       autoResolveDeckMissingImages,
+      availableMediaNames,
       cards,
       clinicalMap,
       deckKey,
@@ -712,6 +723,12 @@ export function useBatchDeckGenerator(params: {
 
     if (flaggedWithWarnings.length === 0) return;
 
+    const CHUNK_SIZE = 12;
+    const chunks: Array<typeof flaggedWithWarnings> = [];
+    for (let i = 0; i < flaggedWithWarnings.length; i += CHUNK_SIZE) {
+      chunks.push(flaggedWithWarnings.slice(i, i + CHUNK_SIZE));
+    }
+
     abortControllerRef.current?.abort();
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -719,52 +736,120 @@ export function useBatchDeckGenerator(params: {
     setIsRepairing(true);
     startTimer({
       phase: 'repair',
-      label: `Reparando ${Math.min(25, flaggedWithWarnings.length)} card(s) sinalizado(s) com IA...`,
-      currentBatch: 0,
-      totalBatches: 1,
+      label: `Reparando lote 1/${chunks.length} (${flaggedWithWarnings.length} card(s) sinalizado(s))...`,
+      currentBatch: 1,
+      totalBatches: chunks.length,
       cardsReady: 0,
       elapsedSec: 0,
     });
 
-    try {
-      const data = await fetchJsonWithTimeout<{
-        repairedCards?: CanonicalCard[];
-        fallback?: boolean;
-        error?: string;
-      }>('/api/gemini/repair-cards', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deckKey: effectiveKey,
-          flaggedCards: flaggedWithWarnings.slice(0, 25).map((f) => ({
-            ...f.card,
-            warnings: f.lint.warnings.map((w) => w.message),
-          })),
-          model: selectedModel,
-        }),
-        timeoutMs: 145_000,
-        signal: controller.signal,
-      });
+    const origById = new Map<number, CanonicalCard>(
+      curatedAndRepaired.map((c) => [c.id, c])
+    );
 
-      if (data?.fallback || data?.error) {
-        showStatus(
-          `Ajustes locais aplicados; reparo avançado com IA indisponível (${data.error}).`,
-          'error'
+    try {
+      const repairedById = new Map<number, CanonicalCard>();
+      let fallbackErrorMsg: string | null = null;
+
+      for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+        if (controller.signal.aborted) break;
+        const chunk = chunks[chunkIdx];
+        setProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                phase: 'repair',
+                label: `Reparando lote ${chunkIdx + 1}/${chunks.length} (${flaggedWithWarnings.length} card(s) sinalizado(s))...`,
+                currentBatch: chunkIdx + 1,
+                totalBatches: chunks.length,
+                cardsReady: repairedById.size,
+              }
+            : prev
         );
-        return;
+
+        const dataUriPlaceholders = new Map<string, string>();
+        let uriSeq = 0;
+        const tokenizeDataUris = (html: string) =>
+          (html || '').replace(/data:image\/[^"'\s>]+/gi, (uriMatch) => {
+            const token = `__EMBEDDED_DATA_URI_${uriSeq++}__`;
+            dataUriPlaceholders.set(token, uriMatch);
+            return token;
+          });
+        const restoreDataUris = (html: string) =>
+          (html || '').replace(/__EMBEDDED_DATA_URI_\d+__/g, (tok) =>
+            dataUriPlaceholders.get(tok) || tok
+          );
+
+        const compactFlaggedPayload = chunk.map((f) => {
+          const {
+            imageAlternatives: _omitAlt,
+            isResolvingImage: _omitRes,
+            imageVerified: _omitVer,
+            ...restCard
+          } = f.card;
+          return {
+            ...restCard,
+            question: tokenizeDataUris(restCard.question || ''),
+            hint: tokenizeDataUris(restCard.hint || ''),
+            warnings: f.lint.warnings.map((w) => w.message),
+          };
+        });
+
+        const data = await fetchJsonWithTimeout<{
+          repairedCards?: CanonicalCard[];
+          fallback?: boolean;
+          error?: string;
+        }>('/api/gemini/repair-cards', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deckKey: effectiveKey,
+            flaggedCards: compactFlaggedPayload,
+            model: selectedModel,
+          }),
+          timeoutMs: 145_000,
+          signal: controller.signal,
+        });
+
+        if (data?.fallback || data?.error) {
+          fallbackErrorMsg = data?.error || 'erro na API';
+          break;
+        }
+
+        const repairedList = Array.isArray(data.repairedCards) ? data.repairedCards : [];
+        for (const rc of repairedList) {
+          if (!rc || typeof rc.id !== 'number') continue;
+          const orig = origById.get(rc.id);
+          const mergedRaw: CanonicalCard = {
+            ...orig,
+            ...rc,
+            question: restoreDataUris(rc.question || ''),
+            hint: restoreDataUris(rc.hint || ''),
+            priority: rc.priority ?? orig?.priority,
+            deck_key: rc.deck_key ?? orig?.deck_key ?? effectiveKey,
+            exam_refs: rc.exam_refs ?? orig?.exam_refs,
+            last_synced_hash: rc.last_synced_hash ?? orig?.last_synced_hash,
+            imageVerified: orig?.imageVerified,
+            imageAlternatives: orig?.imageAlternatives,
+          };
+          repairedById.set(rc.id, surgicalRepairCardLocal(mergedRaw));
+        }
       }
 
-      const repairedList = Array.isArray(data.repairedCards) ? data.repairedCards : [];
-      if (repairedList.length > 0) {
-        const repairedById = new Map<number, CanonicalCard>();
-        repairedList.forEach((rc) => {
-          if (rc && typeof rc.id === 'number') {
-            repairedById.set(rc.id, surgicalRepairCardLocal(rc));
-          }
-        });
+      if (repairedById.size > 0) {
         setCards((prev) =>
           prev.map((c) => (repairedById.has(c.id) ? repairedById.get(c.id)! : c))
         );
+      }
+
+      if (fallbackErrorMsg) {
+        showStatus(
+          repairedById.size > 0
+            ? `${repairedById.size} card(s) reparado(s) parcialmente; lote restante manteve ajustes locais (${fallbackErrorMsg}).`
+            : `Ajustes locais aplicados; reparo avançado com IA indisponível (${fallbackErrorMsg}).`,
+          'error'
+        );
+      } else if (repairedById.size > 0) {
         showStatus(`${repairedById.size} card(s) reparado(s) com sucesso.`, 'success');
       }
     } catch (err) {

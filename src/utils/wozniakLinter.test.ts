@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyResolvedWebImageToCard,
+  buildDeckMediaResolution,
   computeDeterministicDeckId,
   convertClozeToBasic,
   curateAndRebalanceDeck,
@@ -18,9 +19,17 @@ import {
   removeMissingMediaFromCard,
   resolveLocalMediaFilename,
   resolveOrCreateNoteGuid,
+  sanitizeMedicalHtml,
   stripHtml,
   surgicalRepairCardLocal,
 } from './wozniakLinter';
+import {
+  assignCaptionsAndFilterWatermarks,
+  collectPageCaptionMatches,
+  extractContextForFigure,
+  hasClinicalFigurePageKeyword,
+  type RawPdfPageBuffer,
+} from './pdfImageCore';
 import { buildGenericClinicalMap } from '../data/demoDecks';
 import {
   DOMAIN_PROFILE_CONFIGS,
@@ -1193,5 +1202,295 @@ test('real wagmms/Cards compatibility: preserves accented/comma local filenames,
   };
   assert.equal(detectRedundantVisualDescription(pericolicCard).isRedundant, true);
 });
+
+test('removeMissingMediaFromCard strips adjacent <br> and stranded leading <i> legends across recognition, feedback, and unset image_mode', () => {
+  const recognitionMissing: CanonicalCard = {
+    id: 171002001,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Obstetrícia - Partograma',
+    question: 'Analise o gráfico:<br><img src="parto_ausente.png"><br>Qual o diagnóstico?',
+    answer: 'Parada secundária da dilatação.',
+    hint: '<i>Partograma demonstrando dilatação fixa em 6 cm há 3 horas.</i><br><br><b>Comentário:</b> A <b>parada secundária da dilatação</b> decorre de desproporção cefalopélvica, diferente da <b>fase ativa prolongada</b>.',
+  };
+  const cleanedRec = removeMissingMediaFromCard(recognitionMissing, []);
+  assert.equal(/<img/i.test(cleanedRec.question), false);
+  assert.equal(/<br>\s*<br>/i.test(cleanedRec.question), false);
+  assert.equal(cleanedRec.question.includes('Analise o gráfico:<br>Qual o diagnóstico?'), true);
+  assert.equal(cleanedRec.image_mode, undefined);
+  assert.equal(cleanedRec.hint.startsWith('<b>Comentário:</b>'), true);
+  assert.equal(/<i>/i.test(cleanedRec.hint), false);
+
+  const feedbackMissing: CanonicalCard = {
+    id: 171002002,
+    type: 'cloze',
+    image_mode: 'feedback',
+    topic: 'Obstetrícia - Palpação',
+    question: 'O 1º tempo de Leopold identifica a {{c1::situação}} fetal.',
+    answer: '',
+    hint: '<img src="leopold_ausente.png"><br><i>Ilustração do 1º tempo palpando fundo uterino.</i><br><br><b>Comentário:</b> Identifica o polo no <b>fundo uterino</b>, diferenciando da <b>altura de apresentação</b>.',
+  };
+  const cleanedFb = removeMissingMediaFromCard(feedbackMissing, []);
+  assert.equal(/<img/i.test(cleanedFb.hint), false);
+  assert.equal(cleanedFb.image_mode, undefined);
+  assert.equal(cleanedFb.hint.startsWith('<b>Comentário:</b>'), true);
+
+  const unsetModeMissing: CanonicalCard = {
+    id: 171002003,
+    type: 'basic',
+    topic: 'Obstetrícia - Palpação',
+    question: 'Qual tempo avalia o dorso fetal?<br><img src="unset_ausente.png">',
+    answer: 'Segundo tempo de Leopold.',
+    hint: '<i>Esquema mostrando palpação lateral dos flancos.</i><br><br><b>Comentário:</b> O <b>2º tempo</b> localiza o dorso fetal, diferente do <b>3º tempo</b> que avalia mobilidade.',
+  };
+  const cleanedUnset = removeMissingMediaFromCard(unsetModeMissing, []);
+  assert.equal(cleanedUnset.question.endsWith('<br>'), false);
+  assert.equal(cleanedUnset.image_mode, undefined);
+  assert.equal(cleanedUnset.hint.startsWith('<b>Comentário:</b>'), true);
+});
+
+test('reconcileDeckIdsAndMedia preserves exam_refs, last_synced_hash, and priority across deck regeneration', () => {
+  const originalCards: CanonicalCard[] = [
+    {
+      id: 1792354533078,
+      type: 'basic',
+      priority: 'P1',
+      topic: 'Obstetrícia - Vitalidade Intraparto',
+      question: 'Com que frequência realizar ausculta fetal na fase ativa em baixo risco?',
+      answer: 'A cada 30 minutos.',
+      hint: '<b>Comentário:</b> Na <b>fase ativa de baixo risco</b> ausculta-se a cada 30 min, diferente do <b>expulsivo</b> (15 min).',
+      exam_refs: [{ institution: 'USP-SP', year: 2025, question_id: 4012, source: 'medquest' }],
+      last_synced_hash: 'sha256_orig_abc123',
+      tags: ['assistencia_parto'],
+    },
+  ];
+  const meta = extractDeckMetadata(JSON.stringify(originalCards));
+  const regeneratedFromLlm: CanonicalCard[] = [
+    {
+      id: 1792354533078,
+      type: 'cloze',
+      topic: '1º Período do Parto - Ausculta Intermitente',
+      question: 'Na fase ativa de parto em gestante de risco habitual, a FCF é auscultada a cada {{c1::30 minutos}}.',
+      answer: '',
+      hint: '<b>Comentário:</b> No <b>baixo risco</b>, monitora-se a cada 30 min na dilatação e 15 min no expulsivo, contra 15/5 min no <b>alto risco</b>.',
+      tags: ['obstetricia'],
+    },
+  ];
+  const reconciled = reconcileDeckIdsAndMedia(regeneratedFromLlm, meta, 'assistencia_parto');
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].id, 1792354533078);
+  assert.equal(reconciled[0].priority, 'P1');
+  assert.equal(reconciled[0].last_synced_hash, 'sha256_orig_abc123');
+  assert.deepEqual(reconciled[0].exam_refs, [
+    { institution: 'USP-SP', year: 2025, question_id: 4012, source: 'medquest' },
+  ]);
+});
+
+test('buildDeckMediaResolution, formatCanonicalDeckJson, and extractDeckMediaManifest disambiguate colliding image filenames consistently', () => {
+  const cards: CanonicalCard[] = [
+    {
+      id: 10,
+      type: 'basic',
+      image_mode: 'recognition',
+      topic: 'Cardiologia - ECG',
+      question: 'Analise:<br><img src="https://cdn-a.example.org/ecg.png" data-anki-file="ecg_shared.png">',
+      answer: 'Bloqueio de ramo direito.',
+      hint: '<i>Traçado A demonstrando padrão típico em V1.</i><br><br><b>Comentário:</b> Achado clássico de <b>BRD</b>, distinto do <b>BRE</b>.',
+    },
+    {
+      id: 20,
+      type: 'basic',
+      image_mode: 'recognition',
+      topic: 'Cardiologia - Arritmias',
+      question: 'Analise:<br><img src="https://cdn-b.example.org/ecg.png" data-anki-file="ecg_shared.png">',
+      answer: 'Fibrilação atrial.',
+      hint: '<i>Traçado B demonstrando ritmo irregularmente irregular.</i><br><br><b>Comentário:</b> Ausência de <b>ondas P</b> diferencia FA do <b>flutter atrial</b>.',
+    },
+    {
+      id: 30,
+      type: 'basic',
+      image_mode: 'feedback',
+      topic: 'Cardiologia - Condução',
+      question: 'Qual a morfologia esperada em V1 no BRD?',
+      answer: 'Complexo rSR em V1.',
+      hint: '<img src="https://cdn-a.example.org/ecg.png" data-anki-file="ecg_shared.png"><br><i>Traçado A demonstrando padrão típico em V1.</i><br><br><b>Comentário:</b> O <b>atraso ventricular direito</b> gera onda R prime terminal em V1, diferente do <b>BRE</b> em V6.',
+    },
+  ];
+
+  const resolution = buildDeckMediaResolution(cards, 'cardio_ecg');
+  const manifest = extractDeckMediaManifest(cards, 'cardio_ecg');
+  const exported = JSON.parse(formatCanonicalDeckJson(cards, null, 'cardio_ecg')) as Array<{
+    id: number;
+    question: string;
+    hint: string;
+  }>;
+
+  assert.equal(manifest.length, 2);
+  assert.equal(resolution.manifest.length, 2);
+  assert.equal(manifest[0].filename, 'ecg_shared.png');
+  assert.equal(manifest[1].filename, 'ecg_shared_20.png');
+  assert.ok(exported[0].question.includes('<img src="ecg_shared.png">'));
+  assert.ok(exported[1].question.includes('<img src="ecg_shared_20.png">'));
+  assert.ok(exported[2].hint.includes('<img src="ecg_shared.png">'));
+});
+
+test('sanitizeMedicalHtml strips XSS vectors, resolves localMediaAssets case-insensitively, preserves table spans, and renders Cloze modes', () => {
+  const dirty =
+    'Texto<script>alert(1)</script><img src="javascript:alert(2)" onerror="hack()" /><svg><circle /></svg>' +
+    '<img src="04_Midias/Parto/LEOPOLD_1.PNG" onerror="xss()" alt="Leopold" />' +
+    '<table class="evil"><thead><tr><th colspan="2" onclick="x()">Critérios</th></tr></thead>' +
+    '<tbody><tr><td rowspan="2" onmouseover="y()">Fase Ativa</td><td>6 cm</td></tr></tbody></table>';
+
+  const safeHtml = sanitizeMedicalHtml(dirty, {
+    localMediaAssets: { 'leopold_1.png': 'data:image/png;base64,LEOPOLD_IMG' },
+  });
+
+  assert.equal(/<script|onerror=|onclick=|onmouseover=|javascript:|<svg/i.test(safeHtml), false);
+  assert.equal(safeHtml.includes('src="data:image/png;base64,LEOPOLD_IMG"'), true);
+  assert.equal(safeHtml.includes('<table class="med-table">'), true);
+  assert.equal(safeHtml.includes('<th colspan="2">'), true);
+  assert.equal(safeHtml.includes('<td rowspan="2">'), true);
+
+  const clozeRaw = 'Limiar é {{c1::140 mmHg}} ou {{c2::90 mmHg::pressão diastólica}}.';
+  const front = sanitizeMedicalHtml(clozeRaw, { highlightCloze: true, clozeMode: 'front' });
+  const back = sanitizeMedicalHtml(clozeRaw, { highlightCloze: true, clozeMode: 'back' });
+  const inline = sanitizeMedicalHtml(clozeRaw, { highlightCloze: true, clozeMode: 'inline' });
+
+  assert.equal(front.includes('[...]'), true);
+  assert.equal(front.includes('[...pressão diastólica...]'), true);
+  assert.equal(front.includes('140 mmHg'), false);
+  assert.equal(back.includes('140 mmHg') && back.includes('90 mmHg') && back.includes('text-emerald-300'), true);
+  assert.equal(inline.includes('140 mmHg') && inline.includes('bg-sky-500/15'), true);
+});
+
+test('pdfImageCore filters 3+ page watermarks before caption assignment, activates clinical page_crop fallback, and avoids broken leading commas', () => {
+  const watermarkSig = 'wm_instituicao_1080x1920';
+
+  const p1Text =
+    'Assistência ao Parto. Fig. 1: Manobra de McRoberts aplicada na distócia de ombros após falha de tração leve.';
+  const p2Text =
+    'Protocolo clínico institucional com diagrama vetorial sem XObjects próprios: Fig. 2 — Fluxograma de HPP.';
+  const p3Text = 'Observações gerais de enfermagem sem figuras relevantes.';
+
+  assert.equal(hasClinicalFigurePageKeyword('Veja a Fig. 1 ao lado'), true);
+  assert.equal(hasClinicalFigurePageKeyword('Fluxograma sem termo clinico'), true);
+  assert.equal(hasClinicalFigurePageKeyword('Apenas texto administrativo'), false);
+
+  const pageBuffers: RawPdfPageBuffer[] = [
+    {
+      pageNumber: 1,
+      pageText: p1Text,
+      captionMatches: collectPageCaptionMatches(p1Text),
+      candidates: [
+        {
+          id: 'p1_wm',
+          pdfName: 'parto.pdf',
+          pageNumber: 1,
+          width: 1080,
+          height: 1920,
+          dataUrl: 'data:image/jpeg;base64,WM',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p1_wm.jpg',
+          kind: 'embedded',
+          signature: watermarkSig,
+          byteLengthHint: 4000,
+        },
+        {
+          id: 'p1_real_fig1',
+          pdfName: 'parto.pdf',
+          pageNumber: 1,
+          width: 800,
+          height: 433,
+          dataUrl: 'data:image/jpeg;base64,FIG1',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p1_fig1.jpg',
+          kind: 'embedded',
+          signature: 'real_mcroberts_800x433',
+          byteLengthHint: 25000,
+        },
+      ],
+    },
+    {
+      pageNumber: 2,
+      pageText: p2Text,
+      captionMatches: collectPageCaptionMatches(p2Text),
+      candidates: [
+        {
+          id: 'p2_wm',
+          pdfName: 'parto.pdf',
+          pageNumber: 2,
+          width: 1080,
+          height: 1920,
+          dataUrl: 'data:image/jpeg;base64,WM',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p2_wm.jpg',
+          kind: 'embedded',
+          signature: watermarkSig,
+          byteLengthHint: 4000,
+        },
+      ],
+      fallbackCropCandidate: {
+        id: 'p2_vector_crop',
+        pdfName: 'parto.pdf',
+        pageNumber: 2,
+        width: 900,
+        height: 1200,
+        dataUrl: 'data:image/jpeg;base64,CROP2',
+        captionHint: '',
+        pageTextSnippet: p2Text,
+        suggestedFilename: 'p2_crop.jpg',
+        kind: 'page_crop',
+        signature: 'page_2_crop',
+        byteLengthHint: 35000,
+      },
+    },
+    {
+      pageNumber: 3,
+      pageText: p3Text,
+      captionMatches: [],
+      candidates: [
+        {
+          id: 'p3_wm',
+          pdfName: 'parto.pdf',
+          pageNumber: 3,
+          width: 1080,
+          height: 1920,
+          dataUrl: 'data:image/jpeg;base64,WM',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p3_wm.jpg',
+          kind: 'embedded',
+          signature: watermarkSig,
+          byteLengthHint: 4000,
+        },
+      ],
+    },
+  ];
+
+  const extracted = assignCaptionsAndFilterWatermarks(pageBuffers, 45);
+  assert.equal(extracted.length, 2);
+  assert.equal(extracted[0].id, 'p1_real_fig1');
+  assert.equal(extracted[0].captionHint?.includes('Fig. 1'), true);
+  assert.equal(extracted[1].id, 'p2_vector_crop');
+  assert.equal(extracted[1].kind, 'page_crop');
+
+  // Construct exact 2000-char string so for idx=1 of 2 (ratio=0.75 -> center=1500 -> start=1000),
+  // index 1000 lands inside 'hospitalar, ' before ', tendo contração adequada...'
+  const prefixPad = 'ab '.repeat(332); // 996 chars
+  const targetSegment = 'hospitalar, tendo contração adequada e boa vitalidade fetal no trabalho de parto.';
+  const suffixPad = ' cd'.repeat(309); // total length >= 2000 -> trim to exact 2000
+  const exactText = (prefixPad + targetSegment + suffixPad).slice(0, 2000);
+  const midCtx = extractContextForFigure(exactText, [], 1, 2);
+  assert.equal(
+    /^[,;:.–\-\s)]/.test(midCtx.captionHint),
+    false,
+    `Expected leading comma/punctuation stripped, got: "${midCtx.captionHint}"`
+  );
+  assert.equal(midCtx.captionHint.startsWith('tendo contração adequada'), true);
+});
+
 
 

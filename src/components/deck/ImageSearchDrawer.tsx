@@ -110,6 +110,7 @@ export const ImageSearchDrawer: React.FC<ImageSearchDrawerProps> = ({
               src={img.thumbUrl}
               alt={img.title}
               loading="lazy"
+              referrerPolicy="no-referrer"
               className={`max-h-full max-w-full object-contain transition-opacity ${
                 isUsedInOtherCard && !isUsedInCurrentCard ? 'opacity-80' : ''
               }`}

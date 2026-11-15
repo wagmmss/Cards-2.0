@@ -172,6 +172,8 @@ export async function searchMedicalImagesApi(
 export interface ValidateCardImageResponse {
   validated: boolean;
   isCompatible: boolean;
+  reachable?: boolean;
+  isSvg?: boolean;
   detectedModality: string;
   conflictReason: string;
   visualLegend: string;
@@ -210,9 +212,10 @@ export async function validateCardImageApi(
     return {
       validated: false,
       fallback: true,
-      isCompatible: true,
+      reachable: false,
+      isCompatible: false,
       detectedModality: 'unverified',
-      conflictReason: '',
+      conflictReason: 'Falha de comunicação ao validar a imagem candidato.',
       visualLegend: '',
     };
   }

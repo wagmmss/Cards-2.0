@@ -66,6 +66,19 @@ async function pickValidatedUniqueCandidate(params: {
   if (availableCandidates.length === 0) return null;
 
   let hadRejection = false;
+  let bestRasterFallback: {
+    cand: MedicalImageResult;
+    keys: string[];
+    visualLegend: string;
+    imageVerified: boolean;
+  } | null = null;
+  let bestSvgFallback: {
+    cand: MedicalImageResult;
+    keys: string[];
+    visualLegend: string;
+    imageVerified: boolean;
+  } | null = null;
+
   // Inspect up to 5 top unique candidates (material candidates first, then Web candidates)
   for (const cand of availableCandidates.slice(0, 5)) {
     if (signal.aborted) return null;
@@ -91,10 +104,12 @@ async function pickValidatedUniqueCandidate(params: {
     // Atomically reserve keys before awaiting Gemini Flash pixel inspection
     for (const k of candKeys) usedImageKeys.add(k);
 
+    const candidateImageUrl = cand.thumbUrl || cand.fullUrl;
+
     try {
       const validation = await validateCardImageApi(
         {
-          imageSource: cand.fullUrl || cand.thumbUrl,
+          imageSource: candidateImageUrl,
           cardTopic: card.topic,
           cardQuestion: cleanQ,
           cardAnswer: cleanA,
@@ -111,26 +126,53 @@ async function pickValidatedUniqueCandidate(params: {
         return null;
       }
 
-      if (!validation.isCompatible) {
+      if (!validation.isCompatible || validation.reachable === false) {
         // Release keys so another card with matching modality can still use this figure if appropriate
         for (const k of candKeys) usedImageKeys.delete(k);
         hadRejection = true;
         continue;
       }
 
-      const alternatives = availableCandidates.filter((alt) => {
-        if (alt.id === cand.id) return true;
-        const altKeys = getImageCandidateTrackingKeys(alt);
-        return !altKeys.some((k) => usedImageKeys.has(k));
-      });
+      const isAiVerified = Boolean(validation.validated && !validation.fallback);
+      const isRawSvg = Boolean(
+        validation.isSvg ||
+          /\.svg(?:\?|$)|image\/svg\+xml/i.test(candidateImageUrl)
+      );
+      const isRasterizedSvg = /\.svg\.png(?:\?|$)/i.test(candidateImageUrl);
 
-      return {
-        chosen: cand,
-        visualLegend: validation.visualLegend || '',
-        imageVerified: Boolean(validation.validated && !validation.fallback),
-        alternatives: alternatives.slice(0, 6),
-        hadRejection,
-      };
+      if (isAiVerified && !isRawSvg && !isRasterizedSvg) {
+        const alternatives = availableCandidates.filter((alt) => {
+          if (alt.id === cand.id) return true;
+          const altKeys = getImageCandidateTrackingKeys(alt);
+          return !altKeys.some((k) => usedImageKeys.has(k));
+        });
+
+        return {
+          chosen: cand,
+          visualLegend: validation.visualLegend || '',
+          imageVerified: true,
+          alternatives: alternatives.slice(0, 6),
+          hadRejection,
+        };
+      }
+
+      // Release key tentatively and record best fallback so remaining candidates (real raster/verified) can still win
+      for (const k of candKeys) usedImageKeys.delete(k);
+      if (!isRawSvg && (!bestRasterFallback || (isAiVerified && !bestRasterFallback.imageVerified))) {
+        bestRasterFallback = {
+          cand,
+          keys: candKeys,
+          visualLegend: validation.visualLegend || '',
+          imageVerified: isAiVerified,
+        };
+      } else if (!bestSvgFallback) {
+        bestSvgFallback = {
+          cand,
+          keys: candKeys,
+          visualLegend: validation.visualLegend || '',
+          imageVerified: isAiVerified && !isRawSvg,
+        };
+      }
     } catch (err) {
       for (const k of candKeys) usedImageKeys.delete(k);
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -138,6 +180,26 @@ async function pickValidatedUniqueCandidate(params: {
       }
       hadRejection = true;
     }
+  }
+
+  for (const fallbackEntry of [bestRasterFallback, bestSvgFallback]) {
+    if (!fallbackEntry) continue;
+    if (fallbackEntry.keys.some((k) => usedImageKeys.has(k))) continue;
+    for (const k of fallbackEntry.keys) usedImageKeys.add(k);
+
+    const alternatives = availableCandidates.filter((alt) => {
+      if (alt.id === fallbackEntry.cand.id) return true;
+      const altKeys = getImageCandidateTrackingKeys(alt);
+      return !altKeys.some((k) => usedImageKeys.has(k));
+    });
+
+    return {
+      chosen: fallbackEntry.cand,
+      visualLegend: fallbackEntry.visualLegend,
+      imageVerified: fallbackEntry.imageVerified,
+      alternatives: alternatives.slice(0, 6),
+      hadRejection,
+    };
   }
 
   return null;
@@ -218,83 +280,98 @@ export function useImageAutoResolver(params: {
         while (cursor < cardsNeedingWebImage.length) {
           if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
           const card = cardsNeedingWebImage[cursor++];
-          const unresolvedList = extractUnresolvedLocalImages(card, availableNames);
-          if (unresolvedList.length === 0) continue;
+          let cardUpdated = false;
+          try {
+            const unresolvedList = extractUnresolvedLocalImages(card, availableNames);
+            if (unresolvedList.length === 0) continue;
 
-          const targetRef = unresolvedList[0];
-          const cleanQuestion = stripHtml(card.question);
-          const cleanAnswer = stripHtml(card.answer);
-          const cleanHint = stripHtml(card.hint);
-          const effectiveMode: 'recognition' | 'feedback' =
-            targetRef.field === 'hint' || card.image_mode === 'feedback'
-              ? 'feedback'
-              : 'recognition';
+            const targetRef = unresolvedList[0];
+            const cleanQuestion = stripHtml(card.question);
+            const cleanAnswer = stripHtml(card.answer);
+            const cleanHint = stripHtml(card.hint);
+            const effectiveMode: 'recognition' | 'feedback' =
+              targetRef.field === 'hint' || card.image_mode === 'feedback'
+                ? 'feedback'
+                : 'recognition';
 
-          const materialHits = matchMaterialImagesForCard(materialImages, {
-            query: targetRef.searchQuery,
-            topic: card.topic,
-            question: cleanQuestion,
-            answer: cleanAnswer,
-            hint: cleanHint,
-            preferredPdfImageId: targetRef.pdfImageId,
-            usedImageIds: usedImageKeys,
-          });
-
-          const webImages = await searchMedicalImagesApi(
-            {
+            const materialHits = matchMaterialImagesForCard(materialImages, {
               query: targetRef.searchQuery,
               topic: card.topic,
               question: cleanQuestion,
               answer: cleanAnswer,
               hint: cleanHint,
-              preferGoogleGrounding: true,
-            },
-            controller.signal
-          );
+              preferredPdfImageId: targetRef.pdfImageId,
+              usedImageIds: usedImageKeys,
+            });
 
-          if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
-
-          const mergedCandidates = mergeMaterialAndWebImages(materialHits, webImages, 8);
-          const picked = await pickValidatedUniqueCandidate({
-            card,
-            candidates: mergedCandidates,
-            usedImageKeys,
-            imageMode: effectiveMode,
-            model: selectedModel,
-            signal: controller.signal,
-          });
-
-          if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
-
-          if (picked) {
-            resolvedCount++;
-            setCards((prev) =>
-              prev.map((c) =>
-                c.id === card.id
-                  ? {
-                      ...applyResolvedWebImageToCard(
-                        c,
-                        targetRef.filename,
-                        picked.chosen,
-                        picked.alternatives,
-                        picked.visualLegend || undefined
-                      ),
-                      imageVerified: picked.imageVerified,
-                    }
-                  : c
-              )
+            const webImages = await searchMedicalImagesApi(
+              {
+                query: targetRef.searchQuery,
+                topic: card.topic,
+                question: cleanQuestion,
+                answer: cleanAnswer,
+                hint: cleanHint,
+                preferGoogleGrounding: true,
+              },
+              controller.signal
             );
-          } else {
-            // If no valid/compatible image passed validation (or only synthetic placeholders existed),
-            // strip the placeholder cleanly instead of forcing a conflicting image.
-            leftTextOnlyCount++;
-            setCards((prev) =>
-              prev.map((c) => {
-                if (c.id !== card.id) return c;
-                const cleaned = removeMissingMediaFromCard(c, availableNames);
-                return { ...cleaned, isResolvingImage: false };
-              })
-            );
+
+            if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
+
+            const mergedCandidates = mergeMaterialAndWebImages(materialHits, webImages, 8);
+            const picked = await pickValidatedUniqueCandidate({
+              card,
+              candidates: mergedCandidates,
+              usedImageKeys,
+              imageMode: effectiveMode,
+              model: selectedModel,
+              signal: controller.signal,
+            });
+
+            if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
+
+            if (picked) {
+              resolvedCount++;
+              cardUpdated = true;
+              setCards((prev) =>
+                prev.map((c) =>
+                  c.id === card.id
+                    ? {
+                        ...applyResolvedWebImageToCard(
+                          c,
+                          targetRef.filename,
+                          picked.chosen,
+                          picked.alternatives,
+                          picked.visualLegend || undefined
+                        ),
+                        imageVerified: picked.imageVerified,
+                      }
+                    : c
+                )
+              );
+            } else {
+              // If no valid/compatible image passed validation (or only synthetic placeholders existed),
+              // strip the placeholder cleanly instead of forcing a conflicting image.
+              leftTextOnlyCount++;
+              cardUpdated = true;
+              setCards((prev) =>
+                prev.map((c) => {
+                  if (c.id !== card.id) return c;
+                  const cleaned = removeMissingMediaFromCard(c, availableNames);
+                  return { ...cleaned, isResolvingImage: false };
+                })
+              );
+            }
+          } finally {
+            if (!cardUpdated) {
+              setCards((prev) =>
+                prev.map((c) =>
+                  c.id === card.id && c.isResolvingImage
+                    ? { ...c, isResolvingImage: false }
+                    : c
+                )
+              );
+            }
           }
         }
       };
@@ -307,6 +384,9 @@ export function useImageAutoResolver(params: {
           )
         );
       } finally {
+        setCards((prev) =>
+          prev.map((c) => (c.isResolvingImage ? { ...c, isResolvingImage: false } : c))
+        );
         if (activeRunIdRef.current === runId) {
           abortControllerRef.current = null;
           setIsAutoResolvingImages(false);

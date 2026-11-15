@@ -11,6 +11,7 @@ import {
   Database,
   Download,
   Plus,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { DomainProfile, ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
 import { DOMAIN_PROFILE_CONFIGS, DOMAIN_PROFILE_ORDER } from '../utils/domainProfiles';
@@ -21,6 +22,9 @@ interface InputPanelProps {
   onAddPdfs: (files: UploadedPdfFile[]) => void;
   onRemovePdf: (index: number) => void;
   onClearPdfs: () => void;
+  localMediaAssets?: Record<string, string>;
+  onAddLocalMedia?: (assets: Record<string, string>) => void;
+  onClearLocalMedia?: () => void;
   rawJsonText: string;
   onRawJsonChange: (text: string) => void;
   jsonError: string | null;
@@ -46,6 +50,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   onAddPdfs,
   onRemovePdf,
   onClearPdfs,
+  localMediaAssets = {},
+  onAddLocalMedia,
+  onClearLocalMedia,
   rawJsonText,
   onRawJsonChange,
   jsonError,
@@ -68,8 +75,11 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const guidFileInputRef = useRef<HTMLInputElement>(null);
+  const localMediaInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
   const [showJsonEditor, setShowJsonEditor] = useState(false);
+
+  const localMediaCount = Object.keys(localMediaAssets).length;
 
   const handleDocumentFiles = async (fileList: File[] | FileList | null) => {
     const processed = await readMultipleDocumentFiles(fileList);
@@ -84,6 +94,25 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           .replace(/^_|_$/g, '');
         if (inferred) onDeckKeyChange(inferred);
       }
+    }
+  };
+
+  const handleLocalMediaUpload = async (fileList: File[] | FileList | null) => {
+    if (!fileList || fileList.length === 0 || !onAddLocalMedia) return;
+    const loaded: Record<string, string> = {};
+    for (const file of Array.from(fileList)) {
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+      });
+      if (dataUrl) {
+        loaded[file.name] = dataUrl;
+      }
+    }
+    if (Object.keys(loaded).length > 0) {
+      onAddLocalMedia(loaded);
     }
   };
 
@@ -383,6 +412,41 @@ export const InputPanel: React.FC<InputPanelProps> = ({
               <Download className="w-3 h-3 text-sky-400" />
               <span>Baixar GUIDs</span>
             </button>
+
+            <input
+              ref={localMediaInputRef}
+              type="file"
+              accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.svg,.mp3,.wav,.ogg,audio/*"
+              multiple
+              onChange={(e) => {
+                const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = '';
+                void handleLocalMediaUpload(selectedFiles);
+              }}
+              className="sr-only"
+            />
+            {onAddLocalMedia && (
+              <button
+                type="button"
+                onClick={() => localMediaInputRef.current?.click()}
+                title="Carregar arquivos locais de imagem ou áudio (collection.media) referenciados no *_notes.json"
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <ImageIcon className="w-3 h-3 text-indigo-400" />
+                <span>
+                  {localMediaCount > 0 ? `Mídias Locais (${localMediaCount})` : '+ Mídias Locais'}
+                </span>
+              </button>
+            )}
+            {localMediaCount > 0 && onClearLocalMedia && (
+              <button
+                type="button"
+                onClick={onClearLocalMedia}
+                className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Limpar mídias
+              </button>
+            )}
 
             {rawJsonText && (
               <button

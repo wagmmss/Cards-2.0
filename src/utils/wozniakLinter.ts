@@ -204,6 +204,198 @@ export function stripHtml(htmlText: string): string {
     .trim();
 }
 
+export interface SanitizeMedicalHtmlOptions {
+  highlightCloze?: boolean;
+  clozeMode?: 'inline' | 'front' | 'back';
+  stripImgs?: boolean;
+  localMediaAssets?: Record<string, string>;
+  stripUnresolvedPlaceholderImgs?: boolean;
+}
+
+function escapeHtmlAttr(val: string): string {
+  return val
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeSafeTextSegment(segment: string): string {
+  return segment
+    .replace(/&(?!(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Sanitizes medical flashcard HTML strictly against XSS (<script>, event handlers, javascript: URIs)
+ * while preserving safe formatting tags (b, strong, i, em, u, sub, sup, br, p, ul, ol, li, span, hr),
+ * clinical comparison tables (table.med-table, thead, tbody, tr, th, td), optional <img> with
+ * localMediaAssets substitution, and Cloze highlights.
+ */
+export function sanitizeMedicalHtml(
+  rawHtml: string,
+  options: SanitizeMedicalHtmlOptions = {}
+): string {
+  if (!rawHtml) return '';
+
+  const {
+    highlightCloze = false,
+    clozeMode = 'inline',
+    stripImgs = false,
+    localMediaAssets,
+    stripUnresolvedPlaceholderImgs = false,
+  } = options;
+
+  const localMap = new Map<string, string>();
+  if (localMediaAssets) {
+    for (const [k, v] of Object.entries(localMediaAssets)) {
+      if (k && typeof v === 'string' && v.trim()) {
+        const cleanK = k.trim().toLowerCase();
+        localMap.set(cleanK, v.trim());
+        const base = cleanK.split(/[\\/]/).pop();
+        if (base) localMap.set(base, v.trim());
+      }
+    }
+  }
+
+  const working = rawHtml
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '')
+    .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object\b[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed\b[\s\S]*?<\/embed>/gi, '')
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+
+  const SIMPLE_TAGS = new Set([
+    'b',
+    'strong',
+    'i',
+    'em',
+    'u',
+    'sub',
+    'sup',
+    'p',
+    'ul',
+    'ol',
+    'li',
+    'span',
+    'thead',
+    'tbody',
+    'tr',
+  ]);
+
+  const tagRegex = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g;
+  let out = '';
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRegex.exec(working)) !== null) {
+    out += escapeSafeTextSegment(working.slice(lastIdx, match.index));
+    lastIdx = match.index + match[0].length;
+
+    const isClosing = match[1] === '/';
+    const tag = match[2].toLowerCase();
+    const rawAttrs = match[3] || '';
+
+    if (tag === 'br') {
+      if (!isClosing) out += '<br />';
+      continue;
+    }
+    if (tag === 'hr') {
+      if (!isClosing) out += '<hr class="med-divider" />';
+      continue;
+    }
+    if (SIMPLE_TAGS.has(tag)) {
+      out += isClosing ? `</${tag}>` : `<${tag}>`;
+      continue;
+    }
+    if (tag === 'table') {
+      out += isClosing ? '</table>' : '<table class="med-table">';
+      continue;
+    }
+    if (tag === 'th' || tag === 'td') {
+      if (isClosing) {
+        out += `</${tag}>`;
+      } else {
+        const spanAttrs: string[] = [];
+        const colspanMatch = rawAttrs.match(/\bcolspan=["']?(\d{1,2})["']?/i);
+        const rowspanMatch = rawAttrs.match(/\browspan=["']?(\d{1,2})["']?/i);
+        if (colspanMatch?.[1]) spanAttrs.push(`colspan="${colspanMatch[1]}"`);
+        if (rowspanMatch?.[1]) spanAttrs.push(`rowspan="${rowspanMatch[1]}"`);
+        out += spanAttrs.length > 0 ? `<${tag} ${spanAttrs.join(' ')}>` : `<${tag}>`;
+      }
+      continue;
+    }
+    if (tag === 'img' && !isClosing) {
+      if (stripImgs) continue;
+      const srcMatch = rawAttrs.match(/\bsrc=["']([^"']+)["']/i);
+      const rawSrc = (srcMatch?.[1] || '').trim();
+      if (!rawSrc) continue;
+
+      if (/^(?:pdfimg|buscar_imagem):/i.test(rawSrc)) {
+        if (stripUnresolvedPlaceholderImgs) continue;
+        const label = escapeHtmlAttr(rawSrc);
+        out += `<span class="inline-block px-1.5 py-0.5 my-1 rounded bg-amber-950/70 border border-amber-700/70 text-[11px] font-mono text-amber-200">[Imagem pendente: ${label}]</span>`;
+        continue;
+      }
+
+      if (/^(?:javascript|vbscript):/i.test(rawSrc)) continue;
+      if (/^data:/i.test(rawSrc) && !/^data:image\//i.test(rawSrc)) continue;
+
+      let resolvedSrc = rawSrc;
+      if (!/^(?:https?:|data:|blob:|\/)/i.test(rawSrc)) {
+        const lowerRaw = rawSrc.toLowerCase();
+        const lowerBase = (lowerRaw.split(/[\\/]/).pop() || lowerRaw).trim();
+        const dataMatch = localMap.get(lowerRaw) || localMap.get(lowerBase);
+        if (dataMatch) {
+          resolvedSrc = dataMatch;
+        } else {
+          out += `<span class="inline-block px-1.5 py-0.5 my-1 rounded bg-slate-800 border border-slate-700 text-[11px] font-mono text-amber-300">[Arquivo local: ${escapeHtmlAttr(lowerBase)}]</span>`;
+          continue;
+        }
+      }
+
+      const altMatch = rawAttrs.match(/\balt=["']([^"']*)["']/i);
+      const altAttr = altMatch?.[1]
+        ? ` alt="${escapeHtmlAttr(altMatch[1])}"`
+        : ' alt="Imagem clínica"';
+      out += `<img src="${escapeHtmlAttr(resolvedSrc)}"${altAttr} referrerpolicy="no-referrer" />`;
+      continue;
+    }
+  }
+
+  out += escapeSafeTextSegment(working.slice(lastIdx));
+
+  if (stripImgs) {
+    out = out
+      .replace(/^(?:\s*<br\s*\/?>\s*)+/i, '')
+      .replace(/(?:\s*<br\s*\/?>\s*)+$/i, '')
+      .trim();
+  }
+
+  if (highlightCloze) {
+    out = out.replace(
+      /\{\{c\d+::([\s\S]*?)(?:::([\s\S]*?))?\}\}/gi,
+      (_m, inner: string, explicitHint?: string) => {
+        const target = String(inner || '').split('::')[0].trim();
+        if (clozeMode === 'front') {
+          const hintLabel = explicitHint || String(inner || '').split('::')[1] || '';
+          const label = hintLabel.trim() ? `[...${hintLabel.trim()}...]` : '[...]';
+          return `<span class="px-1.5 py-0.5 rounded bg-sky-950/90 border border-sky-500/60 text-sky-300 font-semibold">${label}</span>`;
+        }
+        if (clozeMode === 'back') {
+          return `<span class="px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/70 text-emerald-300 font-bold">${target}</span>`;
+        }
+        return `<span class="inline-block px-1.5 py-0.5 mx-0.5 rounded bg-sky-500/15 border border-sky-400/40 text-sky-300 font-semibold">${target}</span>`;
+      }
+    );
+  }
+
+  return out;
+}
+
 /**
  * Extracts only the visible text after <b>Comentário:</b> (excluding <table>, <img>, <i> legend, and <audio>),
  * matching lint.py and refiner.py.
@@ -263,6 +455,8 @@ export function resolveLocalMediaFilename(
 ): string {
   const cleanDeck = (deckKey || 'deck')
     .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, '_') || 'deck';
 
@@ -359,7 +553,14 @@ export function resolveLocalAudioFilename(
 export function rewriteHtmlImgsToLocalAnki(
   htmlText: string,
   cardId: number,
-  deckKey: string = 'deck'
+  deckKey: string = 'deck',
+  overrideResolver?: (
+    kind: 'image' | 'audio',
+    rawTag: string,
+    srcVal: string,
+    defaultName: string,
+    index: number
+  ) => string
 ): string {
   if (!htmlText) return '';
   let imgIdx = 0;
@@ -367,7 +568,11 @@ export function rewriteHtmlImgsToLocalAnki(
   let out = htmlText.replace(
     /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi,
     (fullTag, srcVal: string) => {
-      const localName = resolveLocalMediaFilename(fullTag, srcVal, cardId, imgIdx++, deckKey);
+      const idx = imgIdx++;
+      const baseName = resolveLocalMediaFilename(fullTag, srcVal, cardId, idx, deckKey);
+      const localName = overrideResolver
+        ? overrideResolver('image', fullTag, srcVal, baseName, idx)
+        : baseName;
       return `<img src="${localName}">`;
     }
   );
@@ -375,7 +580,11 @@ export function rewriteHtmlImgsToLocalAnki(
   out = out.replace(
     /<audio\b[^>]*>[\s\S]*?<source\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/audio>/gi,
     (fullTag, srcVal: string) => {
-      const localName = resolveLocalAudioFilename(fullTag, srcVal, cardId, audioIdx++, deckKey);
+      const idx = audioIdx++;
+      const baseName = resolveLocalAudioFilename(fullTag, srcVal, cardId, idx, deckKey);
+      const localName = overrideResolver
+        ? overrideResolver('audio', fullTag, srcVal, baseName, idx)
+        : baseName;
       return `<audio controls preload="none" class="med-audio"><source src="${localName}" type="audio/mpeg"></audio>`;
     }
   );
@@ -383,7 +592,11 @@ export function rewriteHtmlImgsToLocalAnki(
   out = out.replace(
     /<audio\b[^>]*\bsrc=["']([^"']+)["'][^>]*>(?:[\s\S]*?<\/audio>)?/gi,
     (fullTag, srcVal: string) => {
-      const localName = resolveLocalAudioFilename(fullTag, srcVal, cardId, audioIdx++, deckKey);
+      const idx = audioIdx++;
+      const baseName = resolveLocalAudioFilename(fullTag, srcVal, cardId, idx, deckKey);
+      const localName = overrideResolver
+        ? overrideResolver('audio', fullTag, srcVal, baseName, idx)
+        : baseName;
       return `<audio controls preload="none" class="med-audio"><source src="${localName}" type="audio/mpeg"></audio>`;
     }
   );
@@ -477,24 +690,74 @@ export function extractCardMediaReferences(
   return refs;
 }
 
+function disambiguateMediaFilename(
+  baseFilename: string,
+  cardId: number,
+  usedLowerFilenames: Set<string>
+): string {
+  if (!usedLowerFilenames.has(baseFilename.toLowerCase())) {
+    return baseFilename;
+  }
+  const extMatch = baseFilename.match(/(\.[a-z0-9]{2,5})$/i);
+  const ext = extMatch ? extMatch[1] : '';
+  const stem = ext ? baseFilename.slice(0, baseFilename.length - ext.length) : baseFilename;
+  let candidate = `${stem}_${cardId}${ext}`;
+  let suffix = 2;
+  while (usedLowerFilenames.has(candidate.toLowerCase())) {
+    candidate = `${stem}_${cardId}_${suffix++}${ext}`;
+  }
+  return candidate;
+}
+
+export interface DeckMediaResolution {
+  manifest: MediaBundleItem[];
+  resolveFilenameForField: (
+    cardId: number,
+    field: 'question' | 'hint',
+    kind: 'image' | 'audio',
+    srcVal: string,
+    defaultName: string
+  ) => string;
+}
+
 /**
- * Extracts a manifest of all images and audio files across the deck with their local Anki filenames
- * and source URLs/data-URIs so they can be bundled into collection.media / 04_Mídias / .apkg on export.
+ * Resolves deck-wide collision-free local Anki filenames so distinct `sourceUrl`s never overwrite
+ * each other under the same filename while identical `sourceUrl`s share one canonical filename.
  */
-export function extractDeckMediaManifest(
+export function buildDeckMediaResolution(
   cards: CanonicalCard[],
   deckKey: string = 'deck'
-): MediaBundleItem[] {
-  const seen = new Set<string>();
-  const items: MediaBundleItem[] = [];
+): DeckMediaResolution {
+  const filenameBySourceKey = new Map<string, string>();
+  const usedLowerFilenames = new Set<string>();
+  const manifestByLowerFilename = new Set<string>();
+  const fieldLookup = new Map<string, string>();
+  const manifest: MediaBundleItem[] = [];
 
   for (const card of cards) {
     const refs = extractCardMediaReferences(card, deckKey);
+    const seenOccurrenceInField = new Map<string, number>();
+
     for (const ref of refs) {
-      if (!seen.has(ref.filename)) {
-        seen.add(ref.filename);
-        items.push({
-          filename: ref.filename,
+      const normSrc = (ref.sourceUrl || '').trim();
+      const sourceKey = `${ref.kind}::${normSrc}`;
+      let resolvedName = filenameBySourceKey.get(sourceKey);
+
+      if (!resolvedName) {
+        resolvedName = disambiguateMediaFilename(ref.filename, card.id, usedLowerFilenames);
+        filenameBySourceKey.set(sourceKey, resolvedName);
+        usedLowerFilenames.add(resolvedName.toLowerCase());
+      }
+
+      const occKey = `${card.id}:${ref.field}:${ref.kind}:${normSrc}`;
+      const occIdx = seenOccurrenceInField.get(occKey) || 0;
+      seenOccurrenceInField.set(occKey, occIdx + 1);
+      fieldLookup.set(`${occKey}:${occIdx}`, resolvedName);
+
+      if (!manifestByLowerFilename.has(resolvedName.toLowerCase())) {
+        manifestByLowerFilename.add(resolvedName.toLowerCase());
+        manifest.push({
+          filename: resolvedName,
           sourceUrl: ref.sourceUrl,
           cardId: card.id,
           field: ref.field,
@@ -504,7 +767,29 @@ export function extractDeckMediaManifest(
     }
   }
 
-  return items;
+  return {
+    manifest,
+    resolveFilenameForField: (cardId, field, kind, srcVal, defaultName) => {
+      const normSrc = (srcVal || '').trim();
+      const sourceKey = `${kind}::${normSrc}`;
+      return (
+        filenameBySourceKey.get(sourceKey) ||
+        fieldLookup.get(`${cardId}:${field}:${kind}:${normSrc}:0`) ||
+        defaultName
+      );
+    },
+  };
+}
+
+/**
+ * Extracts a manifest of all images and audio files across the deck with their local Anki filenames
+ * and source URLs/data-URIs so they can be bundled into collection.media / 04_Mídias / .apkg on export.
+ */
+export function extractDeckMediaManifest(
+  cards: CanonicalCard[],
+  deckKey: string = 'deck'
+): MediaBundleItem[] {
+  return buildDeckMediaResolution(cards, deckKey).manifest;
 }
 
 /**
@@ -2130,6 +2415,26 @@ export function lintCard(
  * Removes orphan/missing local <img src="..."> and <audio> tags from a card when the user
  * clicks "Remover mídia ausente" or when cleaning legacy missing audio/image tags.
  */
+function stripMediaTagAndAdjacentBreaks(html: string, rawTag: string): string {
+  if (!html || !rawTag) return html;
+  const escaped = rawTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let out = html.replace(
+    new RegExp(`(?:<br\\s*\\/?>\\s*)*${escaped}(?:\\s*<br\\s*\\/?>)*`, 'gi'),
+    (full) => {
+      const hasLeadingBr = /^\s*<br\b/i.test(full);
+      const hasTrailingBr = /<br\s*\/?>\s*$/i.test(full);
+      return hasLeadingBr && hasTrailingBr ? '<br>' : '';
+    }
+  );
+  if (out === html) {
+    out = out.replace(rawTag, '');
+  }
+  return out
+    .replace(/^(?:\s*<br\s*\/?>\s*)+/i, '')
+    .replace(/(?:\s*<br\s*\/?>\s*)+$/i, '')
+    .trim();
+}
+
 export function removeMissingMediaFromCard(
   card: CanonicalCard,
   availableMediaNames?: Iterable<string>
@@ -2146,6 +2451,8 @@ export function removeMissingMediaFromCard(
     }
   }
 
+  const hadImgInQuestion = /<img\b/i.test(card.question || '');
+  const hadImgInHint = /<img\b/i.test(card.hint || '');
   const refs = extractCardMediaReferences(card, card.deck_key || 'deck');
   let question = card.question || '';
   let hint = card.hint || '';
@@ -2158,17 +2465,25 @@ export function removeMissingMediaFromCard(
       availableSet.has(raw.toLowerCase());
 
     if (!isSelfContainedOrWeb && !isLoadedLocally) {
-      question = question.replace(ref.rawTag, '').replace(/(?:<br\s*\/?>\s*)+$/i, '').trim();
-      hint = hint.replace(ref.rawTag, '').replace(/(?:<br\s*\/?>\s*)+$/i, '').trim();
+      question = stripMediaTagAndAdjacentBreaks(question, ref.rawTag);
+      hint = stripMediaTagAndAdjacentBreaks(hint, ref.rawTag);
     }
   }
 
   const stillHasImgInQuestion = /<img\b/i.test(question);
   const stillHasImgInHint = /<img\b/i.test(hint);
   let nextImageMode = card.image_mode;
-  if (card.image_mode === 'recognition' && !stillHasImgInQuestion) {
+
+  if (!stillHasImgInQuestion && !stillHasImgInHint) {
     nextImageMode = undefined;
-    hint = hint.replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '').trim();
+    if (hadImgInQuestion || hadImgInHint) {
+      hint = hint.replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '').trim();
+    }
+  } else if (card.image_mode === 'recognition' && !stillHasImgInQuestion) {
+    nextImageMode = undefined;
+    if (hadImgInQuestion) {
+      hint = hint.replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '').trim();
+    }
   } else if (card.image_mode === 'feedback' && !stillHasImgInHint) {
     nextImageMode = undefined;
   }
@@ -2219,10 +2534,14 @@ export function reconcileDeckIdsAndMedia(
   let nextSequentialId = maxExistingId + 1;
   const usedIds = new Set<number>();
 
-  const cleanDeckKey = (deckKey || metadata.detectedDeckKey || 'internato_deck')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, '_');
+  const cleanDeckKey =
+    (deckKey || metadata.detectedDeckKey || 'internato_deck')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'internato_deck';
 
   return generatedCards.map((card) => {
     const incomingId = Number(card.id);
@@ -2293,6 +2612,13 @@ export function reconcileDeckIdsAndMedia(
       ])
     );
 
+    const preservedExamRefs =
+      Array.isArray(card.exam_refs) && card.exam_refs.length > 0
+        ? card.exam_refs
+        : originalCard?.exam_refs;
+    const preservedHash = card.last_synced_hash || originalCard?.last_synced_hash;
+    const preservedPriority = card.priority || originalCard?.priority;
+
     return {
       ...card,
       id: preservedId,
@@ -2302,6 +2628,9 @@ export function reconcileDeckIdsAndMedia(
       question,
       hint,
       tags: cardTags,
+      ...(preservedExamRefs && preservedExamRefs.length > 0 ? { exam_refs: preservedExamRefs } : {}),
+      ...(preservedHash ? { last_synced_hash: preservedHash } : {}),
+      ...(preservedPriority ? { priority: preservedPriority } : {}),
     };
   });
 }
@@ -2315,10 +2644,16 @@ export function formatCanonicalDeckJson(
   metadata?: ExtractedDeckMetadata | null,
   deckKey: string = 'internato_deck'
 ): string {
-  const cleanDeckKey = (deckKey || metadata?.detectedDeckKey || 'internato_deck')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, '_');
+  const cleanDeckKey =
+    (deckKey || metadata?.detectedDeckKey || 'internato_deck')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'internato_deck';
+
+  const mediaResolution = buildDeckMediaResolution(cards, cleanDeckKey);
 
   const strictNotes = cards.map((card) => {
     const tags = Array.from(
@@ -2330,8 +2665,20 @@ export function formatCanonicalDeckJson(
       ])
     );
 
-    const localQuestion = rewriteHtmlImgsToLocalAnki(card.question || '', card.id, cleanDeckKey);
-    const localHint = rewriteHtmlImgsToLocalAnki(card.hint || '', card.id, cleanDeckKey);
+    const localQuestion = rewriteHtmlImgsToLocalAnki(
+      card.question || '',
+      card.id,
+      cleanDeckKey,
+      (kind, _tag, srcVal, defaultName) =>
+        mediaResolution.resolveFilenameForField(card.id, 'question', kind, srcVal, defaultName)
+    );
+    const localHint = rewriteHtmlImgsToLocalAnki(
+      card.hint || '',
+      card.id,
+      cleanDeckKey,
+      (kind, _tag, srcVal, defaultName) =>
+        mediaResolution.resolveFilenameForField(card.id, 'hint', kind, srcVal, defaultName)
+    );
 
     const noteOut: Record<string, unknown> = {
       id: card.id,
@@ -3200,10 +3547,14 @@ export function curateAndRebalanceDeck(
   const finalBasic = reconciled.filter((c) => c.type === 'basic').length;
   const basicPct = finalCount > 0 ? Math.round((finalBasic / finalCount) * 100) : 0;
   const clozePct = finalCount > 0 ? 100 - basicPct : 0;
+  const survivingIdSet = new Set(reconciled.map((c) => Number(c.id)));
+  const prunedIds = Array.from(existingIdSet)
+    .filter((id) => !survivingIdSet.has(id))
+    .sort((a, b) => a - b);
   const preservedIdsCount = reconciled.filter((c) => existingIdSet.has(Number(c.id))).length;
   const finalPrunedCount =
     existingIdSet.size > 0
-      ? Math.max(prunedCount, existingIdSet.size - preservedIdsCount)
+      ? Math.max(prunedCount, prunedIds.length)
       : prunedCount;
   const finalAddedCount =
     existingIdSet.size > 0
@@ -3223,6 +3574,7 @@ export function curateAndRebalanceDeck(
       originalCount,
       finalCount,
       prunedCount: finalPrunedCount,
+      prunedIds,
       addedCount: finalAddedCount,
       convertedCount,
       preservedIdsCount,
@@ -3297,26 +3649,105 @@ export function enforceStrictDeckRatio(
 const BASE91_TABLE =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~';
 
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256Utf8Bytes(input: string): Uint8Array {
+  const utf8 = new TextEncoder().encode(input);
+  const bitLen = utf8.length * 8;
+  const paddedLen = Math.ceil((utf8.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(utf8);
+  padded[utf8.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  const hi = Math.floor(bitLen / 0x100000000);
+  const lo = bitLen >>> 0;
+  view.setUint32(paddedLen - 8, hi, false);
+  view.setUint32(paddedLen - 4, lo, false);
+
+  const H = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const W = new Uint32Array(64);
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      W[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = (rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >>> 3)) >>> 0;
+      const s1 = (rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >>> 10)) >>> 0;
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) >>> 0;
+    }
+
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let i = 0; i < 64; i++) {
+      const S1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+      const ch = ((e & f) ^ (~e & g)) >>> 0;
+      const temp1 = (h + S1 + ch + SHA256_K[i] + W[i]) >>> 0;
+      const S0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    H[0] = (H[0] + a) >>> 0;
+    H[1] = (H[1] + b) >>> 0;
+    H[2] = (H[2] + c) >>> 0;
+    H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0;
+    H[5] = (H[5] + f) >>> 0;
+    H[6] = (H[6] + g) >>> 0;
+    H[7] = (H[7] + h) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const outView = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) {
+    outView.setUint32(i * 4, H[i], false);
+  }
+  return out;
+}
+
 /**
- * Generates a deterministic positive integer deck_id from a deck_key string.
+ * Generates a deterministic positive integer deck_id from a deck_key string,
+ * matching server/ankiExport.ts `computeDeckIdFromKey` byte-for-byte via SHA-256.
  */
 export function computeDeterministicDeckId(deckKey: string): number {
-  const clean = (deckKey || 'internato_deck').trim().toLowerCase();
-  let h1 = 0x811c9dc5;
-  let h2 = 0x01000193;
-  for (let i = 0; i < clean.length; i++) {
-    const ch = clean.charCodeAt(i);
-    h1 ^= ch;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 ^= ch * 31;
-    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
-  }
-  return 1730000000000 + ((h1 * 1000 + (h2 % 1000)) % 9000000000);
+  const clean =
+    (deckKey || 'internato_deck')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'internato_deck';
+  const digest = sha256Utf8Bytes(clean);
+  const val = ((digest[0] << 24) | (digest[1] << 16) | (digest[2] << 8) | digest[3]) >>> 0;
+  return 1730000000000 + (val % 900000000);
 }
 
 /**
  * Computes a deterministic Anki GUID for `<deckKey>:id:<noteId>` or returns the existing entry
- * from `note_guid_registry.json`, preserving 100% of Anki's FSRS schedule on re-import.
+ * from `note_guid_registry.json`, matching server/ankiExport.ts `genankiGuidFor` byte-for-byte.
  */
 export function resolveOrCreateNoteGuid(
   deckKey: string,
@@ -3324,23 +3755,25 @@ export function resolveOrCreateNoteGuid(
   noteId: number,
   registryEntries: Record<string, string>
 ): { guid: string; key: string } {
-  const cleanKey = (deckKey || 'deck').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+  const cleanKey =
+    (deckKey || 'deck')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'deck';
   const regKey = `${cleanKey}:id:${noteId}`;
   if (registryEntries[regKey]) {
     return { guid: registryEntries[regKey], key: regKey };
   }
 
-  // Deterministic 10-char base91 hash from ("criador-de-cards", deckId, regKey)
   const seed = `criador-de-cards__${deckId}__${regKey}`;
-  let hA = 0x9e3779b9;
-  let hB = 0x243f6a88;
-  for (let i = 0; i < seed.length; i++) {
-    const code = seed.charCodeAt(i);
-    hA = Math.imul(hA ^ code, 0x85ebca6b) >>> 0;
-    hB = Math.imul(hB ^ (code + i), 0xc2b2ae35) >>> 0;
+  const digest = sha256Utf8Bytes(seed);
+  let val = 0n;
+  for (let i = 0; i < 8; i++) {
+    val = (val << 8n) | BigInt(digest[i]);
   }
-  let val = (BigInt(hA) << 32n) | BigInt(hB);
-  if (val === 0n) val = BigInt(noteId || 1);
 
   const base = BigInt(BASE91_TABLE.length);
   let guid = '';
@@ -3349,8 +3782,9 @@ export function resolveOrCreateNoteGuid(
     guid = BASE91_TABLE[rem] + guid;
     val = val / base;
   }
-  registryEntries[regKey] = guid;
-  return { guid, key: regKey };
+  const finalGuid = guid || `id${noteId}`;
+  registryEntries[regKey] = finalGuid;
+  return { guid: finalGuid, key: regKey };
 }
 
 /**

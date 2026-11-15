@@ -87,7 +87,7 @@ function isSafeExternalMediaUrl(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname.toLowerCase();
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (
       host === 'localhost' ||
       host === '::1' ||
@@ -97,12 +97,37 @@ function isSafeExternalMediaUrl(rawUrl: string): boolean {
     ) {
       return false;
     }
-    if (/^(127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return false;
+    if (/^(127\.|10\.|169\.254\.|192\.168\.|0\.)/.test(host)) return false;
     if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    if (/^(?:fc00:|fd[0-9a-f]{2}:|fe80:)/i.test(host)) return false;
     return true;
   } catch {
     return false;
   }
+}
+
+async function safeFetchMediaUrl(
+  rawUrl: string,
+  headers: Record<string, string>,
+  maxRedirects = 3
+): Promise<globalThis.Response | null> {
+  let currentUrl = rawUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    if (!isSafeExternalMediaUrl(currentUrl)) return null;
+    const resp = await fetch(currentUrl, {
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get('location');
+      if (!location || hop === maxRedirects) return null;
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    return resp;
+  }
+  return null;
 }
 
 export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buffer | null> {
@@ -132,15 +157,12 @@ export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buf
     if (!isSafeExternalMediaUrl(trimmed)) return null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const resp = await fetch(trimmed, {
-          headers: {
-            'User-Agent':
-              'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-            Accept: 'image/*, audio/*, application/octet-stream;q=0.8',
-          },
-          redirect: 'follow',
-          signal: AbortSignal.timeout(12_000),
+        const resp = await safeFetchMediaUrl(trimmed, {
+          'User-Agent':
+            'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
+          Accept: 'image/*, audio/*, application/octet-stream;q=0.8',
         });
+        if (!resp) return null;
         if (resp.status === 404 || resp.status === 410) return null;
         if (!resp.ok) {
           if (attempt === 0 && (resp.status === 429 || resp.status >= 500)) continue;
@@ -318,10 +340,6 @@ i, em { font-style: italic; color: #334155; }
   border-radius: 8px; border-left: 4px solid #0284c7;
   font-size: 16px; color: #334155; line-height: 1.52;
 }
-.extra-box i {
-  display: block; margin-top: 6px; margin-bottom: 6px;
-  font-size: 14px; color: #64748b; text-align: center;
-}
 hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
 img {
   max-width: 100%; max-height: 62vh; height: auto; border-radius: 8px;
@@ -377,7 +395,6 @@ table.med-table tbody tr:nth-child(even) td {
 .nightMode i, .nightMode em, .night_mode i, .night_mode em { color: #cbd5e1 !important; }
 .nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
 .nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
-.nightMode .extra-box i, .night_mode .extra-box i { color: #94a3b8 !important; }
 .nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
 .nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46 !important; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45) !important; }
 .nightMode img + br + i, .night_mode img + br + i,
@@ -420,8 +437,21 @@ table.med-table tbody tr:nth-child(even) td {
 const BASE91_TABLE =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~';
 
+export function sanitizeDeckKeyForAnki(rawKey: string, fallback = 'internato_deck'): string {
+  return (
+    (rawKey || fallback)
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '') || fallback
+  );
+}
+
 export function genankiGuidFor(deckId: number, deckKey: string, noteId: number): string {
-  const key = `${deckKey}:id:${noteId}`;
+  const cleanKey = sanitizeDeckKeyForAnki(deckKey, 'deck');
+  const key = `${cleanKey}:id:${noteId}`;
   const hashStr = `${GUID_SALT}__${deckId}__${key}`;
   const digest = crypto.createHash('sha256').update(hashStr, 'utf8').digest();
   let hashInt = 0n;
@@ -443,7 +473,8 @@ function ankiFieldChecksum(sfld: string): number {
 }
 
 export function computeDeckIdFromKey(deckKey: string): number {
-  const digest = crypto.createHash('sha256').update(deckKey || 'deck', 'utf8').digest();
+  const cleanKey = sanitizeDeckKeyForAnki(deckKey, 'internato_deck');
+  const digest = crypto.createHash('sha256').update(cleanKey, 'utf8').digest();
   const val = digest.readUInt32BE(0);
   return 1730000000000 + (val % 900000000);
 }
@@ -479,15 +510,48 @@ function extractClozeCardOrdinals(questionHtml: string): number[] {
   return Array.from(found).sort((a, b) => a - b);
 }
 
+function decodeDataImageUriSync(dataUri: string): { ext: string; data: Buffer } | null {
+  const commaIdx = dataUri.indexOf(',');
+  if (commaIdx === -1) return null;
+  const header = dataUri.slice(5, commaIdx);
+  const payload = dataUri.slice(commaIdx + 1);
+  const mime = header.split(';')[0].trim().toLowerCase();
+  if (!mime.startsWith('image/')) return null;
+
+  const ext = mime.includes('png')
+    ? 'png'
+    : mime.includes('webp')
+      ? 'webp'
+      : mime.includes('gif')
+        ? 'gif'
+        : mime.includes('svg')
+          ? 'svg'
+          : 'jpg';
+
+  let data: Buffer;
+  try {
+    if (/;base64(?:;|$)/i.test(header)) {
+      data = Buffer.from(payload.replace(/\s+/g, ''), 'base64');
+    } else {
+      data = Buffer.from(decodeURIComponent(payload), 'utf8');
+    }
+  } catch {
+    data = Buffer.from(payload, 'utf8');
+  }
+  return data.length > 0 ? { ext, data } : null;
+}
+
 /**
- * Rewrites HTML audio tags to Anki-native `[sound:...]` when local/resolved, strips broken local
- * `<img src="...">` or `[sound:...]` tags missing from `resolvedByLowerName`, and tracks every
- * actually-referenced filename so the `.apkg` `media` map contains zero orphan files and zero broken refs.
+ * Rewrites HTML audio tags to Anki-native `[sound:...]` when local/resolved, converts inline
+ * `data:image/` tags into real bundled `.apkg` media files, strips broken local `<img src="...">` or
+ * `[sound:...]` tags missing from `resolvedByLowerName`, and tracks every referenced filename.
  */
 function sanitizeFieldMediaForApkg(
   rawHtml: string,
   resolvedByLowerName: Map<string, { filename: string; data: Buffer }>,
-  referencedFiles: Map<string, Buffer>
+  referencedFiles: Map<string, Buffer>,
+  cleanDeckKey = 'internato_deck',
+  noteId = 0
 ): string {
   if (!rawHtml) return '';
   let out = rawHtml;
@@ -508,7 +572,7 @@ function sanitizeFieldMediaForApkg(
     }
   );
 
-  // 2. Validate <img src="..."> references against resolvedMedia
+  // 2. Validate <img src="..."> references against resolvedMedia and extract inline data:image/* into media map
   out = out.replace(
     /<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*)>/gi,
     (fullTag, beforeAttrs: string, srcVal: string, afterAttrs: string) => {
@@ -517,24 +581,39 @@ function sanitizeFieldMediaForApkg(
       if (/^(?:pdfimg|buscar_imagem):/i.test(trimmedSrc)) {
         return '';
       }
-      if (/^data:image\//i.test(trimmedSrc)) {
-        return fullTag;
-      }
 
       const dataAnkiAttr = fullTag.match(/\bdata-anki-file=["']([^"']+)["']/i)?.[1];
-      const baseFromSrc = normalizeLocalAssetBasename(trimmedSrc);
       const baseFromAttr = dataAnkiAttr ? normalizeLocalAssetBasename(dataAnkiAttr) : '';
+      const cleanedAttrs = `${beforeAttrs} ${afterAttrs}`
+        .replace(/\s*\bdata-anki-file=["'][^"']*["']/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
 
+      if (/^data:image\//i.test(trimmedSrc)) {
+        const decoded = decodeDataImageUriSync(trimmedSrc);
+        if (!decoded) return '';
+        const sha8 = crypto.createHash('sha256').update(decoded.data).digest('hex').slice(0, 8);
+        let targetFilename = baseFromAttr || `${cleanDeckKey}_${noteId}_${sha8}.${decoded.ext}`;
+        const existingBuf = referencedFiles.get(targetFilename);
+        if (existingBuf && !existingBuf.equals(decoded.data)) {
+          const extMatch = targetFilename.match(/(\.[a-z0-9]{2,5})$/i);
+          const ext = extMatch ? extMatch[1] : `.${decoded.ext}`;
+          const stem = targetFilename.replace(/\.[a-z0-9]{2,5}$/i, '');
+          targetFilename = `${stem}_${sha8}${ext}`;
+        }
+        referencedFiles.set(targetFilename, decoded.data);
+        return cleanedAttrs
+          ? `<img src="${targetFilename}" ${cleanedAttrs}>`
+          : `<img src="${targetFilename}">`;
+      }
+
+      const baseFromSrc = normalizeLocalAssetBasename(trimmedSrc);
       const resolved =
         resolvedByLowerName.get(baseFromSrc.toLowerCase()) ||
         (baseFromAttr ? resolvedByLowerName.get(baseFromAttr.toLowerCase()) : undefined);
 
       if (resolved) {
         referencedFiles.set(resolved.filename, resolved.data);
-        const cleanedAttrs = `${beforeAttrs} ${afterAttrs}`
-          .replace(/\s*\bdata-anki-file=["'][^"']*["']/gi, '')
-          .replace(/\s+/g, ' ')
-          .trim();
         return cleanedAttrs
           ? `<img src="${resolved.filename}" ${cleanedAttrs}>`
           : `<img src="${resolved.filename}">`;
@@ -592,11 +671,7 @@ export async function buildAnkiApkgBuffer(params: {
   const db = new SQL.Database();
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const cleanDeckKey =
-    (params.deckKey || 'internato_deck')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_]+/g, '_') || 'internato_deck';
+  const cleanDeckKey = sanitizeDeckKeyForAnki(params.deckKey || 'internato_deck', 'internato_deck');
   const deckId =
     typeof params.deckId === 'number' && params.deckId > 1
       ? params.deckId
@@ -875,25 +950,42 @@ export async function buildAnkiApkgBuffer(params: {
     const qField = sanitizeFieldMediaForApkg(
       String(note.question || ''),
       resolvedByLowerName,
-      referencedMediaFiles
+      referencedMediaFiles,
+      cleanDeckKey,
+      nid
     );
     const tField = sanitizeFieldMediaForApkg(
       String(note.topic || ''),
       resolvedByLowerName,
-      referencedMediaFiles
+      referencedMediaFiles,
+      cleanDeckKey,
+      nid
     );
     const aField = isCloze
       ? ''
       : sanitizeFieldMediaForApkg(
           String(note.answer || ''),
           resolvedByLowerName,
-          referencedMediaFiles
+          referencedMediaFiles,
+          cleanDeckKey,
+          nid
         );
-    const hField = sanitizeFieldMediaForApkg(
+    let hField = sanitizeFieldMediaForApkg(
       String(note.hint || ''),
       resolvedByLowerName,
-      referencedMediaFiles
+      referencedMediaFiles,
+      cleanDeckKey,
+      nid
     );
+
+    if (!/<img\b/i.test(qField) && !/<img\b/i.test(hField)) {
+      hField = hField
+        .replace(
+          /^<i>[^<]*<\/i>(?:\s*<br\s*\/?>\s*)*(?=<b>\s*Coment[aá]rio\s*:?\s*<\/b>)/i,
+          ''
+        )
+        .trim();
+    }
 
     const flds = [qField, tField, aField, hField].join('\x1f');
     const sfld = qField.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
