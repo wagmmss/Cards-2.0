@@ -83,42 +83,102 @@ export function buildZipArchive(entries: Array<{ name: string; data: Buffer }>):
   return Buffer.concat([...localParts, ...centralParts, eocd]);
 }
 
+function isSafeExternalMediaUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal')
+    ) {
+      return false;
+    }
+    if (/^(127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return false;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buffer | null> {
   if (!sourceUrl) return null;
-  if (sourceUrl.startsWith('data:')) {
-    const commaIdx = sourceUrl.indexOf(',');
+  const trimmed = sourceUrl.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('data:')) {
+    const commaIdx = trimmed.indexOf(',');
     if (commaIdx === -1) return null;
-    const header = sourceUrl.slice(0, commaIdx);
-    const payload = sourceUrl.slice(commaIdx + 1);
+    const header = trimmed.slice(0, commaIdx);
+    const payload = trimmed.slice(commaIdx + 1);
     if (header.includes(';base64')) {
-      return Buffer.from(payload, 'base64');
+      const buf = Buffer.from(payload.replace(/\s+/g, ''), 'base64');
+      return buf.length > 0 ? buf : null;
     }
-    return Buffer.from(decodeURIComponent(payload), 'utf8');
-  }
-  if (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')) {
     try {
-      const resp = await fetch(sourceUrl, {
-        headers: {
-          'User-Agent':
-            'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!resp.ok) return null;
-      const arrBuf = await resp.arrayBuffer();
-      return Buffer.from(arrBuf);
+      const buf = Buffer.from(decodeURIComponent(payload), 'utf8');
+      return buf.length > 0 ? buf : null;
     } catch {
-      return null;
+      const buf = Buffer.from(payload, 'utf8');
+      return buf.length > 0 ? buf : null;
     }
   }
-  if (/^[A-Za-z0-9+/=\s]+$/.test(sourceUrl) && sourceUrl.length > 64) {
+
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    if (!isSafeExternalMediaUrl(trimmed)) return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resp = await fetch(trimmed, {
+          headers: {
+            'User-Agent':
+              'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
+            Accept: 'image/*, audio/*, application/octet-stream;q=0.8',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (resp.status === 404 || resp.status === 410) return null;
+        if (!resp.ok) {
+          if (attempt === 0 && (resp.status === 429 || resp.status >= 500)) continue;
+          return null;
+        }
+        const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+        if (
+          contentType.includes('text/html') ||
+          contentType.includes('application/json') ||
+          contentType.includes('application/xhtml')
+        ) {
+          return null;
+        }
+        const arrBuf = await resp.arrayBuffer();
+        if (arrBuf.byteLength < 64 || arrBuf.byteLength > 20 * 1024 * 1024) {
+          return null;
+        }
+        return Buffer.from(arrBuf);
+      } catch {
+        if (attempt === 1) return null;
+      }
+    }
+    return null;
+  }
+
+  if (/^[A-Za-z0-9+/=\s]+$/.test(trimmed) && trimmed.length > 64) {
     try {
-      return Buffer.from(sourceUrl.replace(/\s+/g, ''), 'base64');
+      const buf = Buffer.from(trimmed.replace(/\s+/g, ''), 'base64');
+      return buf.length > 0 ? buf : null;
     } catch {
       return null;
     }
   }
   return null;
+}
+
+function normalizeLocalAssetBasename(rawName: string): string {
+  return (rawName || '').trim().split(/[\\/]/).pop()?.trim() || '';
 }
 
 export async function resolveDeckMediaFiles(
@@ -143,19 +203,21 @@ export async function resolveDeckMediaFiles(
     }
   }
 
-  const seenFilenames = new Set<string>();
+  const seenLowerFilenames = new Set<string>();
   const resolvedMedia: Array<{ filename: string; data: Buffer }> = [];
   const missingMedia: Array<{ filename: string; cardId?: number; reason: string }> = [];
 
-  if (Array.isArray(mediaManifest)) {
+  if (Array.isArray(mediaManifest) && mediaManifest.length > 0) {
     const items = mediaManifest.filter((item) => {
-      const filename = String(item?.filename || item?.localFilename || '').trim();
-      if (!filename || seenFilenames.has(filename)) return false;
-      seenFilenames.add(filename);
+      const filename = normalizeLocalAssetBasename(
+        String(item?.filename || item?.localFilename || '')
+      );
+      const lower = filename.toLowerCase();
+      if (!filename || seenLowerFilenames.has(lower)) return false;
+      seenLowerFilenames.add(lower);
       return true;
     });
 
-    // Resolve external media in parallel with bounded concurrency (4)
     const CONCURRENCY = 4;
     let cursor = 0;
     const results: Array<{
@@ -169,12 +231,14 @@ export async function resolveDeckMediaFiles(
       while (cursor < items.length) {
         const idx = cursor++;
         const item = items[idx];
-        const filename = String(item?.filename || item?.localFilename || '').trim();
+        const filename = normalizeLocalAssetBasename(
+          String(item?.filename || item?.localFilename || '')
+        );
         const sourceUrl = String(item?.sourceUrl || '').trim();
         const lowerName = filename.toLowerCase();
         const uploadedDataUri =
           normalizedAssetMap.get(lowerName) ||
-          normalizedAssetMap.get(sourceUrl.toLowerCase());
+          (sourceUrl ? normalizedAssetMap.get(sourceUrl.toLowerCase()) : undefined);
 
         let buf: Buffer | null = null;
         if (uploadedDataUri) {
@@ -205,15 +269,16 @@ export async function resolveDeckMediaFiles(
         });
       }
     }
-  }
-
-  for (const [rawName, dataUri] of Object.entries(mediaAssets || {})) {
-    const cleanName = rawName.trim().split(/[\\/]/).pop() || '';
-    if (!cleanName || seenFilenames.has(cleanName)) continue;
-    const buf = await resolveMediaSourceToBuffer(dataUri);
-    if (buf && buf.length > 0) {
-      seenFilenames.add(cleanName);
-      resolvedMedia.push({ filename: cleanName, data: buf });
+  } else if (!Array.isArray(mediaManifest) || mediaManifest.length === 0) {
+    // Fall back to mediaAssets when no mediaManifest entries were supplied
+    for (const [rawName, dataUri] of Object.entries(mediaAssets || {})) {
+      const cleanName = normalizeLocalAssetBasename(rawName);
+      if (!cleanName || seenLowerFilenames.has(cleanName.toLowerCase())) continue;
+      const buf = await resolveMediaSourceToBuffer(dataUri);
+      if (buf && buf.length > 0) {
+        seenLowerFilenames.add(cleanName.toLowerCase());
+        resolvedMedia.push({ filename: cleanName, data: buf });
+      }
     }
   }
 
@@ -226,7 +291,7 @@ const BASIC_MODEL_ID = 1738331521912;
 const BASIC_MODEL_NAME = 'Med_Basic_Inverted_v2';
 const GUID_SALT = 'criador-de-cards';
 
-const ANKI_CLINICAL_CSS = `.card {
+export const ANKI_CLINICAL_CSS = `.card {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 18.5px;
   line-height: 1.58;
@@ -243,6 +308,7 @@ const ANKI_CLINICAL_CSS = `.card {
   text-transform: uppercase; letter-spacing: 0.5px;
 }
 b, strong { color: #0284c7; font-weight: 700; }
+i, em { font-style: italic; color: #334155; }
 .cloze { font-weight: 700; color: #0284c7; border-bottom: 2px solid #38bdf8; padding: 0 2px; }
 .front-content { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
 .back-content { font-size: 18.5px; color: #0f172a; line-height: 1.58; margin-top: 10px; }
@@ -254,24 +320,83 @@ b, strong { color: #0284c7; font-weight: 700; }
 }
 hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
 img {
-  max-width: 100%; max-height: 65vh; height: auto; border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.12); margin: 14px auto 0;
+  max-width: 100%; max-height: 62vh; height: auto; border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.10); margin: 14px auto 6px;
   background: #ffffff; padding: 4px; display: block; object-fit: contain;
 }
-table.med-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
-table.med-table th, table.med-table td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
-table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700; }
+img + br + i,
+img + i,
+.extra-box > i:first-child {
+  display: block;
+  margin: 4px auto 12px;
+  max-width: 94%;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: #475569;
+  text-align: center;
+  font-style: italic;
+}
+table.med-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 14.5px;
+  line-height: 1.45;
+  background-color: #ffffff;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+}
+table.med-table th,
+table.med-table td {
+  border: 1px solid #cbd5e1;
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+table.med-table th {
+  background-color: #e0f2fe;
+  color: #0c4a6e;
+  font-weight: 700;
+}
+table.med-table tbody tr:nth-child(even) td {
+  background-color: #f8fafc;
+}
 .nightMode.card, .night_mode.card, body.nightMode, body.night_mode { background-color: #18181b !important; color: #f4f4f5 !important; }
 .nightMode .topic-box, .night_mode .topic-box { background-color: #27272a !important; color: #7dd3fc !important; border-color: #3f3f46 !important; }
 .nightMode .front-content, .nightMode .back-content, .night_mode .front-content, .night_mode .back-content, .nightMode .cloze-text, .night_mode .cloze-text { color: #f4f4f5 !important; }
 .nightMode .main-answer, .night_mode .main-answer { color: #f4f4f5 !important; }
 .nightMode b, .nightMode strong, .night_mode b, .night_mode strong { color: #38bdf8 !important; }
+.nightMode i, .nightMode em, .night_mode i, .night_mode em { color: #cbd5e1 !important; }
 .nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
 .nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
 .nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
-.nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46; }
-.nightMode table.med-table th, .night_mode table.med-table th { background-color: #0c4a6e !important; color: #e0f2fe !important; border-color: #3f3f46 !important; }
-.nightMode table.med-table td, .night_mode table.med-table td { border-color: #3f3f46 !important; color: #f4f4f5 !important; }
+.nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46 !important; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45) !important; }
+.nightMode img + br + i, .night_mode img + br + i,
+.nightMode img + i, .night_mode img + i,
+.nightMode .extra-box > i:first-child, .night_mode .extra-box > i:first-child {
+  color: #cbd5e1 !important;
+}
+.nightMode table.med-table, .night_mode table.med-table {
+  background-color: #18181b !important;
+  color: #f4f4f5 !important;
+  border-color: #475569 !important;
+}
+.nightMode table.med-table th, .night_mode table.med-table th {
+  background-color: #0c4a6e !important;
+  color: #e0f2fe !important;
+  border-color: #475569 !important;
+}
+.nightMode table.med-table td, .night_mode table.med-table td {
+  background-color: #1f2430 !important;
+  border-color: #475569 !important;
+  color: #f4f4f5 !important;
+}
+.nightMode table.med-table tbody tr:nth-child(even) td,
+.night_mode table.med-table tbody tr:nth-child(even) td {
+  background-color: #27272a !important;
+}
 @media (max-width: 600px) {
   .card { padding: 14px; font-size: 16.5px; }
   .med-card { max-width: 100%; }
@@ -280,6 +405,8 @@ table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700
   .main-answer { font-size: 18px; }
   .extra-box { padding: 10px 14px; font-size: 15px; }
   img { max-height: 55vh; margin-top: 10px; }
+  table.med-table { font-size: 13.5px; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table.med-table th, table.med-table td { padding: 7px 9px; }
 }`;
 
 const BASE91_TABLE =
@@ -311,6 +438,122 @@ export function computeDeckIdFromKey(deckKey: string): number {
   const digest = crypto.createHash('sha256').update(deckKey || 'deck', 'utf8').digest();
   const val = digest.readUInt32BE(0);
   return 1730000000000 + (val % 900000000);
+}
+
+function normalizeGuidRegistryMap(rawRegistry: unknown): Record<string, string> {
+  if (!rawRegistry || typeof rawRegistry !== 'object') return {};
+  const record = rawRegistry as Record<string, unknown>;
+  const source =
+    record.entries && typeof record.entries === 'object'
+      ? (record.entries as Record<string, unknown>)
+      : record;
+
+  const normalized: Record<string, string> = {};
+  for (const [key, val] of Object.entries(source)) {
+    if (typeof key === 'string' && typeof val === 'string' && val.trim()) {
+      normalized[key] = val.trim();
+    }
+  }
+  return normalized;
+}
+
+function extractClozeCardOrdinals(questionHtml: string): number[] {
+  const found = new Set<number>();
+  const regex = /\{\{c(\d+)::/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(questionHtml || '')) !== null) {
+    const idx = Number(m[1]);
+    if (Number.isFinite(idx) && idx >= 1 && idx <= 50) {
+      found.add(idx - 1);
+    }
+  }
+  if (found.size === 0) return [0];
+  return Array.from(found).sort((a, b) => a - b);
+}
+
+/**
+ * Rewrites HTML audio tags to Anki-native `[sound:...]` when local/resolved, strips broken local
+ * `<img src="...">` or `[sound:...]` tags missing from `resolvedByLowerName`, and tracks every
+ * actually-referenced filename so the `.apkg` `media` map contains zero orphan files and zero broken refs.
+ */
+function sanitizeFieldMediaForApkg(
+  rawHtml: string,
+  resolvedByLowerName: Map<string, { filename: string; data: Buffer }>,
+  referencedFiles: Map<string, Buffer>
+): string {
+  if (!rawHtml) return '';
+  let out = rawHtml;
+
+  // 1. Convert <audio><source src="..."></audio> and <audio src="..."> into [sound:...]
+  out = out.replace(
+    /<audio\b[^>]*>[\s\S]*?<source\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/audio>/gi,
+    (_full, srcVal: string) => {
+      const base = normalizeLocalAssetBasename(srcVal);
+      return base ? `[sound:${base}]` : '';
+    }
+  );
+  out = out.replace(
+    /<audio\b[^>]*\bsrc=["']([^"']+)["'][^>]*>(?:[\s\S]*?<\/audio>)?/gi,
+    (_full, srcVal: string) => {
+      const base = normalizeLocalAssetBasename(srcVal);
+      return base ? `[sound:${base}]` : '';
+    }
+  );
+
+  // 2. Validate <img src="..."> references against resolvedMedia
+  out = out.replace(
+    /<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*)>/gi,
+    (fullTag, beforeAttrs: string, srcVal: string, afterAttrs: string) => {
+      const trimmedSrc = (srcVal || '').trim();
+      if (!trimmedSrc) return '';
+      if (/^(?:pdfimg|buscar_imagem):/i.test(trimmedSrc)) {
+        return '';
+      }
+      if (/^data:image\//i.test(trimmedSrc)) {
+        return fullTag;
+      }
+
+      const dataAnkiAttr = fullTag.match(/\bdata-anki-file=["']([^"']+)["']/i)?.[1];
+      const baseFromSrc = normalizeLocalAssetBasename(trimmedSrc);
+      const baseFromAttr = dataAnkiAttr ? normalizeLocalAssetBasename(dataAnkiAttr) : '';
+
+      const resolved =
+        resolvedByLowerName.get(baseFromSrc.toLowerCase()) ||
+        (baseFromAttr ? resolvedByLowerName.get(baseFromAttr.toLowerCase()) : undefined);
+
+      if (resolved) {
+        referencedFiles.set(resolved.filename, resolved.data);
+        const cleanedAttrs = `${beforeAttrs} ${afterAttrs}`
+          .replace(/\s*\bdata-anki-file=["'][^"']*["']/gi, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        return cleanedAttrs
+          ? `<img src="${resolved.filename}" ${cleanedAttrs}>`
+          : `<img src="${resolved.filename}">`;
+      }
+
+      // Remove broken external/local reference so Anki Check Media has 0 missing files
+      return '';
+    }
+  );
+
+  // 3. Validate [sound:...] references against resolvedMedia
+  out = out.replace(/\[sound:([^\]]+)\]/gi, (_full, soundTarget: string) => {
+    const base = normalizeLocalAssetBasename(soundTarget);
+    if (!base) return '';
+    const resolved = resolvedByLowerName.get(base.toLowerCase());
+    if (resolved) {
+      referencedFiles.set(resolved.filename, resolved.data);
+      return `[sound:${resolved.filename}]`;
+    }
+    return '';
+  });
+
+  // Tidy leftover leading/trailing <br> after stripped broken tags
+  return out
+    .replace(/^(?:\s*<br\s*\/?>\s*)+/i, '')
+    .replace(/(?:\s*<br\s*\/?>\s*)+$/i, '')
+    .trim();
 }
 
 let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
@@ -351,7 +594,18 @@ export async function buildAnkiApkgBuffer(params: {
       ? params.deckId
       : computeDeckIdFromKey(cleanDeckKey);
   const deckName = (params.deckName || cleanDeckKey.replace(/_/g, ' ')).trim();
-  const updatedRegistry: Record<string, string> = { ...(params.guidRegistry || {}) };
+  const updatedRegistry: Record<string, string> = normalizeGuidRegistryMap(params.guidRegistry);
+
+  const resolvedByLowerName = new Map<string, { filename: string; data: Buffer }>();
+  for (const mediaItem of params.resolvedMedia || []) {
+    const canonicalName = normalizeLocalAssetBasename(mediaItem?.filename || '');
+    if (!canonicalName || !mediaItem?.data || mediaItem.data.length === 0) continue;
+    const lower = canonicalName.toLowerCase();
+    if (!resolvedByLowerName.has(lower)) {
+      resolvedByLowerName.set(lower, { filename: canonicalName, data: mediaItem.data });
+    }
+  }
+  const referencedMediaFiles = new Map<string, Buffer>();
 
   db.run(`
     CREATE TABLE col (
@@ -592,20 +846,46 @@ export async function buildAnkiApkgBuffer(params: {
     `INSERT OR REPLACE INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
+  const usedNoteIds = new Set<number>();
   const usedCardIds = new Set<number>();
+  let dueCursor = 1;
 
-  params.notes.forEach((note, index) => {
-    const nid = Number(note.id) > 0 ? Number(note.id) : 171000101 + index;
+  (params.notes || []).forEach((note, index) => {
+    let nid = Number(note.id) > 0 ? Math.trunc(Number(note.id)) : 171000101 + index;
+    while (usedNoteIds.has(nid)) {
+      nid++;
+    }
+    usedNoteIds.add(nid);
+
     const regKey = `${cleanDeckKey}:id:${nid}`;
     const guid = updatedRegistry[regKey] || genankiGuidFor(deckId, cleanDeckKey, nid);
     updatedRegistry[regKey] = guid;
 
     const isCloze = note.type === 'cloze';
     const mid = isCloze ? CLOZE_MODEL_ID : BASIC_MODEL_ID;
-    const qField = String(note.question || '');
-    const tField = String(note.topic || '');
-    const aField = isCloze ? '' : String(note.answer || '');
-    const hField = String(note.hint || '');
+
+    const qField = sanitizeFieldMediaForApkg(
+      String(note.question || ''),
+      resolvedByLowerName,
+      referencedMediaFiles
+    );
+    const tField = sanitizeFieldMediaForApkg(
+      String(note.topic || ''),
+      resolvedByLowerName,
+      referencedMediaFiles
+    );
+    const aField = isCloze
+      ? ''
+      : sanitizeFieldMediaForApkg(
+          String(note.answer || ''),
+          resolvedByLowerName,
+          referencedMediaFiles
+        );
+    const hField = sanitizeFieldMediaForApkg(
+      String(note.hint || ''),
+      resolvedByLowerName,
+      referencedMediaFiles
+    );
 
     const flds = [qField, tField, aField, hField].join('\x1f');
     const sfld = qField.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -623,32 +903,42 @@ export async function buildAnkiApkgBuffer(params: {
 
     insertNoteStmt.run([nid, guid, mid, nowSec, -1, tagsStr, flds, sfld, csum, 0, '']);
 
-    let cid = nid < 100000000000 ? nid * 10 + 1 : nid + index + 1;
-    while (usedCardIds.has(cid)) {
-      cid++;
-    }
-    usedCardIds.add(cid);
+    const cardOrdinals = isCloze ? extractClozeCardOrdinals(qField) : [0];
+    for (const ord of cardOrdinals) {
+      let cid =
+        ord === 0
+          ? nid < 100_000_000_000
+            ? nid * 10 + 1
+            : nid
+          : nid < 100_000_000_000
+            ? nid * 10 + ord + 1
+            : nid + ord * 1_000_003;
+      while (usedCardIds.has(cid)) {
+        cid++;
+      }
+      usedCardIds.add(cid);
 
-    insertCardStmt.run([
-      cid,
-      nid,
-      deckId,
-      0,
-      nowSec,
-      -1,
-      0,
-      0,
-      index + 1,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      '',
-    ]);
+      insertCardStmt.run([
+        cid,
+        nid,
+        deckId,
+        ord,
+        nowSec,
+        -1,
+        0,
+        0,
+        dueCursor++,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        '',
+      ]);
+    }
   });
 
   insertNoteStmt.free();
@@ -662,15 +952,17 @@ export async function buildAnkiApkgBuffer(params: {
     { name: 'collection.anki2', data: sqliteBytes },
   ];
 
+  // Package strictly only the media files referenced by exported notes (zero orphan files)
   const mediaJsonMap: Record<string, string> = {};
-  params.resolvedMedia.forEach((mediaItem, idx) => {
-    const numKey = String(idx);
-    mediaJsonMap[numKey] = mediaItem.filename;
+  let mediaIndex = 0;
+  for (const [filename, data] of referencedMediaFiles.entries()) {
+    const numKey = String(mediaIndex++);
+    mediaJsonMap[numKey] = filename;
     zipEntries.push({
       name: numKey,
-      data: mediaItem.data,
+      data,
     });
-  });
+  }
 
   zipEntries.push({
     name: 'media',
