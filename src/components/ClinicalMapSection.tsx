@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckSquare, Square, ExternalLink, Plus, Search, Sparkles, XCircle } from 'lucide-react';
+import { CheckSquare, Square, ExternalLink, Plus, Sparkles } from 'lucide-react';
 import {
   CardType,
   ClinicalMapItem,
@@ -20,9 +20,6 @@ interface ClinicalMapSectionProps {
     targetCardType: CardType
   ) => void;
   onRecreateCanonicalDeck: () => void;
-  onCancelGeneration: () => void;
-  onDeepenGuidelines?: (focusQuery?: string) => void;
-  isDeepeningGuidelines?: boolean;
   isGeneratingDeck: boolean;
 }
 
@@ -32,9 +29,6 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   onToggleItemCardType,
   onAddCustomMapItem,
   onRecreateCanonicalDeck,
-  onCancelGeneration,
-  onDeepenGuidelines,
-  isDeepeningGuidelines = false,
   isGeneratingDeck,
 }) => {
   const [activePriorityFilter, setActivePriorityFilter] = useState<'ALL' | PriorityLevel>('ALL');
@@ -43,7 +37,6 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   const [newConcept, setNewConcept] = useState('');
   const [newCardType, setNewCardType] = useState<CardType>('basic');
   const [showAddForm, setShowAddForm] = useState(false);
-  const [deepenFocusQuery, setDeepenFocusQuery] = useState('');
 
   if (!clinicalMap || clinicalMap.items.length === 0) {
     return (
@@ -53,13 +46,13 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
       >
         <div>
           <h2 className="text-sm font-bold text-slate-100 font-display">
-            2. Mapa Clínico (P1 a P4) &amp; Diretrizes
+            2. Mapa Clínico (P1 a P4) & Diretrizes
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Informe o tema ou envie documentos na Etapa 1 e clique em &ldquo;Gerar Mapa Clínico&rdquo;.
+            Informe o tema ou envie PDFs acima e clique no Passo 1 para gerar o checklist clínico P1–P4.
           </p>
         </div>
-        <span className="text-xs text-slate-500 whitespace-nowrap">Aguardando Etapa 1</span>
+        <span className="text-xs text-slate-500 whitespace-nowrap">Aguardando Passo 1</span>
       </section>
     );
   }
@@ -89,112 +82,51 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
       id="mapa-clinico"
       className="bg-[#111827] border border-slate-800 rounded-xl p-6 space-y-5"
     >
+      {/* Clean Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
         <div>
-          <h2 className="text-base font-bold text-slate-100 font-display">
-            2. Mapa Clínico: {clinicalMap.themeTitle}
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5 tabular-nums">
-            <span className="text-sky-400 font-medium">{profileConfig.label}</span>
-            <span className="mx-1.5 text-slate-600" aria-hidden="true">
-              ·
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-bold text-slate-100 font-display">
+              2. Mapa Clínico: {clinicalMap.themeTitle}
+            </h2>
+            <span className="px-2 py-0.5 text-[11px] font-medium rounded-md bg-sky-950/70 border border-sky-700/60 text-sky-300">
+              {profileConfig.label}
             </span>
-            {checkedCount} de {clinicalMap.items.length} conceitos selecionados
+          </div>
+          <p className="text-xs text-slate-400 mt-0.5 tabular-nums">
+            {checkedCount} de {clinicalMap.items.length} conceitos selecionados para o baralho
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {isGeneratingDeck ? (
-            <button
-              type="button"
-              onClick={onCancelGeneration}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-red-200 bg-red-950/80 border border-red-700 rounded-lg hover:bg-red-900/80 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <XCircle className="w-3.5 h-3.5 text-red-400" />
-              <span>Cancelar Geração</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={onRecreateCanonicalDeck}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Confirmar Checklist P1–P4 e Gerar Deck</span>
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={onRecreateCanonicalDeck}
+          disabled={isGeneratingDeck}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>
+            {isGeneratingDeck ? 'Gerando Deck...' : 'Confirmar Checklist P1–P4 e Gerar Deck'}
+          </span>
+        </button>
       </div>
 
+      {/* Guideline Updates (Compact) */}
       {(clinicalMap.guidelineUpdates.length > 0 ||
         clinicalMap.groundingSources.length > 0) && (
-        <div className="p-4 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-3 text-xs">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
-            <div className="font-semibold text-sky-400">
-              Diretrizes Consultadas (Google Search Grounding · {clinicalMap.guidelineUpdates.length}{' '}
-              achado{clinicalMap.guidelineUpdates.length === 1 ? '' : 's'}
-              {clinicalMap.groundingSources.length > 0
-                ? ` · ${clinicalMap.groundingSources.length} fonte${clinicalMap.groundingSources.length === 1 ? '' : 's'} web`
-                : ''}
-              )
-            </div>
-
-            {onDeepenGuidelines && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  onDeepenGuidelines(deepenFocusQuery);
-                  setDeepenFocusQuery('');
-                }}
-                className="flex items-center gap-1.5"
-              >
-                <input
-                  type="text"
-                  value={deepenFocusQuery}
-                  onChange={(e) => setDeepenFocusQuery(e.target.value)}
-                  placeholder="Aprofundar eixo (ex.: gestantes, 2ª linha, doses...)"
-                  disabled={isDeepeningGuidelines}
-                  className="px-2.5 py-1 text-[11px] bg-slate-900 border border-slate-700 rounded-md text-slate-100 placeholder:text-slate-500 w-56 sm:w-64 focus:border-sky-400 focus:outline-none disabled:opacity-50"
-                />
-                <button
-                  type="submit"
-                  disabled={isDeepeningGuidelines}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-sky-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                >
-                  <Search className="w-3 h-3" />
-                  <span>{isDeepeningGuidelines ? 'Buscando...' : 'Buscar mais pontos'}</span>
-                </button>
-              </form>
-            )}
+        <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2 text-xs">
+          <div className="font-semibold text-sky-400">
+            Síntese de Diretrizes (Google Search Grounding)
           </div>
-
-          <ul className="space-y-1.5 text-slate-300">
-            {clinicalMap.guidelineUpdates.map((upd, idx) => {
-              const bracketMatch = upd.match(/^(\[[^\]]+\])\s*:?\s*(.*)$/);
-              return (
-                <li key={idx} className="leading-relaxed">
-                  {bracketMatch ? (
-                    <>
-                      • <span className="font-semibold text-slate-100">{bracketMatch[1]}:</span>{' '}
-                      {bracketMatch[2]}
-                    </>
-                  ) : (
-                    <>• {upd}</>
-                  )}
-                </li>
-              );
-            })}
+          <ul className="space-y-1 text-slate-300">
+            {clinicalMap.guidelineUpdates.map((upd, idx) => (
+              <li key={idx} className="leading-relaxed">
+                • {upd}
+              </li>
+            ))}
           </ul>
-
-          {clinicalMap.searchQueries && clinicalMap.searchQueries.length > 0 && (
-            <div className="pt-1 text-[11px] text-slate-400">
-              <span className="font-semibold text-slate-300">Buscas executadas:</span>{' '}
-              {clinicalMap.searchQueries.slice(0, 6).join(' · ')}
-            </div>
-          )}
-
           {clinicalMap.groundingSources.length > 0 && (
-            <div className="pt-1 flex flex-wrap items-center gap-3 text-[11px] text-slate-400 border-t border-slate-800/80">
+            <div className="pt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
               {clinicalMap.groundingSources.map((src, i) => (
                 <a
                   key={`${src.uri}-${i}`}
@@ -212,6 +144,7 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
         </div>
       )}
 
+      {/* Filter Bar + Add Concept Trigger */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div
           role="group"
@@ -237,7 +170,7 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
         <button
           type="button"
           onClick={() => setShowAddForm((prev) => !prev)}
-          className="inline-flex items-center gap-1 text-xs font-medium text-sky-400 hover:text-sky-300 whitespace-nowrap shrink-0 cursor-pointer"
+          className="inline-flex items-center gap-1 text-xs font-medium text-sky-400 hover:text-sky-300 cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>Adicionar conceito</span>
@@ -292,6 +225,7 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
         </form>
       )}
 
+      {/* Flat, Uncluttered Checklist */}
       <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden">
         {visibleItems.map((item: ClinicalMapItem) => (
           <div

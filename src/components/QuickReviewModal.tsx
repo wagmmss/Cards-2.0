@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   ChevronLeft,
@@ -9,12 +9,7 @@ import {
   RefreshCw,
   Eye,
 } from 'lucide-react';
-import { CanonicalCard, MedicalImageResult, PdfExtractedImage } from '../types/deck';
-import { sanitizeDeckKey, searchMedicalImagesApi } from '../utils/apiClient';
-import {
-  matchMaterialImagesForCard,
-  mergeMaterialAndWebImages,
-} from '../utils/materialImageMatcher';
+import { CanonicalCard, MedicalImageResult } from '../types/deck';
 import {
   applyResolvedWebImageToCard,
   resolveLocalMediaFilename,
@@ -26,7 +21,6 @@ interface QuickReviewModalProps {
   onClose: () => void;
   cards: CanonicalCard[];
   deckKey: string;
-  materialImages?: PdfExtractedImage[];
   onUpdateCard: (updated: CanonicalCard) => void;
 }
 
@@ -54,7 +48,6 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   onClose,
   cards,
   deckKey,
-  materialImages = [],
   onUpdateCard,
 }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -62,24 +55,19 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [isSearchingGallery, setIsSearchingGallery] = useState(false);
   const [galleryQuery, setGalleryQuery] = useState('');
-  const searchAbortRef = useRef<AbortController | null>(null);
 
   const safeIndex = cards.length > 0 ? Math.min(currentIndex, cards.length - 1) : 0;
   const currentCard = cards[safeIndex] || null;
-  const cleanDeckKey = sanitizeDeckKey(deckKey || 'deck');
+  const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
 
   useEffect(() => {
     if (!isOpen || !currentCard) return;
-    searchAbortRef.current?.abort();
-    setIsSearchingGallery(false);
     setIsBackShown(false);
     setIsEditing(false);
     setGalleryQuery(currentCard.topic.replace(/\s*-\s*/g, ' ').trim());
-    return () => {
-      searchAbortRef.current?.abort();
-    };
   }, [safeIndex, isOpen]);
 
+  // Keyboard shortcuts: Space flips card, Left/Right arrows navigate
   useEffect(() => {
     if (!isOpen || isEditing) return;
 
@@ -119,55 +107,33 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
 
   const handleSearchAlternativeImages = async (customQuery?: string) => {
     const q = (customQuery ?? galleryQuery).trim() || currentCard.topic;
-    const cardSnapshot = currentCard;
-    searchAbortRef.current?.abort();
-    const controller = new AbortController();
-    searchAbortRef.current = controller;
-
-    const cleanQ = stripHtml(cardSnapshot.question);
-    const cleanA = stripHtml(cardSnapshot.answer);
-    const cleanH = stripHtml(cardSnapshot.hint);
-
-    const materialHits = matchMaterialImagesForCard(materialImages, {
-      query: q,
-      topic: cardSnapshot.topic,
-      question: cleanQ,
-      answer: cleanA,
-      hint: cleanH,
-    });
-
-    if (materialHits.length > 0) {
-      onUpdateCard({
-        ...cardSnapshot,
-        imageAlternatives: materialHits.slice(0, 6),
-      });
-    }
-
     setIsSearchingGallery(true);
     try {
-      const webImgs = await searchMedicalImagesApi(
-        {
+      const res = await fetch('/api/media/search-medical-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           query: q,
-          topic: cardSnapshot.topic,
-          question: cleanQ,
-          answer: cleanA,
-          hint: cleanH,
+          topic: currentCard.topic,
+          question: stripHtml(currentCard.question),
+          hint: stripHtml(currentCard.hint),
           preferGoogleGrounding: true,
-        },
-        controller.signal
-      );
-      if (controller.signal.aborted) return;
-      const merged = mergeMaterialAndWebImages(materialHits, webImgs, 6);
-      if (merged.length > 0) {
-        onUpdateCard({
-          ...cardSnapshot,
-          imageAlternatives: merged,
-        });
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const webImgs: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
+        if (webImgs.length > 0) {
+          onUpdateCard({
+            ...currentCard,
+            imageAlternatives: webImgs.slice(0, 6),
+          });
+        }
       }
+    } catch {
+      // Keep existing alternatives
     } finally {
-      if (!controller.signal.aborted) {
-        setIsSearchingGallery(false);
-      }
+      setIsSearchingGallery(false);
     }
   };
 
@@ -227,6 +193,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 overflow-y-auto"
     >
       <div className="w-full max-w-3xl bg-[#0F1623] border border-slate-700 rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+        {/* Modal Top Header */}
         <div className="px-5 py-3.5 bg-[#0B0F17] border-b border-slate-800 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 text-xs text-slate-300 tabular-nums">
             <span className="font-bold text-slate-100">
@@ -239,7 +206,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             {currentCard.imageVerified && (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="text-emerald-400 font-medium">Aprovado</span>
+                <span className="text-emerald-400 font-medium">✓ Aprovado</span>
               </>
             )}
           </div>
@@ -253,7 +220,6 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              aria-label="Fechar revisão rápida"
               className="p-1 text-slate-400 hover:text-slate-100 cursor-pointer"
             >
               <X className="w-4 h-4" />
@@ -261,6 +227,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           </div>
         </div>
 
+        {/* Main Card Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1">
           {isEditing ? (
             <div className="space-y-3">
@@ -303,7 +270,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
               )}
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
-                  Comentário &amp; Legenda (Hint)
+                  Comentário & Legenda (Hint)
                 </label>
                 <textarea
                   rows={3}
@@ -317,10 +284,12 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             </div>
           ) : (
             <div className="space-y-4">
+              {/* Topic Header */}
               <div className="text-xs font-semibold uppercase tracking-wider text-sky-400">
                 {currentCard.topic}
               </div>
 
+              {/* FRENTE / VERSO Question */}
               <div
                 className="text-base text-slate-100 font-medium leading-relaxed [&_img]:mt-3 [&_img]:max-h-64 [&_img]:w-auto [&_img]:mx-auto [&_img]:rounded-lg [&_img]:border [&_img]:border-slate-700"
                 dangerouslySetInnerHTML={{
@@ -328,6 +297,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                 }}
               />
 
+              {/* VERSO Reveal */}
               {isBackShown ? (
                 <div className="pt-4 border-t border-slate-800 space-y-3">
                   {currentCard.type === 'basic' && (
@@ -351,23 +321,24 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                     className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded-lg cursor-pointer transition-colors"
                   >
                     <Eye className="w-4 h-4" />
-                    <span>Mostrar Resposta (Espaço)</span>
+                    <span>Mostrar Resposta (Barra de Espaço)</span>
                   </button>
                 </div>
               )}
             </div>
           )}
 
-          {(hasImageInCard || alternatives.length > 0 || materialImages.length > 0) && (
+          {/* Galeria de Troca Rápida Online (4–6 Miniaturas Alternativas em 1 clique) */}
+          {(hasImageInCard || alternatives.length > 0) && (
             <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-200">
-                  Troca Rápida de Imagem (Materiais + Web)
+                  Galeria de Troca Rápida Online (1 clique para substituir imagem)
                 </span>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    void handleSearchAlternativeImages(galleryQuery);
+                    handleSearchAlternativeImages(galleryQuery);
                   }}
                   className="flex items-center gap-1.5"
                 >
@@ -375,72 +346,66 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                     type="text"
                     value={galleryQuery}
                     onChange={(e) => setGalleryQuery(e.target.value)}
-                    placeholder="Buscar imagem médica..."
+                    placeholder="Buscar no Google Imagens..."
                     className="px-2.5 py-1 text-xs bg-slate-900 border border-slate-700 rounded text-slate-100 w-48"
                   />
                   <button
                     type="submit"
                     disabled={isSearchingGallery}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer"
                   >
                     {isSearchingGallery ? (
                       <RefreshCw className="w-3 h-3 animate-spin" />
                     ) : (
                       <Search className="w-3 h-3" />
                     )}
-                    <span>Buscar</span>
+                    <span>Google/Web</span>
                   </button>
                 </form>
               </div>
 
-              {alternatives.length > 0 && (
-                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                  {alternatives.slice(0, 6).map((alt) => (
-                    <button
-                      key={alt.id}
-                      type="button"
-                      onClick={() => handleSelectThumbnail(alt)}
-                      title={`${alt.title} (${alt.source})`}
-                      className="group relative h-16 rounded border border-slate-800 hover:border-sky-400 bg-slate-950 overflow-hidden flex items-center justify-center cursor-pointer transition-all"
-                    >
-                      <img
-                        src={alt.thumbUrl}
-                        alt={alt.title}
-                        loading="lazy"
-                        className="max-h-full max-w-full object-contain group-hover:scale-105 transition-transform"
-                      />
-                      {alt.fromMaterial && (
-                        <span className="absolute bottom-0.5 right-0.5 px-1 py-0.2 rounded bg-emerald-950/90 border border-emerald-600/70 text-[9px] font-mono font-semibold text-emerald-300 leading-tight">
-                          PDF
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {alternatives.slice(0, 6).map((alt) => (
+                  <button
+                    key={alt.id}
+                    type="button"
+                    onClick={() => handleSelectThumbnail(alt)}
+                    title={`${alt.title} (${alt.source})`}
+                    className="group relative h-16 rounded border border-slate-800 hover:border-sky-400 bg-slate-950 overflow-hidden flex items-center justify-center cursor-pointer transition-all"
+                  >
+                    <img
+                      src={alt.thumbUrl}
+                      alt={alt.title}
+                      loading="lazy"
+                      className="max-h-full max-w-full object-contain group-hover:scale-105 transition-transform"
+                    />
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
 
+        {/* Modal Footer Controls */}
         <div className="px-5 py-3.5 bg-[#0B0F17] border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
               type="button"
               disabled={safeIndex === 0}
               onClick={() => setCurrentIndex(Math.max(0, safeIndex - 1))}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Anterior</span>
+              <span>Anterior (←)</span>
             </button>
 
             <button
               type="button"
               disabled={safeIndex >= cards.length - 1}
               onClick={() => setCurrentIndex(Math.min(cards.length - 1, safeIndex + 1))}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
             >
-              <span>Próximo</span>
+              <span>Próximo (→)</span>
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -449,7 +414,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={() => setIsEditing((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg cursor-pointer"
             >
               <Edit3 className="w-3.5 h-3.5" />
               <span>{isEditing ? 'Concluir Edição' : 'Editar Texto'}</span>
@@ -458,10 +423,10 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={handleApproveAndNext}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer"
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Aprovar &amp; Próximo</span>
+              <span>✓ Aprovar & Próximo</span>
             </button>
           </div>
         </div>

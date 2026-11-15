@@ -11,7 +11,6 @@ import {
   Database,
   Download,
   Plus,
-  XCircle,
 } from 'lucide-react';
 import { DomainProfile, ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
 import { DOMAIN_PROFILE_CONFIGS, DOMAIN_PROFILE_ORDER } from '../utils/domainProfiles';
@@ -34,7 +33,6 @@ interface InputPanelProps {
   onToggleGoogleSearch: (val: boolean) => void;
   onGenerateClinicalMap: () => void;
   onRecreateCanonicalDeck: () => void;
-  onCancelGeneration: () => void;
   onLoadGenericSample: () => void;
   isGeneratingMap: boolean;
   isGeneratingDeck: boolean;
@@ -60,7 +58,6 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   onToggleGoogleSearch,
   onGenerateClinicalMap,
   onRecreateCanonicalDeck,
-  onCancelGeneration,
   onLoadGenericSample,
   isGeneratingMap,
   isGeneratingDeck,
@@ -72,10 +69,11 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const guidFileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
-  const [showAdvancedJson, setShowAdvancedJson] = useState(false);
+  const [showJsonEditor, setShowJsonEditor] = useState(false);
 
   const handleDocumentFiles = async (fileList: File[] | FileList | null) => {
     const processed = await readMultipleDocumentFiles(fileList);
+
     if (processed.length > 0) {
       onAddPdfs(processed);
       if (!deckKey.trim()) {
@@ -91,31 +89,32 @@ export const InputPanel: React.FC<InputPanelProps> = ({
 
   const handleJsonFileUpload = async (fileList: File[] | FileList | null) => {
     if (!fileList || fileList.length === 0) return;
-    const text = await fileList[0].text();
+    const file = fileList[0];
+    const text = await file.text();
     onRawJsonChange(text);
-    setShowAdvancedJson(true);
+    setShowJsonEditor(true);
   };
 
   const handleGuidFileUpload = async (fileList: File[] | FileList | null) => {
     if (!fileList || fileList.length === 0) return;
-    const text = await fileList[0].text();
+    const file = fileList[0];
+    const text = await file.text();
     onImportGuidRegistry(text);
   };
-
-  const isBusy = isGeneratingMap || isGeneratingDeck;
 
   return (
     <section
       id="painel-entrada"
       className="bg-[#111827] border border-slate-800 rounded-xl p-6 space-y-5"
     >
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      {/* Clean Minimal Header */}
+      <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-base font-bold text-slate-100 font-display">
-            1. Importar Tema, Documentos ou Deck Existente
+            1. Entrada de Múltiplos Documentos & Tema
           </h1>
           <p className="text-xs text-slate-400 mt-0.5">
-            Anexe PDFs/resumos (diretrizes, aulas ou questões) e/ou importe um baralho JSON existente para preservar o histórico FSRS.
+            Anexe simultaneamente múltiplos PDFs/documentos (Diretrizes + Resumos + Questões) e/ou o JSON atual. Imagens ausentes são buscadas automaticamente no Google/Web.
           </p>
         </div>
 
@@ -124,7 +123,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           onClick={onLoadGenericSample}
           className="text-xs font-medium text-sky-400 hover:text-sky-300 underline underline-offset-4 whitespace-nowrap shrink-0 cursor-pointer"
         >
-          Carregar exemplo clínico
+          Carregar exemplo de teste
         </button>
       </div>
 
@@ -135,7 +134,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             htmlFor="deck-key-input"
             className="block text-xs font-medium text-slate-300 mb-1.5"
           >
-            Tema ou Identificador do Baralho
+            Tema ou Deck Key (`*_notes.json`)
           </label>
           <input
             id="deck-key-input"
@@ -176,10 +175,10 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           >
             <div className="min-w-0">
               <div className="text-xs font-medium text-slate-200 truncate">
-                Google Search + Imagens Reais
+                Google Search + Imagens Web
               </div>
               <div className="text-[11px] text-slate-400 truncate">
-                Diretrizes atualizadas e acervos clínicos
+                Diretrizes + Wikimedia, Wikipedia, LITFL
               </div>
             </div>
             <input
@@ -193,7 +192,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         </div>
       </div>
 
-      {/* Row 2: Multi-Document Dropzone */}
+      {/* Row 2: Multi-Document Dropzone (Diretriz + Resumo + Questões) */}
       <div>
         <input
           ref={pdfInputRef}
@@ -241,12 +240,12 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             <Upload className="w-4 h-4 text-sky-400 shrink-0" />
             <div className="text-left">
               <p className="text-xs font-medium text-slate-200">
-                Anexe documentos de apoio (Diretrizes, Resumos ou Provas)
+                Anexe múltiplos documentos simultaneamente (Diretrizes + Resumo + Questões)
               </p>
               <p className="text-[11px] text-slate-400">
-                Arraste arquivos <code className="font-mono text-slate-300">.pdf</code>,{' '}
+                Arraste vários arquivos <code className="font-mono text-slate-300">.pdf</code>,{' '}
                 <code className="font-mono text-slate-300">.txt</code> ou{' '}
-                <code className="font-mono text-slate-300">.md</code> — arquivos duplicados são filtrados automaticamente
+                <code className="font-mono text-slate-300">.md</code> de uma vez ou adicione em etapas
               </p>
             </div>
           </div>
@@ -254,7 +253,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-md whitespace-nowrap shrink-0">
             <Plus className="w-3.5 h-3.5 text-sky-400" />
             <span>
-              {pdfs.length > 0 ? `${pdfs.length} anexo(s) — Adicionar` : 'Selecionar Arquivos'}
+              {pdfs.length > 0
+                ? `${pdfs.length} documento(s) anexado(s) — Adicionar mais`
+                : 'Selecionar Múltiplos Arquivos'}
             </span>
           </span>
         </div>
@@ -263,7 +264,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           <div className="mt-2 border border-slate-800 rounded-lg bg-[#0B0F17] overflow-hidden">
             <div className="px-3.5 py-1.5 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
               <span>
-                <strong className="text-slate-200 tabular-nums">{pdfs.length}</strong> documento(s) anexado(s)
+                <strong className="text-slate-200">{pdfs.length}</strong> documento(s) prontos para síntese conjunta
               </span>
               <button
                 type="button"
@@ -276,7 +277,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             <ul className="divide-y divide-slate-800 max-h-40 overflow-y-auto">
               {pdfs.map((pdf, index) => (
                 <li
-                  key={`${pdf.name}-${pdf.size}-${index}`}
+                  key={`${pdf.name}-${index}`}
                   className="flex items-center justify-between px-3.5 py-2 text-xs"
                 >
                   <div className="flex items-center gap-2 min-w-0">
@@ -294,16 +295,6 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                     <span className="text-slate-400 tabular-nums shrink-0">
                       {Math.max(1, Math.round(pdf.size / 1024))} KB
                     </span>
-                    {pdf.extractedImages && pdf.extractedImages.length > 0 && (
-                      <>
-                        <span className="text-slate-600" aria-hidden="true">
-                          ·
-                        </span>
-                        <span className="text-emerald-400 text-[11px] font-medium tabular-nums shrink-0">
-                          {pdf.extractedImages.length} fig.
-                        </span>
-                      </>
-                    )}
                   </div>
                   <button
                     type="button"
@@ -320,26 +311,26 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         )}
       </div>
 
-      {/* Row 3: Importar Deck JSON + Disclosure Avançado para JSON Bruto & GUIDs FSRS */}
+      {/* Row 3: Compact / Collapsible Optional JSON Deck Upload + GUID FSRS Registry */}
       <div className="border border-slate-800 rounded-lg overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-[#0B0F17]/90">
           <button
             type="button"
-            onClick={() => setShowAdvancedJson((prev) => !prev)}
+            onClick={() => setShowJsonEditor((prev) => !prev)}
             className="flex items-center gap-2 text-xs font-medium text-slate-300 hover:text-slate-100 cursor-pointer"
           >
-            {showAdvancedJson ? (
+            {showJsonEditor ? (
               <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
             ) : (
               <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
             )}
-            <span>Importar Deck JSON &amp; Opções Avançadas (FSRS)</span>
+            <span>JSON Atual do Deck & Registro FSRS (`note_guid_registry.json`)</span>
           </button>
 
           <div className="flex flex-wrap items-center gap-2.5 text-xs">
             <span className="text-slate-400 tabular-nums">
-              {extractedMeta.existingIds.length} IDs carregados ·{' '}
-              <strong className="text-emerald-400">{guidCount}</strong> GUIDs FSRS
+              {extractedMeta.existingIds.length} IDs ·{' '}
+              <strong className="text-emerald-400">{guidCount}</strong> GUIDs FSRS salvos
             </span>
 
             <input
@@ -356,66 +347,63 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             <button
               type="button"
               onClick={() => jsonFileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <FileJson className="w-3.5 h-3.5 text-sky-400" />
-              <span>Importar .json</span>
+              <FileJson className="w-3 h-3" />
+              <span>Importar *_notes.json</span>
             </button>
+
+            <input
+              ref={guidFileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => {
+                const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = '';
+                void handleGuidFileUpload(selectedFiles);
+              }}
+              className="sr-only"
+            />
+            <button
+              type="button"
+              onClick={() => guidFileInputRef.current?.click()}
+              title="Importar arquivo note_guid_registry.json existente do desktop"
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-300 bg-slate-900 border border-slate-700 rounded hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Database className="w-3 h-3 text-emerald-400" />
+              <span>Importar GUIDs</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onExportGuidRegistry}
+              title="Baixar note_guid_registry.json atualizado"
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-300 bg-slate-900 border border-slate-700 rounded hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Download className="w-3 h-3 text-sky-400" />
+              <span>Baixar GUIDs</span>
+            </button>
+
+            {rawJsonText && (
+              <button
+                type="button"
+                onClick={() => onRawJsonChange('')}
+                className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Limpar JSON
+              </button>
+            )}
           </div>
         </div>
 
-        {showAdvancedJson && (
-          <div className="p-4 border-t border-slate-800 space-y-3 bg-[#0F1623]">
-            <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
-              <span className="text-[11px] text-slate-400">
-                Editor JSON bruto e sincronização manual de registro FSRS (<code className="font-mono text-slate-300">note_guid_registry.json</code>)
-              </span>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={guidFileInputRef}
-                  type="file"
-                  accept=".json,application/json"
-                  onChange={(e) => {
-                    const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
-                    e.target.value = '';
-                    void handleGuidFileUpload(selectedFiles);
-                  }}
-                  className="sr-only"
-                />
-                <button
-                  type="button"
-                  onClick={() => guidFileInputRef.current?.click()}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 bg-slate-900 border border-slate-700 rounded hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Database className="w-3 h-3 text-emerald-400" />
-                  <span>Importar GUIDs</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={onExportGuidRegistry}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 bg-slate-900 border border-slate-700 rounded hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Download className="w-3 h-3 text-sky-400" />
-                  <span>Baixar GUIDs</span>
-                </button>
-                {rawJsonText && (
-                  <button
-                    type="button"
-                    onClick={() => onRawJsonChange('')}
-                    className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    Limpar JSON
-                  </button>
-                )}
-              </div>
-            </div>
-
+        {showJsonEditor && (
+          <div className="p-4 border-t border-slate-800 space-y-2 bg-[#0F1623]">
             <textarea
               id="current-deck-json"
-              rows={5}
+              rows={6}
               value={rawJsonText}
               onChange={(e) => onRawJsonChange(e.target.value)}
-              placeholder='Cole o conteúdo de um arquivo *_notes.json existente para preservar os IDs FSRS...'
+              placeholder='Cole aqui o conteúdo do arquivo *_notes.json para preservar os "id" numéricos FSRS (áudios órfãos serão limpos e imagens locais serão buscadas automaticamente no Google/Web)...'
               className="w-full p-3 text-xs font-mono bg-[#0B0F17] text-slate-200 border border-slate-700 rounded-lg focus:border-sky-400 focus:outline-none leading-relaxed"
             />
             {jsonError && <p className="text-xs text-red-400">{jsonError}</p>}
@@ -428,40 +416,33 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         )}
       </div>
 
-      {/* Row 4: Clean Action Bar */}
+      {/* Row 4: Clean 2-Step Action Bar */}
       <div className="pt-1 flex flex-wrap items-center justify-end gap-3">
-        {isBusy && (
-          <button
-            type="button"
-            onClick={onCancelGeneration}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-red-200 bg-red-950/80 border border-red-700 rounded-lg hover:bg-red-900/80 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <XCircle className="w-3.5 h-3.5 text-red-400" />
-            <span>Cancelar</span>
-          </button>
-        )}
-
         <button
           type="button"
           onClick={onGenerateClinicalMap}
-          disabled={isBusy}
+          disabled={isGeneratingMap || isGeneratingDeck}
           className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <Layers className="w-3.5 h-3.5 text-sky-400" />
           <span>
-            {isGeneratingMap ? 'Gerando Mapa Clínico...' : '1. Gerar Mapa Clínico P1–P4'}
+            {isGeneratingMap
+              ? 'Gerando Mapa Clínico...'
+              : 'Passo 1: Gerar Mapa Clínico (P1 a P4) + Diretrizes'}
           </span>
         </button>
 
         <button
           type="button"
           onClick={onRecreateCanonicalDeck}
-          disabled={isBusy}
+          disabled={isGeneratingMap || isGeneratingDeck}
           className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <Sparkles className="w-3.5 h-3.5" />
           <span>
-            {isGeneratingDeck ? 'Gerando Deck...' : '2. Gerar / Reconstruir Deck'}
+            {isGeneratingDeck
+              ? 'Recriando Deck JSON...'
+              : 'Passo 2: Recriar Deck JSON Canônico'}
           </span>
         </button>
       </div>

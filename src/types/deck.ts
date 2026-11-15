@@ -4,8 +4,6 @@ export type DomainProfile =
   | 'ambulatorio'
   | 'cirurgico'
   | 'preventiva_normativo';
-
-export type GeminiModelOption = 'gemini-4-hydrogen' | 'gemini-3.8-flash';
 export type CardType = 'basic' | 'cloze';
 
 export interface ExamReference {
@@ -35,19 +33,6 @@ export interface GuidRegistryData {
   entries: Record<string, string>;
 }
 
-export interface PdfExtractedImage {
-  id: string;
-  pdfName: string;
-  pageNumber: number;
-  width: number;
-  height: number;
-  dataUrl: string;
-  pageTextSnippet: string;
-  suggestedFilename: string;
-  captionHint?: string;
-  kind?: 'embedded' | 'page_crop';
-}
-
 export interface MedicalImageResult {
   id: string;
   title: string;
@@ -57,10 +42,6 @@ export interface MedicalImageResult {
   suggestedFilename: string;
   defaultLegend: string;
   source: string;
-  fromMaterial?: boolean;
-  pdfName?: string;
-  pageNumber?: number;
-  materialScore?: number;
 }
 
 export interface CanonicalCard {
@@ -113,8 +94,6 @@ export interface ClinicalMapResponse {
   items: ClinicalMapItem[];
   guidelineUpdates: string[];
   groundingSources: GroundingSource[];
-  searchQueries?: string[];
-  googleSearchUsed?: boolean;
 }
 
 export type WarningCode =
@@ -181,7 +160,6 @@ export interface UploadedPdfFile {
   fileName?: string;
   textContent?: string;
   docRole?: 'diretriz' | 'resumo' | 'questoes' | 'documento';
-  extractedImages?: PdfExtractedImage[];
 }
 
 export interface DeckCurationStats {

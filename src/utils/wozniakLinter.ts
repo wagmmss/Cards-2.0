@@ -192,8 +192,8 @@ export function resolveLocalMediaFilename(
   }
 
   const src = (rawSrc || '').trim();
-  // 2. If already a local filename (not http/https/data/blob/pdfimg/buscar_imagem)
-  if (src && !/^(?:https?:|data:|blob:|pdfimg:|buscar_imagem:|\/)/i.test(src)) {
+  // 2. If already a local filename (not http/https/data/blob)
+  if (src && !/^(?:https?:|data:|blob:|\/)/i.test(src)) {
     const base = src.split(/[\\/]/).pop() || src;
     return base.replace(/[^a-zA-Z0-9_.-]+/g, '_');
   }
@@ -489,7 +489,6 @@ export function extractUnresolvedLocalImages(
   field: 'question' | 'hint';
   legendText: string;
   searchQuery: string;
-  pdfImageId?: string;
 }> {
   const availableSet = new Set<string>();
   if (availableMediaNames) {
@@ -505,12 +504,11 @@ export function extractUnresolvedLocalImages(
 
   const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
   const legendText = italicMatch?.[1] ? stripHtml(italicMatch[1]).trim() : '';
-  const answerText = stripHtml(card.answer || '').trim();
   const cleanFileWords = (fname: string) =>
     fname
       .replace(/\.[a-z0-9]+$/i, '')
       .replace(/[_-]+/g, ' ')
-      .replace(/\b(?:img|image|card|fig|figura|ficha|resumo|apostila|aula|slide|pagina|pag|p\d+|\d+)\b/gi, ' ')
+      .replace(/\b(?:img|image|card|fig|figura|\d+)\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -520,39 +518,27 @@ export function extractUnresolvedLocalImages(
     field: 'question' | 'hint';
     legendText: string;
     searchQuery: string;
-    pdfImageId?: string;
   }> = [];
 
   for (const ref of refs) {
     if (ref.kind !== 'image') continue;
     const raw = (ref.sourceUrl || '').trim();
-    const isPdfPlaceholder = /^pdfimg:/i.test(raw);
-    const isSearchPlaceholder = /^buscar_imagem:/i.test(raw);
     const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
     const isLoadedLocally =
-      !isPdfPlaceholder &&
-      !isSearchPlaceholder &&
-      (availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase()));
+      availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase());
 
     if (!isSelfContainedOrWeb && !isLoadedLocally) {
-      const pdfImageId = isPdfPlaceholder ? raw.replace(/^pdfimg:\s*/i, '').trim() : undefined;
-      const explicitSearch = isSearchPlaceholder
-        ? raw.replace(/^buscar_imagem:\s*/i, '').trim()
-        : '';
       const fileHint = cleanFileWords(ref.filename);
-      const searchQuery = (
-        explicitSearch ||
-        [answerText, legendText || fileHint, card.topic].filter(Boolean).join(' ')
-      )
+      const searchQuery = [legendText, card.topic, fileHint]
+        .filter(Boolean)
+        .join(' ')
         .slice(0, 140)
         .trim();
-
       unresolved.push({
         filename: ref.filename,
         field: ref.field,
         legendText,
         searchQuery: searchQuery || card.topic || 'medical exam',
-        ...(pdfImageId ? { pdfImageId } : {}),
       });
     }
   }
@@ -561,109 +547,23 @@ export function extractUnresolvedLocalImages(
 }
 
 /**
- * Formats a clean clinical visual legend inside `<i>Legenda visual: ...</i>`,
- * guaranteeing at least 6 descriptive words and avoiding double prefixes.
- */
-export function formatVisualLegendHtml(
-  rawLegend: string,
-  fallbackText?: string
-): string {
-  const cleanText = (val: string) =>
-    stripHtml(val || '')
-      .replace(/^(?:legenda(?:\s+visual)?|achado(?:\s+visual)?|imagem)\s*:\s*/i, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-  let body = cleanText(rawLegend);
-  const words = body.split(/\s+/).filter(Boolean);
-  if (words.length < 6) {
-    const fallbackBody = cleanText(fallbackText || '');
-    const fallbackWords = fallbackBody.split(/\s+/).filter(Boolean);
-    if (fallbackWords.length >= 6) {
-      body = fallbackBody;
-    } else if (words.length >= 2) {
-      body = `${body.replace(/[.!?]+$/, '')} para correlação diagnóstica e clínica do caso`;
-    } else {
-      body =
-        'Achado visual complementar do exame clínico para correlação diagnóstica no internato médico';
-    }
-  }
-
-  body = body.replace(/[;,:]+$/, '').trim();
-  if (!/[.!?]$/.test(body)) {
-    body += '.';
-  }
-  return `<i>Legenda visual: ${body}</i>`;
-}
-
-function injectVisualLegendIntoHint(
-  rawHint: string,
-  legendHtml: string,
-  mode: 'recognition' | 'feedback',
-  forceReplaceExisting: boolean
-): string {
-  let working = (rawHint || '').trim();
-  const leadingImgs: string[] = [];
-
-  if (mode === 'feedback') {
-    const imgMatch = working.match(/^(?:\s*<img\b[^>]*>\s*(?:<br\s*\/?>\s*)*)+/i);
-    if (imgMatch) {
-      const imgs = imgMatch[0].match(/<img\b[^>]*>/gi) || [];
-      leadingImgs.push(...imgs);
-      working = working.slice(imgMatch[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim();
-    }
-  } else {
-    working = working.replace(/<img\b[^>]*>(?:\s*<br\s*\/?>\s*)*/gi, '').trim();
-  }
-
-  const existingItalicMatch = working.match(/^<i>([\s\S]*?)<\/i>(?:\s*<br\s*\/?>\s*)*/i);
-  let chosenLegendHtml = legendHtml;
-
-  if (existingItalicMatch) {
-    const existingPlain = stripHtml(existingItalicMatch[1] || '');
-    const existingHasValidLegend =
-      existingPlain.split(/\s+/).filter(Boolean).length >= 6 &&
-      /^legenda\s+visual:/i.test(existingPlain);
-
-    if (!forceReplaceExisting && existingHasValidLegend) {
-      chosenLegendHtml = `<i>${existingPlain}</i>`;
-    }
-    working = working.slice(existingItalicMatch[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim();
-  }
-
-  const normalizedBody = /^<b>\s*Coment[áa]rio:/i.test(working)
-    ? working
-    : `<b>Comentário:</b> ${working.replace(/^Coment[áa]rio:\s*/i, '').trim()}`;
-
-  if (leadingImgs.length > 0) {
-    return `${leadingImgs.join('<br>')}<br>${chosenLegendHtml}<br><br>${normalizedBody}`;
-  }
-  return `${chosenLegendHtml}<br><br>${normalizedBody}`;
-}
-
-/**
- * Replaces a card's local `<img src="...">` (or current image) with a resolved web/material image URL
- * while preserving `data-anki-file`, storing 4–6 alternative thumbnails on `card.imageAlternatives`,
- * and guaranteeing `<i>Legenda visual: ...</i>` before `<b>Comentário:</b>`.
+ * Replaces a card's local `<img src="...">` (or current image) with a resolved web image URL
+ * while preserving `data-anki-file` and storing 4–6 alternative thumbnails on `card.imageAlternatives`.
  */
 export function applyResolvedWebImageToCard(
   card: CanonicalCard,
   targetFilename: string,
   chosenImage: MedicalImageResult,
-  alternatives: MedicalImageResult[],
-  legendOverride?: string
+  alternatives: MedicalImageResult[]
 ): CanonicalCard {
   const safeFile =
-    chosenImage.fromMaterial && chosenImage.suggestedFilename
-      ? chosenImage.suggestedFilename
-      : targetFilename.trim() ||
-        chosenImage.suggestedFilename ||
-        resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
+    targetFilename.trim() ||
+    chosenImage.suggestedFilename ||
+    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
   const newImgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
 
   let question = card.question || '';
   let hint = card.hint || '';
-  let placedIn: 'question' | 'hint' = card.image_mode === 'feedback' ? 'hint' : 'question';
 
   const replaceTargetImg = (html: string): { updated: string; replaced: boolean } => {
     let replaced = false;
@@ -673,8 +573,7 @@ export function applyResolvedWebImageToCard(
       if (
         !targetFilename ||
         localName.toLowerCase() === targetFilename.toLowerCase() ||
-        srcVal.toLowerCase().includes(targetFilename.toLowerCase()) ||
-        /^(?:pdfimg|buscar_imagem):/i.test(srcVal.trim())
+        srcVal.toLowerCase().includes(targetFilename.toLowerCase())
       ) {
         replaced = true;
         return newImgTag;
@@ -687,103 +586,25 @@ export function applyResolvedWebImageToCard(
   const qRes = replaceTargetImg(question);
   if (qRes.replaced) {
     question = qRes.updated;
-    placedIn = 'question';
   } else {
     const hRes = replaceTargetImg(hint);
     if (hRes.replaced) {
       hint = hRes.updated;
-      placedIn = 'hint';
     } else if (/<img\b/i.test(question)) {
       question = question.replace(/<img\b[^>]*>/i, newImgTag);
-      placedIn = 'question';
     } else if (/<img\b/i.test(hint)) {
       hint = hint.replace(/<img\b[^>]*>/i, newImgTag);
-      placedIn = 'hint';
     } else {
       question = `${question}<br>${newImgTag}`;
-      placedIn = 'question';
     }
   }
 
-  const effectiveMode: 'recognition' | 'feedback' =
-    placedIn === 'hint' ? 'feedback' : 'recognition';
-  const fallbackDesc = `Achado visual complementar de ${stripHtml(card.topic)} para correlação diagnóstica no internato`;
-  const candidateLegend = (legendOverride || '').trim() || chosenImage.defaultLegend || '';
-  const legendHtml = formatVisualLegendHtml(candidateLegend, fallbackDesc);
-
-  hint = injectVisualLegendIntoHint(
-    hint,
-    legendHtml,
-    effectiveMode,
-    Boolean(legendOverride && legendOverride.trim().length > 0)
-  );
-
   return {
     ...card,
-    image_mode: effectiveMode,
     question,
     hint,
     imageAlternatives: alternatives.slice(0, 6),
     isResolvingImage: false,
-  };
-}
-
-/**
- * Proactively attaches an image to a card that previously had none (choosing `recognition` on front
- * or `feedback` on hint) while preserving Wozniak/Matuschak hint structure (`<i>Legenda visual: ...</i><br><br><b>Comentário:</b> ...`).
- */
-export function attachVisualSuggestionToCard(
-  card: CanonicalCard,
-  chosenImage: MedicalImageResult,
-  legendText: string,
-  mode: 'recognition' | 'feedback',
-  alternatives: MedicalImageResult[]
-): CanonicalCard {
-  const cleanDeck = (card.deck_key || 'deck').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_') || 'deck';
-  const safeFile =
-    chosenImage.suggestedFilename?.trim() ||
-    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, cleanDeck);
-
-  const cleanQ = (card.question || '')
-    .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
-    .trim();
-  const cleanHint = (card.hint || '')
-    .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
-    .replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '')
-    .trim();
-
-  const normalizedComment = /^<b>\s*Coment[áa]rio:/i.test(cleanHint)
-    ? cleanHint
-    : `<b>Comentário:</b> ${cleanHint.replace(/^Coment[áa]rio:\s*/i, '').trim()}`;
-
-  const fallbackDesc = `Achado visual complementar de ${stripHtml(card.topic)} para correlação diagnóstica no internato`;
-  const legendHtml = formatVisualLegendHtml(
-    (legendText || '').trim() || chosenImage.defaultLegend || '',
-    fallbackDesc
-  );
-
-  const imgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
-
-  if (mode === 'recognition') {
-    return {
-      ...card,
-      image_mode: 'recognition',
-      imageVerified: false,
-      isResolvingImage: false,
-      imageAlternatives: alternatives.slice(0, 6),
-      question: `${cleanQ}<br>${imgTag}`,
-      hint: `${legendHtml}<br><br>${normalizedComment}`,
-    };
-  }
-
-  return {
-    ...card,
-    image_mode: 'feedback',
-    imageVerified: false,
-    isResolvingImage: false,
-    imageAlternatives: alternatives.slice(0, 6),
-    question: cleanQ,
-    hint: `${imgTag}<br>${legendHtml}<br><br>${normalizedComment}`,
   };
 }
 

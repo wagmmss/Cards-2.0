@@ -1,13 +1,9 @@
 import React from 'react';
 import { Download, PackageCheck } from 'lucide-react';
-import type { GeminiModelOption } from '../types/deck';
-import { sanitizeDeckKey } from '../utils/apiClient';
 
 interface TopBarProps {
   deckKey: string;
   cardCount: number;
-  selectedModel?: GeminiModelOption;
-  onSelectModel?: (model: GeminiModelOption) => void;
   onDownloadJson: () => void;
   onExportApkg: () => void;
   isExportingApkg?: boolean;
@@ -16,17 +12,16 @@ interface TopBarProps {
 export const TopBar: React.FC<TopBarProps> = ({
   deckKey,
   cardCount,
-  selectedModel = 'gemini-4-hydrogen',
-  onSelectModel,
   onDownloadJson,
   onExportApkg,
   isExportingApkg = false,
 }) => {
-  const cleanKey = sanitizeDeckKey(deckKey || 'deck');
+  const cleanKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
 
   return (
     <header className="bg-[#0F1623] border-b border-slate-800/90">
-      <div className="max-w-5xl mx-auto flex items-center justify-between gap-6 px-4 sm:px-6 py-3.5">
+      <div className="max-w-4xl mx-auto flex items-center justify-between gap-6 px-6 py-3.5">
+        {/* Zone 1: Brand title, one line */}
         <a
           href="#painel-entrada"
           className="text-sm font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 font-display"
@@ -34,15 +29,16 @@ export const TopBar: React.FC<TopBarProps> = ({
           Internato-First Card Architect
         </a>
 
+        {/* Zone 2: 4 concise single-line nav links */}
         <nav
           aria-label="Navegação Principal"
-          className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-400"
+          className="hidden sm:flex items-center gap-6 text-xs font-medium text-slate-400"
         >
           <a
             href="#painel-entrada"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
           >
-            Importar
+            Entrada
           </a>
           <a
             href="#mapa-clinico"
@@ -54,59 +50,26 @@ export const TopBar: React.FC<TopBarProps> = ({
             href="#linter-wozniak"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
           >
-            Revisão &amp; Mídias
+            Linter & Deck
           </a>
           <a
-            href="#exportar-apkg"
+            href="#doutrina-regras"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
           >
-            Exportar
+            Regras
           </a>
         </nav>
 
+        {/* Zone 3: Primary actions */}
         <div className="flex items-center gap-2 shrink-0">
-          {onSelectModel && (
-            <div
-              role="group"
-              aria-label="Modelo Gemini"
-              className="hidden sm:inline-flex items-center p-0.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-medium"
-            >
-              <button
-                type="button"
-                onClick={() => onSelectModel('gemini-4-hydrogen')}
-                title="Gemini 4 Hydrogen (maior profundidade clínica)"
-                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
-                  selectedModel === 'gemini-4-hydrogen'
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                }`}
-              >
-                Hydrogen
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectModel('gemini-3.8-flash')}
-                title="Gemini 3.8 Flash (mais rápido e econômico em cota)"
-                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
-                  selectedModel === 'gemini-3.8-flash'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                }`}
-              >
-                Flash
-              </button>
-            </div>
-          )}
-
           <button
             type="button"
             onClick={onDownloadJson}
             disabled={cardCount === 0}
-            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>JSON</span>
-            <span className="hidden lg:inline font-mono text-slate-400">({cleanKey})</span>
+            <span>{cleanKey}_notes.json</span>
           </button>
 
           <button
@@ -116,7 +79,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <PackageCheck className="w-3.5 h-3.5" />
-            <span>{isExportingApkg ? 'Gerando .apkg...' : 'Exportar .apkg'}</span>
+            <span>{isExportingApkg ? 'Gerando .apkg...' : 'Exportar .apkg (Anki)'}</span>
           </button>
         </div>
       </div>
