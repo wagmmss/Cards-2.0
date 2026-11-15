@@ -139,6 +139,7 @@ export async function searchMedicalImagesApi(
     query: string;
     topic?: string;
     question?: string;
+    answer?: string;
     hint?: string;
     preferGoogleGrounding?: boolean;
   },
@@ -154,6 +155,7 @@ export async function searchMedicalImagesApi(
           query: params.query,
           topic: params.topic || '',
           question: params.question || '',
+          answer: params.answer || '',
           hint: params.hint || '',
           preferGoogleGrounding: params.preferGoogleGrounding ?? true,
         }),

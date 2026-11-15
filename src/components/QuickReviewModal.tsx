@@ -125,6 +125,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           query: q,
           topic: cardSnapshot.topic,
           question: stripHtml(cardSnapshot.question),
+          answer: stripHtml(cardSnapshot.answer),
           hint: stripHtml(cardSnapshot.hint),
           preferGoogleGrounding: true,
         },

@@ -504,11 +504,12 @@ export function extractUnresolvedLocalImages(
 
   const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
   const legendText = italicMatch?.[1] ? stripHtml(italicMatch[1]).trim() : '';
+  const answerText = stripHtml(card.answer || '').trim();
   const cleanFileWords = (fname: string) =>
     fname
       .replace(/\.[a-z0-9]+$/i, '')
       .replace(/[_-]+/g, ' ')
-      .replace(/\b(?:img|image|card|fig|figura|\d+)\b/gi, ' ')
+      .replace(/\b(?:img|image|card|fig|figura|ficha|resumo|apostila|aula|slide|pagina|pag|p\d+|\d+)\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -529,7 +530,7 @@ export function extractUnresolvedLocalImages(
 
     if (!isSelfContainedOrWeb && !isLoadedLocally) {
       const fileHint = cleanFileWords(ref.filename);
-      const searchQuery = [legendText, card.topic, fileHint]
+      const searchQuery = [answerText, legendText || fileHint, card.topic]
         .filter(Boolean)
         .join(' ')
         .slice(0, 140)

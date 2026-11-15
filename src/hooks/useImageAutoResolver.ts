@@ -69,6 +69,7 @@ export function useImageAutoResolver(params: {
               query: targetRef.searchQuery,
               topic: card.topic,
               question: stripHtml(card.question),
+              answer: stripHtml(card.answer),
               hint: stripHtml(card.hint),
               preferGoogleGrounding: true,
             },

@@ -57,6 +57,7 @@ export function createMediaRouter(): express.Router {
         query = '',
         topic = '',
         question = '',
+        answer = '',
         hint = '',
         preferGoogleGrounding = true,
       } = req.body || {};
@@ -66,6 +67,7 @@ export function createMediaRouter(): express.Router {
         query: String(query || ''),
         topic: String(topic || ''),
         question: String(question || ''),
+        answer: String(answer || ''),
         hint: String(hint || ''),
         preferGoogleGrounding: Boolean(preferGoogleGrounding),
         signal,

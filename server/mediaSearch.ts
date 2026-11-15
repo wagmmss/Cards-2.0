@@ -23,12 +23,17 @@ export interface SearchMedicalImagesContext {
   query: string;
   topic?: string;
   question?: string;
+  answer?: string;
   hint?: string;
   preferGoogleGrounding?: boolean;
   signal?: AbortSignal;
 }
 
 export const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
+  [/\bbloqueio\s+de\s+ramo\s+direito|\bbrd\b/gi, 'right bundle branch block ECG'],
+  [/\bbloqueio\s+de\s+ramo\s+esquerdo|\bbre\b/gi, 'left bundle branch block ECG'],
+  [/\bwolff[-\s]?parkinson[-\s]?white|\bwpw\b|\bonda\s+delta\b|\bpr[eé][-\s]?excita[cç][aã]o\b/gi, 'Wolff-Parkinson-White syndrome delta wave ECG'],
+  [/\bbrugada\b/gi, 'Brugada syndrome ECG'],
   [/\bapendicite(?:\s+aguda)?\b/gi, 'acute appendicitis CT ultrasound'],
   [/\bdiverticulite(?:\s+aguda)?\b/gi, 'acute diverticulitis abdominal CT'],
   [/\bcolecistite(?:\s+aguda)?\b/gi, 'acute cholecystitis gallbladder ultrasound'],
@@ -277,8 +282,14 @@ export function scoreImageRelevance(
   if (/\b(diagram|schematic|flowchart|cartoon|illustration|map|chart|graph)\b/i.test(candidateText)) {
     score -= 14;
   }
-  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue)\b/i.test(candidateText)) {
-    score -= 28;
+  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape)\b/i.test(candidateText)) {
+    score -= 80;
+  }
+  if (
+    /\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|ultrasound)\b/i.test(queryContextText) &&
+    /\b(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histology|microscop)\b/i.test(candidateText)
+  ) {
+    score -= 90;
   }
 
   return score;
@@ -287,34 +298,49 @@ export function scoreImageRelevance(
 export function buildEnglishMedicalSearchQueries(
   rawQuery: string,
   topic = '',
-  question = ''
+  question = '',
+  answer = ''
 ): string[] {
   const queries: string[] = [];
-  const combined = `${rawQuery} ${topic} ${question}`;
+  const primaryText = `${answer} ${rawQuery} ${topic}`.trim();
+  const isEcgContext = /\b(?:ecg|ekg|eletrocardiograma|tra[cç]ado|qrs|onda\s+[prqt]|onda\s+delta|v1|v6|derivac|arritmia|bloqueio\s+de\s+ramo)\b/i.test(
+    `${primaryText} ${question}`
+  );
 
   for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
     regex.lastIndex = 0;
-    if (regex.test(combined) && !queries.includes(enTerm)) {
+    if (regex.test(primaryText) && !queries.includes(enTerm)) {
       queries.push(enTerm);
       if (queries.length >= 2) break;
     }
   }
 
-  const stripped = rawQuery
+  if (queries.length === 0 && question) {
+    for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
+      regex.lastIndex = 0;
+      if (isEcgContext && /chest x-ray/i.test(enTerm)) continue;
+      if (regex.test(question) && !queries.includes(enTerm)) {
+        queries.push(enTerm);
+        if (queries.length >= 2) break;
+      }
+    }
+  }
+
+  const stripped = (answer || rawQuery || topic)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(
-      /\b(?:na|no|nos|nas|em|de|do|da|dos|das|para|com|sem|qual|quais|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente|gestante|evolui|apresenta|reacao|adversa|exame|achado)\b/gi,
+      /\b(?:na|no|nos|nas|em|de|do|da|dos|das|para|com|sem|qual|quais|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente|gestante|evolui|apresenta|reacao|adversa|exame|achado|orelha|coelho|torre|padrao)\b/gi,
       ' '
     )
     .replace(/\s+/g, ' ')
     .trim();
 
   if (stripped && !queries.includes(stripped)) {
-    queries.push(stripped);
+    queries.push(isEcgContext && !/\becg\b/i.test(stripped) ? `${stripped} ECG` : stripped);
   }
   if (queries.length === 0) {
-    queries.push('clinical medical imaging diagnosis');
+    queries.push(isEcgContext ? 'electrocardiogram arrhythmia ECG' : 'clinical medical imaging diagnosis');
   }
   return queries.slice(0, 3);
 }
@@ -334,9 +360,10 @@ async function expandMedicalQueriesWithGemini(
   topic = '',
   question = '',
   hint = '',
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  answer = ''
 ): Promise<string[]> {
-  const fallbackQueries = buildEnglishMedicalSearchQueries(rawQuery, topic, question);
+  const fallbackQueries = buildEnglishMedicalSearchQueries(rawQuery, topic, question, answer);
   if (!ai) return fallbackQueries;
 
   try {
@@ -345,12 +372,14 @@ async function expandMedicalQueriesWithGemini(
       {
         model: FALLBACK_GEMINI_MODEL,
         contents: `Traduza e expanda esta busca clínica para encontrar IMAGENS MÉDICAS REAIS na internet (Wikimedia Commons, Wikipedia, Radiopaedia, LITFL, DermNet, PubMed).
-Retorne EXCLUSIVAMENTE um JSON array com 2 a 3 termos curtos em INGLÊS (2 a 5 palavras cada, focados no exame/foto/traçado clínico real):
-- Busca: "${rawQuery}"
+REGRAS: Foque no diagnóstico principal e modalidade de exame (ex: se for ECG, inclua "ECG"). Ignore comorbidades secundárias da vinheta e nunca traduza metáforas ao pé da letra ("orelha de coelho", "em torre").
+Retorne EXCLUSIVAMENTE um JSON array com 2 a 3 termos curtos em INGLÊS (2 a 5 palavras cada):
+- Diagnóstico/Resposta: "${answer.slice(0, 120)}"
+- Busca: "${rawQuery.slice(0, 120)}"
 - Tópico: "${topic}"
-- Pergunta: "${question.slice(0, 220)}"
-- Comentário: "${hint.slice(0, 180)}"
-Exemplo de saída: ["cardiotocography late decelerations", "uterine tachysystole CTG"]`,
+- Pergunta: "${question.slice(0, 180)}"
+- Comentário: "${hint.slice(0, 160)}"
+Exemplo de saída: ["right bundle branch block ECG", "RBBB V1 ECG LITFL"]`,
         config: {
           responseMimeType: 'application/json',
           maxOutputTokens: 200,
@@ -952,19 +981,21 @@ export async function searchMedicalImages(
     query = '',
     topic = '',
     question = '',
+    answer = '',
     hint = '',
     preferGoogleGrounding = true,
     signal,
   } = ctx;
 
-  const rawSearch = (query || topic || question || 'clinical diagnosis').trim();
+  const rawSearch = (query || answer || topic || question || 'clinical diagnosis').trim();
   const enQueries = await expandMedicalQueriesWithGemini(
     ai,
     rawSearch,
     topic,
     question,
     hint,
-    signal
+    signal,
+    answer
   );
 
   const [googleSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
@@ -1009,6 +1040,7 @@ export async function searchMedicalImages(
   }
 
   const ranked = Array.from(dedupedMap.values())
+    .filter((c) => (c.relevanceScore ?? 0) > 0)
     .sort((a, b) => {
       // Raster always outranks schematic SVG unless score gap is extreme
       const aSvg = Boolean(a.isSvg);

@@ -234,12 +234,6 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
                 </div>
               </div>
             )}
-
-            {showFileDetails && (
-              <div className="text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800/60 truncate">
-                Mídia offline Anki: <span className="text-sky-300">collection.media/{imgMeta.localFilename}</span>
-              </div>
-            )}
           </div>
         );
       })}

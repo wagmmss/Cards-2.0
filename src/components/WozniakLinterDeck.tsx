@@ -158,6 +158,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           query: queryText,
           topic: targetCard.topic,
           question: stripHtml(targetCard.question),
+          answer: stripHtml(targetCard.answer),
           hint: stripHtml(targetCard.hint),
           preferGoogleGrounding: true,
         },
@@ -185,7 +186,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       return;
     }
     setImagePickerCardId(card.id);
-    const defaultQuery = card.topic.replace(/\s*-\s*/g, ' ').trim();
+    const cleanAnswer = stripHtml(card.answer).replace(/\.$/, '').trim();
+    const defaultQuery = cleanAnswer || card.topic.replace(/\s*-\s*/g, ' ').trim();
     setImageSearchTerm(defaultQuery);
     void triggerMedicalImageSearch(card, defaultQuery);
   };
@@ -193,13 +195,15 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const handleRefreshQuickGallery = async (card: CanonicalCard) => {
     setRefreshingStripCardId(card.id);
     try {
+      const cleanAnswer = stripHtml(card.answer).replace(/\.$/, '').trim();
       const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
       const legend = italicMatch?.[1] ? stripHtml(italicMatch[1]) : '';
-      const q = `${legend} ${card.topic}`.trim();
+      const q = cleanAnswer || legend || card.topic;
       const webImages = await searchMedicalImagesApi({
         query: q,
         topic: card.topic,
         question: stripHtml(card.question),
+        answer: cleanAnswer,
         hint: stripHtml(card.hint),
         preferGoogleGrounding: true,
       });

@@ -173,20 +173,100 @@ ${cfg.closedCommands.map((c) => `  * "${c}"`).join("\n")}`;
 // server/geminiClient.ts
 var import_crypto = __toESM(require("crypto"), 1);
 var import_genai = require("@google/genai");
-function getAiClient() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-    return null;
-  }
+function parseGeminiApiKeys() {
+  const rawList = [process.env.GEMINI_API_KEYS || "", process.env.GEMINI_API_KEY || ""].join("\n").split(/[\s,;]+/).map((k) => k.trim()).filter((k) => k.length > 10 && k !== "MY_GEMINI_API_KEY");
+  return Array.from(new Set(rawList));
+}
+var geminiKeyCooldownUntil = /* @__PURE__ */ new Map();
+var geminiKeyCursor = 0;
+function getKeyFingerprint(apiKey) {
+  return import_crypto.default.createHash("sha256").update(apiKey).digest("hex").slice(0, 12);
+}
+function createGoogleGenAiClient(apiKey) {
   return new import_genai.GoogleGenAI({
     apiKey,
     httpOptions: {
-      timeout: 18e4,
+      timeout: 12e4,
       headers: {
         "User-Agent": "aistudio-build"
       }
     }
   });
+}
+function getAiClient() {
+  const keys = parseGeminiApiKeys();
+  if (keys.length === 0) return null;
+  const now = Date.now();
+  for (let offset = 0; offset < keys.length; offset++) {
+    const idx = (geminiKeyCursor + offset) % keys.length;
+    const key = keys[idx];
+    if ((geminiKeyCooldownUntil.get(key) || 0) <= now) {
+      return createGoogleGenAiClient(key);
+    }
+  }
+  return createGoogleGenAiClient(keys[geminiKeyCursor % keys.length]);
+}
+function isKeyRotationError(error) {
+  const raw = extractErrorDetails(error);
+  return /429|RESOURCE_EXHAUSTED|quota exceeded|402|prepayment credits|API_KEY_INVALID|PERMISSION_DENIED|403|503|UNAVAILABLE|high demand/i.test(
+    raw
+  );
+}
+function markKeyCooldown(apiKey, error) {
+  const raw = extractErrorDetails(error);
+  const isHardQuota = /per day|PerDay|limit:\s*20|402|prepayment credits|API_KEY_INVALID|PERMISSION_DENIED/i.test(
+    raw
+  );
+  const cooldownMs = isHardQuota ? 1e3 * 60 * 60 : 1e3 * 65;
+  geminiKeyCooldownUntil.set(apiKey, Date.now() + cooldownMs);
+}
+async function withGeminiKeyRotation(task, signal) {
+  const keys = parseGeminiApiKeys();
+  if (keys.length === 0) {
+    throw new Error(
+      "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no .env ou painel Secrets."
+    );
+  }
+  const now = Date.now();
+  const orderedKeys = [];
+  const cooledKeys = [];
+  for (let offset = 0; offset < keys.length; offset++) {
+    const idx = (geminiKeyCursor + offset) % keys.length;
+    const key = keys[idx];
+    if ((geminiKeyCooldownUntil.get(key) || 0) <= now) {
+      orderedKeys.push({ key, idx });
+    } else {
+      cooledKeys.push({ key, idx });
+    }
+  }
+  const candidates = orderedKeys.length > 0 ? orderedKeys : cooledKeys;
+  let lastError;
+  for (let i = 0; i < candidates.length; i++) {
+    if (signal?.aborted) {
+      throw new DOMException("Opera\xE7\xE3o cancelada pelo usu\xE1rio.", "AbortError");
+    }
+    const { key, idx } = candidates[i];
+    const fp = getKeyFingerprint(key);
+    const ai = createGoogleGenAiClient(key);
+    try {
+      const result = await task(ai, fp, idx, keys.length);
+      geminiKeyCursor = idx;
+      return result;
+    } catch (error) {
+      lastError = error;
+      if (signal?.aborted) throw error;
+      if (isKeyRotationError(error) && i < candidates.length - 1) {
+        markKeyCooldown(key, error);
+        console.warn(
+          `[gemini-keys] Chave #${idx + 1}/${keys.length} (${fp}) falhou (${extractErrorDetails(error).slice(0, 120)}). Rotacionando...`
+        );
+        geminiKeyCursor = (idx + 1) % keys.length;
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
 }
 var INTERNATO_SYSTEM_INSTRUCTION = `Voc\xEA \xE9 o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor s\xEAnior do Internato da FMUSP e Unicamp e especialista em design de prompts de repeti\xE7\xE3o espa\xE7ada segundo **Andy Matuschak ("How to write good prompts: using spaced repetition to create understanding" \u2014 https://andymatuschak.org/prompts/)** e **Michael Nielsen ("Augmenting Long-Term Memory" \u2014 https://augmentingcognition.com/ltm.html)**.
 
@@ -525,15 +605,16 @@ async function generateContentWithRetry(ai, params, options = {}) {
 var GEMINI_FILE_CACHE_TTL_MS = 1e3 * 60 * 60 * 24;
 var geminiUploadedFileCache = /* @__PURE__ */ new Map();
 var geminiUploadInFlight = /* @__PURE__ */ new Map();
-async function uploadSinglePdfToGeminiFiles(ai, doc, signal) {
+async function uploadSinglePdfToGeminiFiles(ai, doc, signal, keyFingerprint = "default") {
   const base64Data = String(doc.base64Data || "");
   const mimeType = doc.mimeType || "application/pdf";
   const hash = import_crypto.default.createHash("sha256").update(base64Data).digest("hex");
-  const cached = geminiUploadedFileCache.get(hash);
+  const cacheKey = `${keyFingerprint}:${hash}`;
+  const cached = geminiUploadedFileCache.get(cacheKey);
   if (cached && Date.now() - cached.uploadedAt < GEMINI_FILE_CACHE_TTL_MS) {
     return cached;
   }
-  const existingPromise = geminiUploadInFlight.get(hash);
+  const existingPromise = geminiUploadInFlight.get(cacheKey);
   if (existingPromise) {
     return existingPromise;
   }
@@ -573,7 +654,7 @@ async function uploadSinglePdfToGeminiFiles(ai, doc, signal) {
           name: uploaded.name || "",
           uploadedAt: Date.now()
         };
-        geminiUploadedFileCache.set(hash, entry);
+        geminiUploadedFileCache.set(cacheKey, entry);
         return entry;
       } catch (err) {
         lastErr = err;
@@ -591,14 +672,14 @@ async function uploadSinglePdfToGeminiFiles(ai, doc, signal) {
     }
     throw lastErr;
   })();
-  geminiUploadInFlight.set(hash, uploadTask);
+  geminiUploadInFlight.set(cacheKey, uploadTask);
   try {
     return await uploadTask;
   } finally {
-    geminiUploadInFlight.delete(hash);
+    geminiUploadInFlight.delete(cacheKey);
   }
 }
-async function resolveDocumentPartsForGemini(ai, pdfs, signal) {
+async function resolveDocumentPartsForGemini(ai, pdfs, signal, keyFingerprint = "default") {
   const parts = [];
   if (!Array.isArray(pdfs)) return parts;
   for (const pdf of pdfs) {
@@ -615,7 +696,7 @@ ${pdf.textContent.slice(0, 6e4)}`
     } else if (pdf?.base64Data && typeof pdf.base64Data === "string") {
       const mimeType = pdf.mimeType || "application/pdf";
       try {
-        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf, signal);
+        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf, signal, keyFingerprint);
         parts.push((0, import_genai.createPartFromUri)(uploaded.uri, uploaded.mimeType));
       } catch (uploadErr) {
         if (signal?.aborted) throw uploadErr;
@@ -682,16 +763,19 @@ function createGeminiRouter() {
       if (!base64Data || typeof base64Data !== "string") {
         return res.status(400).json({ error: "Arquivo base64Data ausente." });
       }
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
         });
       }
-      const uploaded = await uploadSinglePdfToGeminiFiles(
-        ai,
-        { name, mimeType, base64Data },
+      const uploaded = await withGeminiKeyRotation(
+        (ai, keyFp) => uploadSinglePdfToGeminiFiles(
+          ai,
+          { name, mimeType, base64Data },
+          signal,
+          keyFp
+        ),
         signal
       );
       if (res.writableEnded) return;
@@ -720,8 +804,7 @@ function createGeminiRouter() {
         existingJsonSummary = "",
         useGoogleSearch = true
       } = req.body || {};
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
@@ -733,7 +816,6 @@ function createGeminiRouter() {
         existingJsonSummary
       );
       const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
-      const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal);
       const prompt = `Analise os documentos PDF anexados (se houver) e o tema m\xE9dico indicado pela Deck Key "${deckKey}".
 ${existingJsonSummary ? `Resumo do deck atual enviado pelo usu\xE1rio:
 ${existingJsonSummary}
@@ -769,30 +851,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON
   ]
 }
 Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
-      parts.push({ text: prompt });
       let result;
       try {
-        result = await generateContentWithRetry(
-          ai,
-          {
-            model: PRIMARY_GEMINI_MODEL,
-            contents: { parts },
-            config: {
-              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-              maxOutputTokens: 32768,
-              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH },
-              ...useGoogleSearch ? { tools: [{ googleSearch: {} }] } : { responseMimeType: "application/json" }
-            }
-          },
-          { signal, timeoutMs: 12e4, enableModelFallback: true }
-        );
-      } catch (primaryErr) {
-        if (!signal.aborted && useGoogleSearch && isRetryableGeminiError(primaryErr)) {
-          console.warn(
-            "[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:",
-            extractErrorDetails(primaryErr)
-          );
-          result = await generateContentWithRetry(
+        result = await withGeminiKeyRotation(async (ai, keyFp) => {
+          const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+          parts.push({ text: prompt });
+          return generateContentWithRetry(
             ai,
             {
               model: PRIMARY_GEMINI_MODEL,
@@ -800,12 +864,37 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfi
               config: {
                 systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
                 maxOutputTokens: 32768,
-                responseMimeType: "application/json",
-                thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.MEDIUM }
+                thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH },
+                ...useGoogleSearch ? { tools: [{ googleSearch: {} }] } : { responseMimeType: "application/json" }
               }
             },
-            { signal, timeoutMs: 9e4, enableModelFallback: true }
+            { signal, timeoutMs: 12e4, enableModelFallback: true }
           );
+        }, signal);
+      } catch (primaryErr) {
+        if (!signal.aborted && useGoogleSearch && isRetryableGeminiError(primaryErr)) {
+          console.warn(
+            "[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:",
+            extractErrorDetails(primaryErr)
+          );
+          result = await withGeminiKeyRotation(async (ai, keyFp) => {
+            const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+            parts.push({ text: prompt });
+            return generateContentWithRetry(
+              ai,
+              {
+                model: PRIMARY_GEMINI_MODEL,
+                contents: { parts },
+                config: {
+                  systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                  maxOutputTokens: 32768,
+                  responseMimeType: "application/json",
+                  thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.MEDIUM }
+                }
+              },
+              { signal, timeoutMs: 9e4, enableModelFallback: true }
+            );
+          }, signal);
         } else {
           throw primaryErr;
         }
@@ -849,14 +938,12 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfi
         nextNewIdStart = null,
         deckOutline = null
       } = req.body || {};
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
         });
       }
-      const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal);
       const existingIds = existingMetadata?.existingIds || [];
       const maxExistingId = existingIds.length > 0 ? Math.max(...existingIds) : 171000100;
       const effectiveNewIdStart = typeof nextNewIdStart === "number" && nextNewIdStart > maxExistingId ? nextNewIdStart : maxExistingId + 1;
@@ -941,20 +1028,23 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
     }
   ]
 }`;
-        const response = await generateContentWithRetry(
-          ai,
-          {
-            model: PRIMARY_GEMINI_MODEL,
-            contents: { parts: [...parts, { text: prompt }] },
-            config: {
-              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-              responseMimeType: "application/json",
-              maxOutputTokens: 65536,
-              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
-            }
-          },
-          { signal, timeoutMs: 15e4, enableModelFallback: true }
-        );
+        const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+          const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+          return generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: { parts: [...parts, { text: prompt }] },
+              config: {
+                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                responseMimeType: "application/json",
+                maxOutputTokens: 65536,
+                thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
+              }
+            },
+            { signal, timeoutMs: 15e4, enableModelFallback: true }
+          );
+        }, signal);
         lastModelUsed = response.modelUsed;
         const rawText = response.text || "{}";
         const finishReason = response.finishReason;
@@ -1023,8 +1113,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
       if (checkedMapItems.length === 0) {
         return res.json({ deck_key: deckKey, notes: [] });
       }
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente."
@@ -1060,19 +1149,22 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
   "deck_key": "${deckKey}",
   "notes": []
 }`;
-      const response = await generateContentWithRetry(
-        ai,
-        {
-          model: PRIMARY_GEMINI_MODEL,
-          contents: [{ text: prompt }],
-          config: {
-            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-            responseMimeType: "application/json",
-            maxOutputTokens: 65536,
-            thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
-          }
-        },
-        { signal, timeoutMs: 135e3, enableModelFallback: true }
+      const response = await withGeminiKeyRotation(
+        (ai) => generateContentWithRetry(
+          ai,
+          {
+            model: PRIMARY_GEMINI_MODEL,
+            contents: [{ text: prompt }],
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: "application/json",
+              maxOutputTokens: 65536,
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
+            }
+          },
+          { signal, timeoutMs: 135e3, enableModelFallback: true }
+        ),
+        signal
       );
       if (res.writableEnded) return;
       const { notes, wasTruncated } = parseOrRecoverNotesJsonWithMeta(response.text || "{}");
@@ -1094,8 +1186,7 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
     const { signal, cleanup } = createRequestAbortSignal(req, res, 18e4);
     try {
       const { flaggedCards = [], deckKey = "internato_deck" } = req.body || {};
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
@@ -1130,19 +1221,22 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no formato:
     }
   ]
 }`;
-      const response = await generateContentWithRetry(
-        ai,
-        {
-          model: PRIMARY_GEMINI_MODEL,
-          contents: prompt,
-          config: {
-            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-            responseMimeType: "application/json",
-            maxOutputTokens: 65536,
-            thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
-          }
-        },
-        { signal, timeoutMs: 135e3, enableModelFallback: true }
+      const response = await withGeminiKeyRotation(
+        (ai) => generateContentWithRetry(
+          ai,
+          {
+            model: PRIMARY_GEMINI_MODEL,
+            contents: prompt,
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: "application/json",
+              maxOutputTokens: 65536,
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
+            }
+          },
+          { signal, timeoutMs: 135e3, enableModelFallback: true }
+        ),
+        signal
       );
       if (res.writableEnded) return;
       const rawText = response.text || "{}";
@@ -1756,6 +1850,10 @@ async function buildAnkiApkgBuffer(params) {
 // server/mediaSearch.ts
 var import_genai3 = require("@google/genai");
 var PT_TO_EN_MEDICAL_TERMS = [
+  [/\bbloqueio\s+de\s+ramo\s+direito|\bbrd\b/gi, "right bundle branch block ECG"],
+  [/\bbloqueio\s+de\s+ramo\s+esquerdo|\bbre\b/gi, "left bundle branch block ECG"],
+  [/\bwolff[-\s]?parkinson[-\s]?white|\bwpw\b|\bonda\s+delta\b|\bpr[eé][-\s]?excita[cç][aã]o\b/gi, "Wolff-Parkinson-White syndrome delta wave ECG"],
+  [/\bbrugada\b/gi, "Brugada syndrome ECG"],
   [/\bapendicite(?:\s+aguda)?\b/gi, "acute appendicitis CT ultrasound"],
   [/\bdiverticulite(?:\s+aguda)?\b/gi, "acute diverticulitis abdominal CT"],
   [/\bcolecistite(?:\s+aguda)?\b/gi, "acute cholecystitis gallbladder ultrasound"],
@@ -1941,30 +2039,46 @@ function scoreImageRelevance(candidate, context) {
   if (/\b(diagram|schematic|flowchart|cartoon|illustration|map|chart|graph)\b/i.test(candidateText)) {
     score -= 14;
   }
-  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue)\b/i.test(candidateText)) {
-    score -= 28;
+  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape)\b/i.test(candidateText)) {
+    score -= 80;
+  }
+  if (/\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|ultrasound)\b/i.test(queryContextText) && /\b(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histology|microscop)\b/i.test(candidateText)) {
+    score -= 90;
   }
   return score;
 }
-function buildEnglishMedicalSearchQueries(rawQuery, topic = "", question = "") {
+function buildEnglishMedicalSearchQueries(rawQuery, topic = "", question = "", answer = "") {
   const queries = [];
-  const combined = `${rawQuery} ${topic} ${question}`;
+  const primaryText = `${answer} ${rawQuery} ${topic}`.trim();
+  const isEcgContext = /\b(?:ecg|ekg|eletrocardiograma|tra[cç]ado|qrs|onda\s+[prqt]|onda\s+delta|v1|v6|derivac|arritmia|bloqueio\s+de\s+ramo)\b/i.test(
+    `${primaryText} ${question}`
+  );
   for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
     regex.lastIndex = 0;
-    if (regex.test(combined) && !queries.includes(enTerm)) {
+    if (regex.test(primaryText) && !queries.includes(enTerm)) {
       queries.push(enTerm);
       if (queries.length >= 2) break;
     }
   }
-  const stripped = rawQuery.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(
-    /\b(?:na|no|nos|nas|em|de|do|da|dos|das|para|com|sem|qual|quais|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente|gestante|evolui|apresenta|reacao|adversa|exame|achado)\b/gi,
+  if (queries.length === 0 && question) {
+    for (const [regex, enTerm] of PT_TO_EN_MEDICAL_TERMS) {
+      regex.lastIndex = 0;
+      if (isEcgContext && /chest x-ray/i.test(enTerm)) continue;
+      if (regex.test(question) && !queries.includes(enTerm)) {
+        queries.push(enTerm);
+        if (queries.length >= 2) break;
+      }
+    }
+  }
+  const stripped = (answer || rawQuery || topic).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(
+    /\b(?:na|no|nos|nas|em|de|do|da|dos|das|para|com|sem|qual|quais|conduta|imediata|primeira|escolha|linha|tratamento|manejo|paciente|gestante|evolui|apresenta|reacao|adversa|exame|achado|orelha|coelho|torre|padrao)\b/gi,
     " "
   ).replace(/\s+/g, " ").trim();
   if (stripped && !queries.includes(stripped)) {
-    queries.push(stripped);
+    queries.push(isEcgContext && !/\becg\b/i.test(stripped) ? `${stripped} ECG` : stripped);
   }
   if (queries.length === 0) {
-    queries.push("clinical medical imaging diagnosis");
+    queries.push(isEcgContext ? "electrocardiogram arrhythmia ECG" : "clinical medical imaging diagnosis");
   }
   return queries.slice(0, 3);
 }
@@ -1976,8 +2090,8 @@ function combineSignals(parentSignal, timeoutMs = 4e3) {
   }
   return timeoutSignal;
 }
-async function expandMedicalQueriesWithGemini(ai, rawQuery, topic = "", question = "", hint = "", signal) {
-  const fallbackQueries = buildEnglishMedicalSearchQueries(rawQuery, topic, question);
+async function expandMedicalQueriesWithGemini(ai, rawQuery, topic = "", question = "", hint = "", signal, answer = "") {
+  const fallbackQueries = buildEnglishMedicalSearchQueries(rawQuery, topic, question, answer);
   if (!ai) return fallbackQueries;
   try {
     const res = await generateContentWithRetry(
@@ -1985,12 +2099,14 @@ async function expandMedicalQueriesWithGemini(ai, rawQuery, topic = "", question
       {
         model: FALLBACK_GEMINI_MODEL,
         contents: `Traduza e expanda esta busca cl\xEDnica para encontrar IMAGENS M\xC9DICAS REAIS na internet (Wikimedia Commons, Wikipedia, Radiopaedia, LITFL, DermNet, PubMed).
-Retorne EXCLUSIVAMENTE um JSON array com 2 a 3 termos curtos em INGL\xCAS (2 a 5 palavras cada, focados no exame/foto/tra\xE7ado cl\xEDnico real):
-- Busca: "${rawQuery}"
+REGRAS: Foque no diagn\xF3stico principal e modalidade de exame (ex: se for ECG, inclua "ECG"). Ignore comorbidades secund\xE1rias da vinheta e nunca traduza met\xE1foras ao p\xE9 da letra ("orelha de coelho", "em torre").
+Retorne EXCLUSIVAMENTE um JSON array com 2 a 3 termos curtos em INGL\xCAS (2 a 5 palavras cada):
+- Diagn\xF3stico/Resposta: "${answer.slice(0, 120)}"
+- Busca: "${rawQuery.slice(0, 120)}"
 - T\xF3pico: "${topic}"
-- Pergunta: "${question.slice(0, 220)}"
-- Coment\xE1rio: "${hint.slice(0, 180)}"
-Exemplo de sa\xEDda: ["cardiotocography late decelerations", "uterine tachysystole CTG"]`,
+- Pergunta: "${question.slice(0, 180)}"
+- Coment\xE1rio: "${hint.slice(0, 160)}"
+Exemplo de sa\xEDda: ["right bundle branch block ECG", "RBBB V1 ECG LITFL"]`,
         config: {
           responseMimeType: "application/json",
           maxOutputTokens: 200,
@@ -2394,18 +2510,20 @@ async function searchMedicalImages(ai, ctx) {
     query = "",
     topic = "",
     question = "",
+    answer = "",
     hint = "",
     preferGoogleGrounding = true,
     signal
   } = ctx;
-  const rawSearch = (query || topic || question || "clinical diagnosis").trim();
+  const rawSearch = (query || answer || topic || question || "clinical diagnosis").trim();
   const enQueries = await expandMedicalQueriesWithGemini(
     ai,
     rawSearch,
     topic,
     question,
     hint,
-    signal
+    signal,
+    answer
   );
   const [googleSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
     preferGoogleGrounding ? searchGoogleMedicalImagesViaGrounding(
@@ -2442,7 +2560,7 @@ async function searchMedicalImages(ai, ctx) {
       dedupedMap.set(key, scored);
     }
   }
-  const ranked = Array.from(dedupedMap.values()).sort((a, b) => {
+  const ranked = Array.from(dedupedMap.values()).filter((c) => (c.relevanceScore ?? 0) > 0).sort((a, b) => {
     const aSvg = Boolean(a.isSvg);
     const bSvg = Boolean(b.isSvg);
     if (aSvg !== bSvg) return aSvg ? 1 : -1;
@@ -2489,6 +2607,7 @@ function createMediaRouter() {
         query = "",
         topic = "",
         question = "",
+        answer = "",
         hint = "",
         preferGoogleGrounding = true
       } = req.body || {};
@@ -2497,6 +2616,7 @@ function createMediaRouter() {
         query: String(query || ""),
         topic: String(topic || ""),
         question: String(question || ""),
+        answer: String(answer || ""),
         hint: String(hint || ""),
         preferGoogleGrounding: Boolean(preferGoogleGrounding),
         signal

@@ -7,20 +7,119 @@ import {
   ThinkingLevel,
 } from '@google/genai';
 
-export function getAiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    return null;
-  }
+export function parseGeminiApiKeys(): string[] {
+  const rawList = [process.env.GEMINI_API_KEYS || '', process.env.GEMINI_API_KEY || '']
+    .join('\n')
+    .split(/[\s,;]+/)
+    .map((k) => k.trim())
+    .filter((k) => k.length > 10 && k !== 'MY_GEMINI_API_KEY');
+  return Array.from(new Set(rawList));
+}
+
+const geminiKeyCooldownUntil = new Map<string, number>();
+let geminiKeyCursor = 0;
+
+function getKeyFingerprint(apiKey: string): string {
+  return crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 12);
+}
+
+function createGoogleGenAiClient(apiKey: string): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
-      timeout: 180_000,
+      timeout: 120_000,
       headers: {
         'User-Agent': 'aistudio-build',
       },
     },
   });
+}
+
+export function getAiClient(): GoogleGenAI | null {
+  const keys = parseGeminiApiKeys();
+  if (keys.length === 0) return null;
+  const now = Date.now();
+  for (let offset = 0; offset < keys.length; offset++) {
+    const idx = (geminiKeyCursor + offset) % keys.length;
+    const key = keys[idx];
+    if ((geminiKeyCooldownUntil.get(key) || 0) <= now) {
+      return createGoogleGenAiClient(key);
+    }
+  }
+  return createGoogleGenAiClient(keys[geminiKeyCursor % keys.length]);
+}
+
+function isKeyRotationError(error: unknown): boolean {
+  const raw = extractErrorDetails(error);
+  return /429|RESOURCE_EXHAUSTED|quota exceeded|402|prepayment credits|API_KEY_INVALID|PERMISSION_DENIED|403|503|UNAVAILABLE|high demand/i.test(
+    raw
+  );
+}
+
+function markKeyCooldown(apiKey: string, error: unknown): void {
+  const raw = extractErrorDetails(error);
+  const isHardQuota = /per day|PerDay|limit:\s*20|402|prepayment credits|API_KEY_INVALID|PERMISSION_DENIED/i.test(
+    raw
+  );
+  const cooldownMs = isHardQuota ? 1000 * 60 * 60 : 1000 * 65;
+  geminiKeyCooldownUntil.set(apiKey, Date.now() + cooldownMs);
+}
+
+export async function withGeminiKeyRotation<T>(
+  task: (ai: GoogleGenAI, keyFingerprint: string, keyIndex: number, totalKeys: number) => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  const keys = parseGeminiApiKeys();
+  if (keys.length === 0) {
+    throw new Error(
+      'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no .env ou painel Secrets.'
+    );
+  }
+
+  const now = Date.now();
+  const orderedKeys: Array<{ key: string; idx: number }> = [];
+  const cooledKeys: Array<{ key: string; idx: number }> = [];
+
+  for (let offset = 0; offset < keys.length; offset++) {
+    const idx = (geminiKeyCursor + offset) % keys.length;
+    const key = keys[idx];
+    if ((geminiKeyCooldownUntil.get(key) || 0) <= now) {
+      orderedKeys.push({ key, idx });
+    } else {
+      cooledKeys.push({ key, idx });
+    }
+  }
+
+  const candidates = orderedKeys.length > 0 ? orderedKeys : cooledKeys;
+  let lastError: unknown;
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (signal?.aborted) {
+      throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
+    }
+    const { key, idx } = candidates[i];
+    const fp = getKeyFingerprint(key);
+    const ai = createGoogleGenAiClient(key);
+    try {
+      const result = await task(ai, fp, idx, keys.length);
+      geminiKeyCursor = idx;
+      return result;
+    } catch (error: unknown) {
+      lastError = error;
+      if (signal?.aborted) throw error;
+      if (isKeyRotationError(error) && i < candidates.length - 1) {
+        markKeyCooldown(key, error);
+        console.warn(
+          `[gemini-keys] Chave #${idx + 1}/${keys.length} (${fp}) falhou (${extractErrorDetails(error).slice(0, 120)}). Rotacionando...`
+        );
+        geminiKeyCursor = (idx + 1) % keys.length;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError;
 }
 
 export const INTERNATO_SYSTEM_INSTRUCTION = `Você é o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor sênior do Internato da FMUSP e Unicamp e especialista em design de prompts de repetição espaçada segundo **Andy Matuschak ("How to write good prompts: using spaced repetition to create understanding" — https://andymatuschak.org/prompts/)** e **Michael Nielsen ("Augmenting Long-Term Memory" — https://augmentingcognition.com/ltm.html)**.
@@ -462,18 +561,20 @@ export interface InputDocumentPayload {
 export async function uploadSinglePdfToGeminiFiles(
   ai: GoogleGenAI,
   doc: InputDocumentPayload,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  keyFingerprint = 'default'
 ): Promise<UploadedFileCacheEntry> {
   const base64Data = String(doc.base64Data || '');
   const mimeType = doc.mimeType || 'application/pdf';
   const hash = crypto.createHash('sha256').update(base64Data).digest('hex');
+  const cacheKey = `${keyFingerprint}:${hash}`;
 
-  const cached = geminiUploadedFileCache.get(hash);
+  const cached = geminiUploadedFileCache.get(cacheKey);
   if (cached && Date.now() - cached.uploadedAt < GEMINI_FILE_CACHE_TTL_MS) {
     return cached;
   }
 
-  const existingPromise = geminiUploadInFlight.get(hash);
+  const existingPromise = geminiUploadInFlight.get(cacheKey);
   if (existingPromise) {
     return existingPromise;
   }
@@ -518,7 +619,7 @@ export async function uploadSinglePdfToGeminiFiles(
           name: uploaded.name || '',
           uploadedAt: Date.now(),
         };
-        geminiUploadedFileCache.set(hash, entry);
+        geminiUploadedFileCache.set(cacheKey, entry);
         return entry;
       } catch (err: unknown) {
         lastErr = err;
@@ -538,18 +639,19 @@ export async function uploadSinglePdfToGeminiFiles(
     throw lastErr;
   })();
 
-  geminiUploadInFlight.set(hash, uploadTask);
+  geminiUploadInFlight.set(cacheKey, uploadTask);
   try {
     return await uploadTask;
   } finally {
-    geminiUploadInFlight.delete(hash);
+    geminiUploadInFlight.delete(cacheKey);
   }
 }
 
 export async function resolveDocumentPartsForGemini(
   ai: GoogleGenAI,
   pdfs: InputDocumentPayload[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  keyFingerprint = 'default'
 ): Promise<Part[]> {
   const parts: Part[] = [];
   if (!Array.isArray(pdfs)) return parts;
@@ -567,7 +669,7 @@ export async function resolveDocumentPartsForGemini(
     } else if (pdf?.base64Data && typeof pdf.base64Data === 'string') {
       const mimeType = pdf.mimeType || 'application/pdf';
       try {
-        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf, signal);
+        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf, signal, keyFingerprint);
         parts.push(createPartFromUri(uploaded.uri, uploaded.mimeType));
       } catch (uploadErr) {
         if (signal?.aborted) throw uploadErr;

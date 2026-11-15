@@ -9,14 +9,15 @@ import {
   extractJsonBlock,
   formatGeminiError,
   generateContentWithRetry,
-  getAiClient,
   INTERNATO_SYSTEM_INSTRUCTION,
   isRetryableGeminiError,
+  parseGeminiApiKeys,
   parseOrRecoverNotesJsonWithMeta,
   PRIMARY_GEMINI_MODEL,
   resolveDocumentPartsForGemini,
   sanitizeCardTextForPrompt,
   uploadSinglePdfToGeminiFiles,
+  withGeminiKeyRotation,
 } from '../geminiClient';
 
 function createRequestAbortSignal(req: Request, res: Response, maxMs: number): {
@@ -77,17 +78,21 @@ export function createGeminiRouter(): express.Router {
       if (!base64Data || typeof base64Data !== 'string') {
         return res.status(400).json({ error: 'Arquivo base64Data ausente.' });
       }
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error:
             'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
         });
       }
-      const uploaded = await uploadSinglePdfToGeminiFiles(
-        ai,
-        { name, mimeType, base64Data },
+      const uploaded = await withGeminiKeyRotation(
+        (ai, keyFp) =>
+          uploadSinglePdfToGeminiFiles(
+            ai,
+            { name, mimeType, base64Data },
+            signal,
+            keyFp
+          ),
         signal
       );
       if (res.writableEnded) return;
@@ -119,8 +124,7 @@ export function createGeminiRouter(): express.Router {
         useGoogleSearch = true,
       } = req.body || {};
 
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error:
@@ -134,7 +138,6 @@ export function createGeminiRouter(): express.Router {
         existingJsonSummary
       );
       const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
-      const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal);
 
       const prompt = `Analise os documentos PDF anexados (se houver) e o tema médico indicado pela Deck Key "${deckKey}".
 ${existingJsonSummary ? `Resumo do deck atual enviado pelo usuário:\n${existingJsonSummary}\n` : ''}
@@ -174,8 +177,6 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no
 }
 Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
 
-      parts.push({ text: prompt });
-
       let result: {
         text: string;
         finishReason?: string;
@@ -184,29 +185,10 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil 
       };
 
       try {
-        result = await generateContentWithRetry(
-          ai,
-          {
-            model: PRIMARY_GEMINI_MODEL,
-            contents: { parts },
-            config: {
-              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-              maxOutputTokens: 32768,
-              thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
-              ...(useGoogleSearch
-                ? { tools: [{ googleSearch: {} }] }
-                : { responseMimeType: 'application/json' }),
-            },
-          },
-          { signal, timeoutMs: 120_000, enableModelFallback: true }
-        );
-      } catch (primaryErr) {
-        if (!signal.aborted && useGoogleSearch && isRetryableGeminiError(primaryErr)) {
-          console.warn(
-            '[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:',
-            extractErrorDetails(primaryErr)
-          );
-          result = await generateContentWithRetry(
+        result = await withGeminiKeyRotation(async (ai, keyFp) => {
+          const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+          parts.push({ text: prompt });
+          return generateContentWithRetry(
             ai,
             {
               model: PRIMARY_GEMINI_MODEL,
@@ -214,12 +196,39 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil 
               config: {
                 systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
                 maxOutputTokens: 32768,
-                responseMimeType: 'application/json',
-                thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+                thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+                ...(useGoogleSearch
+                  ? { tools: [{ googleSearch: {} }] }
+                  : { responseMimeType: 'application/json' }),
               },
             },
-            { signal, timeoutMs: 90_000, enableModelFallback: true }
+            { signal, timeoutMs: 120_000, enableModelFallback: true }
           );
+        }, signal);
+      } catch (primaryErr) {
+        if (!signal.aborted && useGoogleSearch && isRetryableGeminiError(primaryErr)) {
+          console.warn(
+            '[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:',
+            extractErrorDetails(primaryErr)
+          );
+          result = await withGeminiKeyRotation(async (ai, keyFp) => {
+            const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+            parts.push({ text: prompt });
+            return generateContentWithRetry(
+              ai,
+              {
+                model: PRIMARY_GEMINI_MODEL,
+                contents: { parts },
+                config: {
+                  systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                  maxOutputTokens: 32768,
+                  responseMimeType: 'application/json',
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+                },
+              },
+              { signal, timeoutMs: 90_000, enableModelFallback: true }
+            );
+          }, signal);
         } else {
           throw primaryErr;
         }
@@ -271,16 +280,13 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil 
         deckOutline = null,
       } = req.body || {};
 
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error:
             'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
         });
       }
-
-      const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal);
 
       const existingIds: number[] = existingMetadata?.existingIds || [];
       const maxExistingId =
@@ -393,20 +399,23 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
   ]
 }`;
 
-        const response = await generateContentWithRetry(
-          ai,
-          {
-            model: PRIMARY_GEMINI_MODEL,
-            contents: { parts: [...parts, { text: prompt }] },
-            config: {
-              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-              responseMimeType: 'application/json',
-              maxOutputTokens: 65536,
-              thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+        const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+          const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+          return generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: { parts: [...parts, { text: prompt }] },
+              config: {
+                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                responseMimeType: 'application/json',
+                maxOutputTokens: 65536,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+              },
             },
-          },
-          { signal, timeoutMs: 150_000, enableModelFallback: true }
-        );
+            { signal, timeoutMs: 150_000, enableModelFallback: true }
+          );
+        }, signal);
         lastModelUsed = response.modelUsed;
 
         const rawText = response.text || '{}';
@@ -494,8 +503,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         return res.json({ deck_key: deckKey, notes: [] });
       }
 
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error: 'Chave GEMINI_API_KEY não configurada no ambiente.',
@@ -540,19 +548,23 @@ Retorne EXCLUSIVAMENTE um JSON válido:
   "notes": []
 }`;
 
-      const response = await generateContentWithRetry(
-        ai,
-        {
-          model: PRIMARY_GEMINI_MODEL,
-          contents: [{ text: prompt }],
-          config: {
-            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-            responseMimeType: 'application/json',
-            maxOutputTokens: 65536,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
-          },
-        },
-        { signal, timeoutMs: 135_000, enableModelFallback: true }
+      const response = await withGeminiKeyRotation(
+        (ai) =>
+          generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: [{ text: prompt }],
+              config: {
+                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                responseMimeType: 'application/json',
+                maxOutputTokens: 65536,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+              },
+            },
+            { signal, timeoutMs: 135_000, enableModelFallback: true }
+          ),
+        signal
       );
 
       if (res.writableEnded) return;
@@ -578,8 +590,7 @@ Retorne EXCLUSIVAMENTE um JSON válido:
     try {
       const { flaggedCards = [], deckKey = 'internato_deck' } = req.body || {};
 
-      const ai = getAiClient();
-      if (!ai) {
+      if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
           error:
@@ -617,19 +628,23 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
   ]
 }`;
 
-      const response = await generateContentWithRetry(
-        ai,
-        {
-          model: PRIMARY_GEMINI_MODEL,
-          contents: prompt,
-          config: {
-            systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-            responseMimeType: 'application/json',
-            maxOutputTokens: 65536,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
-          },
-        },
-        { signal, timeoutMs: 135_000, enableModelFallback: true }
+      const response = await withGeminiKeyRotation(
+        (ai) =>
+          generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: prompt,
+              config: {
+                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                responseMimeType: 'application/json',
+                maxOutputTokens: 65536,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+              },
+            },
+            { signal, timeoutMs: 135_000, enableModelFallback: true }
+          ),
+        signal
       );
 
       if (res.writableEnded) return;
