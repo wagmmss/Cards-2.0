@@ -9,8 +9,12 @@ import {
   RefreshCw,
   Eye,
 } from 'lucide-react';
-import { CanonicalCard, MedicalImageResult } from '../types/deck';
+import { CanonicalCard, MedicalImageResult, PdfExtractedImage } from '../types/deck';
 import { sanitizeDeckKey, searchMedicalImagesApi } from '../utils/apiClient';
+import {
+  matchMaterialImagesForCard,
+  mergeMaterialAndWebImages,
+} from '../utils/materialImageMatcher';
 import {
   applyResolvedWebImageToCard,
   resolveLocalMediaFilename,
@@ -22,6 +26,7 @@ interface QuickReviewModalProps {
   onClose: () => void;
   cards: CanonicalCard[];
   deckKey: string;
+  materialImages?: PdfExtractedImage[];
   onUpdateCard: (updated: CanonicalCard) => void;
 }
 
@@ -49,6 +54,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   onClose,
   cards,
   deckKey,
+  materialImages = [],
   onUpdateCard,
 }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -118,24 +124,44 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
     const controller = new AbortController();
     searchAbortRef.current = controller;
 
+    const cleanQ = stripHtml(cardSnapshot.question);
+    const cleanA = stripHtml(cardSnapshot.answer);
+    const cleanH = stripHtml(cardSnapshot.hint);
+
+    const materialHits = matchMaterialImagesForCard(materialImages, {
+      query: q,
+      topic: cardSnapshot.topic,
+      question: cleanQ,
+      answer: cleanA,
+      hint: cleanH,
+    });
+
+    if (materialHits.length > 0) {
+      onUpdateCard({
+        ...cardSnapshot,
+        imageAlternatives: materialHits.slice(0, 6),
+      });
+    }
+
     setIsSearchingGallery(true);
     try {
       const webImgs = await searchMedicalImagesApi(
         {
           query: q,
           topic: cardSnapshot.topic,
-          question: stripHtml(cardSnapshot.question),
-          answer: stripHtml(cardSnapshot.answer),
-          hint: stripHtml(cardSnapshot.hint),
+          question: cleanQ,
+          answer: cleanA,
+          hint: cleanH,
           preferGoogleGrounding: true,
         },
         controller.signal
       );
       if (controller.signal.aborted) return;
-      if (webImgs.length > 0) {
+      const merged = mergeMaterialAndWebImages(materialHits, webImgs, 6);
+      if (merged.length > 0) {
         onUpdateCard({
           ...cardSnapshot,
-          imageAlternatives: webImgs.slice(0, 6),
+          imageAlternatives: merged,
         });
       }
     } finally {
@@ -332,11 +358,11 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             </div>
           )}
 
-          {(hasImageInCard || alternatives.length > 0) && (
+          {(hasImageInCard || alternatives.length > 0 || materialImages.length > 0) && (
             <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-200">
-                  Troca Rápida de Imagem (1 clique)
+                  Troca Rápida de Imagem (Materiais + Web)
                 </span>
                 <form
                   onSubmit={(e) => {
@@ -362,29 +388,36 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                     ) : (
                       <Search className="w-3 h-3" />
                     )}
-                    <span>Buscar Web</span>
+                    <span>Buscar</span>
                   </button>
                 </form>
               </div>
 
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                {alternatives.slice(0, 6).map((alt) => (
-                  <button
-                    key={alt.id}
-                    type="button"
-                    onClick={() => handleSelectThumbnail(alt)}
-                    title={`${alt.title} (${alt.source})`}
-                    className="group relative h-16 rounded border border-slate-800 hover:border-sky-400 bg-slate-950 overflow-hidden flex items-center justify-center cursor-pointer transition-all"
-                  >
-                    <img
-                      src={alt.thumbUrl}
-                      alt={alt.title}
-                      loading="lazy"
-                      className="max-h-full max-w-full object-contain group-hover:scale-105 transition-transform"
-                    />
-                  </button>
-                ))}
-              </div>
+              {alternatives.length > 0 && (
+                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                  {alternatives.slice(0, 6).map((alt) => (
+                    <button
+                      key={alt.id}
+                      type="button"
+                      onClick={() => handleSelectThumbnail(alt)}
+                      title={`${alt.title} (${alt.source})`}
+                      className="group relative h-16 rounded border border-slate-800 hover:border-sky-400 bg-slate-950 overflow-hidden flex items-center justify-center cursor-pointer transition-all"
+                    >
+                      <img
+                        src={alt.thumbUrl}
+                        alt={alt.title}
+                        loading="lazy"
+                        className="max-h-full max-w-full object-contain group-hover:scale-105 transition-transform"
+                      />
+                      {alt.fromMaterial && (
+                        <span className="absolute bottom-0.5 right-0.5 px-1 py-0.2 rounded bg-emerald-950/90 border border-emerald-600/70 text-[9px] font-mono font-semibold text-emerald-300 leading-tight">
+                          PDF
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

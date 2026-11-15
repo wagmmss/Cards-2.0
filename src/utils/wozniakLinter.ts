@@ -192,8 +192,8 @@ export function resolveLocalMediaFilename(
   }
 
   const src = (rawSrc || '').trim();
-  // 2. If already a local filename (not http/https/data/blob)
-  if (src && !/^(?:https?:|data:|blob:|\/)/i.test(src)) {
+  // 2. If already a local filename (not http/https/data/blob/pdfimg/buscar_imagem)
+  if (src && !/^(?:https?:|data:|blob:|pdfimg:|buscar_imagem:|\/)/i.test(src)) {
     const base = src.split(/[\\/]/).pop() || src;
     return base.replace(/[^a-zA-Z0-9_.-]+/g, '_');
   }
@@ -489,6 +489,7 @@ export function extractUnresolvedLocalImages(
   field: 'question' | 'hint';
   legendText: string;
   searchQuery: string;
+  pdfImageId?: string;
 }> {
   const availableSet = new Set<string>();
   if (availableMediaNames) {
@@ -519,27 +520,39 @@ export function extractUnresolvedLocalImages(
     field: 'question' | 'hint';
     legendText: string;
     searchQuery: string;
+    pdfImageId?: string;
   }> = [];
 
   for (const ref of refs) {
     if (ref.kind !== 'image') continue;
     const raw = (ref.sourceUrl || '').trim();
+    const isPdfPlaceholder = /^pdfimg:/i.test(raw);
+    const isSearchPlaceholder = /^buscar_imagem:/i.test(raw);
     const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
     const isLoadedLocally =
-      availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase());
+      !isPdfPlaceholder &&
+      !isSearchPlaceholder &&
+      (availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase()));
 
     if (!isSelfContainedOrWeb && !isLoadedLocally) {
+      const pdfImageId = isPdfPlaceholder ? raw.replace(/^pdfimg:\s*/i, '').trim() : undefined;
+      const explicitSearch = isSearchPlaceholder
+        ? raw.replace(/^buscar_imagem:\s*/i, '').trim()
+        : '';
       const fileHint = cleanFileWords(ref.filename);
-      const searchQuery = [answerText, legendText || fileHint, card.topic]
-        .filter(Boolean)
-        .join(' ')
+      const searchQuery = (
+        explicitSearch ||
+        [answerText, legendText || fileHint, card.topic].filter(Boolean).join(' ')
+      )
         .slice(0, 140)
         .trim();
+
       unresolved.push({
         filename: ref.filename,
         field: ref.field,
         legendText,
         searchQuery: searchQuery || card.topic || 'medical exam',
+        ...(pdfImageId ? { pdfImageId } : {}),
       });
     }
   }
@@ -548,7 +561,7 @@ export function extractUnresolvedLocalImages(
 }
 
 /**
- * Replaces a card's local `<img src="...">` (or current image) with a resolved web image URL
+ * Replaces a card's local `<img src="...">` (or current image) with a resolved web/material image URL
  * while preserving `data-anki-file` and storing 4–6 alternative thumbnails on `card.imageAlternatives`.
  */
 export function applyResolvedWebImageToCard(
@@ -558,9 +571,11 @@ export function applyResolvedWebImageToCard(
   alternatives: MedicalImageResult[]
 ): CanonicalCard {
   const safeFile =
-    targetFilename.trim() ||
-    chosenImage.suggestedFilename ||
-    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
+    chosenImage.fromMaterial && chosenImage.suggestedFilename
+      ? chosenImage.suggestedFilename
+      : targetFilename.trim() ||
+        chosenImage.suggestedFilename ||
+        resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
   const newImgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
 
   let question = card.question || '';
@@ -574,7 +589,8 @@ export function applyResolvedWebImageToCard(
       if (
         !targetFilename ||
         localName.toLowerCase() === targetFilename.toLowerCase() ||
-        srcVal.toLowerCase().includes(targetFilename.toLowerCase())
+        srcVal.toLowerCase().includes(targetFilename.toLowerCase()) ||
+        /^(?:pdfimg|buscar_imagem):/i.test(srcVal.trim())
       ) {
         replaced = true;
         return newImgTag;
@@ -606,6 +622,59 @@ export function applyResolvedWebImageToCard(
     hint,
     imageAlternatives: alternatives.slice(0, 6),
     isResolvingImage: false,
+  };
+}
+
+/**
+ * Proactively attaches an image to a card that previously had none (choosing `recognition` on front
+ * or `feedback` on hint) while preserving Wozniak/Matuschak hint structure (`<i>Legenda</i><br><br><b>Comentário:</b> ...`).
+ */
+export function attachVisualSuggestionToCard(
+  card: CanonicalCard,
+  chosenImage: MedicalImageResult,
+  legendText: string,
+  mode: 'recognition' | 'feedback',
+  alternatives: MedicalImageResult[]
+): CanonicalCard {
+  const cleanDeck = (card.deck_key || 'deck').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_') || 'deck';
+  const safeFile =
+    chosenImage.suggestedFilename?.trim() ||
+    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, cleanDeck);
+
+  const cleanQ = (card.question || '')
+    .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+    .trim();
+  const cleanHint = (card.hint || '')
+    .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+    .replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '')
+    .trim();
+
+  const imgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
+
+  if (mode === 'recognition') {
+    const safeLegend =
+      (legendText || '').trim() ||
+      chosenImage.defaultLegend ||
+      `Exame complementar referente a ${stripHtml(card.topic)}.`;
+    return {
+      ...card,
+      image_mode: 'recognition',
+      imageVerified: false,
+      isResolvingImage: false,
+      imageAlternatives: alternatives.slice(0, 6),
+      question: `${cleanQ}<br>${imgTag}`,
+      hint: `<i>${safeLegend}</i><br><br>${cleanHint}`,
+    };
+  }
+
+  return {
+    ...card,
+    image_mode: 'feedback',
+    imageVerified: false,
+    isResolvingImage: false,
+    imageAlternatives: alternatives.slice(0, 6),
+    question: cleanQ,
+    hint: `${imgTag}<br>${cleanHint}`,
   };
 }
 

@@ -154,10 +154,16 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
   * **P2** = Decisão Diagnóstica, Estadiamento, Escores e Reconhecimento Visual (exames reais em image_mode: "recognition", pontos de corte numéricos exatos, interpretação de medidas/índices).
   * **P3** = Manejo Longitudinal / Seguimento / Prevenção / Fluxo Operacional (tratamento de 1ª linha, populações especiais, rastreamento, vacinas, reabilitação, prazos/fluxos documentais).
   * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Clássicas de Banca (mecanismos causais, pares confundíveis, exceções normativas).
+- AVALIAÇÃO VISUAL PROATIVA EM TODOS OS CARDS (MATERIAIS ANEXADOS + WEB):
+  * Não se limite a manter ou trocar imagens que já existiam no deck original. Para CADA card gerado ou reconstruído, raciocine se um exame visual real (ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, esfregaço/lâmina, foto semiológica, fluxograma ou tabela clínica) melhora significativamente a retenção e o raciocínio do estudante.
+  * Se existir uma figura compatível no "CATÁLOGO DE IMAGENS DOS MATERIAIS ANEXADOS" fornecido no prompt, insira <img src="pdfimg:ID_EXATO">.
+  * Se não houver figura correspondente nos PDFs, mas o card ganhar valor com imagem clínica real, insira <img src="buscar_imagem: termo clínico específico em PT ou EN"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">, <img src="buscar_imagem: pneumotorax hipertensivo radiografia torax">).
+  * Coloque <img ...> na "question" ("image_mode": "recognition") quando o estudante precisa reconhecer o achado visual para responder; ou coloque no início do "hint" ("image_mode": "feedback", antes de <b>Comentário:</b>) quando a imagem reforça a explicação, classificação ou algoritmo sem entregar a resposta na frente.
+  * Em cards puramente normativos, de dose ou cálculo simples onde imagem não acrescenta, NÃO force <img>.
 - FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato, ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>).
 - PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X").
-- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.`;
+- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.`;
 
 export function extractJsonBlock(text: string): string {
   if (!text) return '{}';
@@ -395,6 +401,7 @@ export async function generateContentWithRetry(
   finishReason?: string;
   modelUsed: string;
   groundingSources: Array<{ title: string; uri: string }>;
+  searchQueries: string[];
 }> {
   const { signal, timeoutMs = 150_000, enableModelFallback = true } = options;
 
@@ -470,6 +477,7 @@ export async function generateContentWithRetry(
           let fullText = '';
           let finishReason: string | undefined;
           const groundingChunks: Array<{ web?: { uri?: string; title?: string } }> = [];
+          const rawSearchQueries: string[] = [];
 
           for await (const chunk of stream) {
             if (signal?.aborted) {
@@ -487,6 +495,14 @@ export async function generateContentWithRetry(
             if (Array.isArray(chunks) && chunks.length > 0) {
               groundingChunks.push(...chunks);
             }
+            const queries = cand?.groundingMetadata?.webSearchQueries;
+            if (Array.isArray(queries) && queries.length > 0) {
+              for (const q of queries) {
+                if (typeof q === 'string' && q.trim()) {
+                  rawSearchQueries.push(q.trim());
+                }
+              }
+            }
           }
 
           const seen = new Set<string>();
@@ -500,11 +516,14 @@ export async function generateContentWithRetry(
             }
           }
 
+          const searchQueries = Array.from(new Set(rawSearchQueries));
+
           return {
             text: fullText,
             finishReason,
             modelUsed: plan.model,
             groundingSources,
+            searchQueries,
           };
         })(),
         timeoutMs,

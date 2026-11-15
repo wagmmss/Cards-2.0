@@ -50,6 +50,25 @@ export function loadSavedDeckSnapshot(): Partial<SavedDeckSnapshot> | null {
   return null;
 }
 
+function buildSafeStorageSnapshot(snapshot: SavedDeckSnapshot): SavedDeckSnapshot {
+  const safeCards = snapshot.cards.map((card) => {
+    if (!card.imageAlternatives || card.imageAlternatives.length === 0) {
+      return card;
+    }
+    const nonInlineAlts = card.imageAlternatives.filter(
+      (alt) => !alt.thumbUrl.startsWith('data:') && !alt.fullUrl.startsWith('data:')
+    );
+    if (nonInlineAlts.length === card.imageAlternatives.length) {
+      return card;
+    }
+    return {
+      ...card,
+      imageAlternatives: nonInlineAlts.length > 0 ? nonInlineAlts : undefined,
+    };
+  });
+  return { ...snapshot, cards: safeCards };
+}
+
 export function useDeckPersistence(snapshot: SavedDeckSnapshot) {
   const [guidRegistry, setGuidRegistry] = useState<GuidRegistryData>(() =>
     loadSavedGuidRegistry()
@@ -60,7 +79,11 @@ export function useDeckPersistence(snapshot: SavedDeckSnapshot) {
     const timer = window.setTimeout(() => {
       try {
         if (snapshot.cards.length > 0 || snapshot.deckKey.trim()) {
-          localStorage.setItem(STORAGE_DECK_STATE_KEY, JSON.stringify(snapshot));
+          const safeSnapshot = buildSafeStorageSnapshot(snapshot);
+          const serialized = JSON.stringify(safeSnapshot);
+          if (serialized.length < 4_200_000) {
+            localStorage.setItem(STORAGE_DECK_STATE_KEY, serialized);
+          }
         }
       } catch {
         // Ignore quota exceeded

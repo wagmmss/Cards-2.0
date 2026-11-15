@@ -4,9 +4,11 @@ import {
   Check,
   Copy,
   Eye,
+  ImagePlus,
   Plus,
   Search,
   Trash2,
+  XCircle,
   Zap,
 } from 'lucide-react';
 import { DeckCurationStats } from '../../types/deck';
@@ -22,7 +24,9 @@ interface DeckToolbarProps {
   mediaCount: number;
   totalFlaggedCards: number;
   totalCardsWithMissingMedia: number;
+  cardsWithoutImageCount: number;
   isAutoResolvingImages: boolean;
+  isSuggestingVisuals: boolean;
   isRepairing: boolean;
   curationStats?: DeckCurationStats | null;
   filterMode: DeckFilterMode;
@@ -36,6 +40,8 @@ interface DeckToolbarProps {
   onCurateAndRebalance: () => void;
   onAutoRepairAllFlagged: () => void;
   onAutoResolveMissingImages: () => void;
+  onSuggestVisualCards: () => void;
+  onCancelVisualActions?: () => void;
   onRemoveAllMissingMedia: () => void;
   onCopyJson: () => void;
   onAddNewCard: () => void;
@@ -50,7 +56,9 @@ export const DeckToolbar: React.FC<DeckToolbarProps> = ({
   mediaCount,
   totalFlaggedCards,
   totalCardsWithMissingMedia,
+  cardsWithoutImageCount,
   isAutoResolvingImages,
+  isSuggestingVisuals,
   isRepairing,
   curationStats,
   filterMode,
@@ -64,6 +72,8 @@ export const DeckToolbar: React.FC<DeckToolbarProps> = ({
   onCurateAndRebalance,
   onAutoRepairAllFlagged,
   onAutoResolveMissingImages,
+  onSuggestVisualCards,
+  onCancelVisualActions,
   onRemoveAllMissingMedia,
   onCopyJson,
   onAddNewCard,
@@ -171,12 +181,40 @@ export const DeckToolbar: React.FC<DeckToolbarProps> = ({
             </span>
           </button>
 
+          {cardsWithoutImageCount > 0 && (
+            <button
+              type="button"
+              onClick={onSuggestVisualCards}
+              disabled={isSuggestingVisuals || isAutoResolvingImages}
+              title="Analisa cards sem imagem para identificar quais ganham retenção clínica com ECG, RX, TC, foto ou figura dos materiais enviados"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-teal-400 hover:bg-teal-300 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <ImagePlus className="w-3.5 h-3.5" />
+              <span>
+                {isSuggestingVisuals
+                  ? 'Analisando cards...'
+                  : `Sugerir Imagens (IA) (${cardsWithoutImageCount})`}
+              </span>
+            </button>
+          )}
+
+          {(isSuggestingVisuals || isAutoResolvingImages) && onCancelVisualActions && (
+            <button
+              type="button"
+              onClick={onCancelVisualActions}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-red-200 bg-red-950/75 border border-red-700/70 hover:bg-red-900/80 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <XCircle className="w-3.5 h-3.5 text-red-400" />
+              <span>Cancelar</span>
+            </button>
+          )}
+
           {totalCardsWithMissingMedia > 0 && (
             <>
               <button
                 type="button"
                 onClick={onAutoResolveMissingImages}
-                disabled={isAutoResolvingImages}
+                disabled={isAutoResolvingImages || isSuggestingVisuals}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Search className="w-3.5 h-3.5" />

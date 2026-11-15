@@ -84,7 +84,7 @@ export const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
 ];
 
 const BLOCKED_IMAGE_URL_PATTERN =
-  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot)/i;
+  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid)/i;
 
 const WIKIMEDIA_USER_AGENT =
   'Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)';
@@ -201,12 +201,14 @@ export function scoreImageRelevance(
     query: string;
     topic?: string;
     question?: string;
+    answer?: string;
     enQueries?: string[];
   }
 ): number {
   let score = 0;
 
   const queryContextText = [
+    context.answer || '',
     context.query,
     context.topic || '',
     context.question || '',
@@ -235,7 +237,7 @@ export function scoreImageRelevance(
         score += 36;
         expectedModalityMatched = true;
       } else {
-        score -= 8;
+        score -= 10;
       }
     }
   }
@@ -248,13 +250,18 @@ export function scoreImageRelevance(
     }
   }
 
-  // 2) Lexical overlap with English expanded queries and original Portuguese terms
+  // 2) Lexical overlap with answer diagnosis, English expanded queries and original Portuguese terms
+  const answerTokens = new Set(tokenizeNormalized(context.answer || ''));
   const enTokens = new Set(tokenizeNormalized((context.enQueries || []).join(' ')));
   const ptTokens = new Set(
     tokenizeNormalized(`${context.query} ${context.topic || ''}`)
   );
   const candTokens = new Set(tokenizeNormalized(candidateText));
 
+  let answerHits = 0;
+  for (const tok of answerTokens) {
+    if (candTokens.has(tok)) answerHits++;
+  }
   let enHits = 0;
   for (const tok of enTokens) {
     if (candTokens.has(tok)) enHits++;
@@ -263,7 +270,10 @@ export function scoreImageRelevance(
   for (const tok of ptTokens) {
     if (candTokens.has(tok)) ptHits++;
   }
-  score += Math.min(35, enHits * 9 + ptHits * 6);
+  score += Math.min(44, answerHits * 11 + enHits * 9 + ptHits * 6);
+  if (!expectedModalityMatched && answerHits + enHits + ptHits === 0) {
+    score -= 28;
+  }
 
   // 3) Source authority & clinical repository quality
   const srcLower = `${candidate.source} ${candidate.fullUrl}`.toLowerCase();
@@ -271,7 +281,7 @@ export function scoreImageRelevance(
   else if (/radiopaedia/.test(srcLower)) score += 24;
   else if (/dermnet/.test(srcLower)) score += 22;
   else if (/pmc\.ncbi|ncbi\.nlm\.nih|scielo|nejm|bmj|openi/.test(srcLower)) score += 18;
-  else if (/wikipedia/.test(srcLower)) score += 14;
+  else if (/wikipedia/.test(srcLower)) score += 12;
   else if (/wikimedia/.test(srcLower)) score += 10;
   else if (/google/.test(srcLower)) score += 8;
 
@@ -282,12 +292,12 @@ export function scoreImageRelevance(
   if (/\b(diagram|schematic|flowchart|cartoon|illustration|map|chart|graph)\b/i.test(candidateText)) {
     score -= 14;
   }
-  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape)\b/i.test(candidateText)) {
+  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape|biography|scientist|inventor|nobel|pill|tablet|capsule|bottle|packaging|stethoscope|syringe|stock[\s_-]?photo)\b/i.test(candidateText)) {
     score -= 80;
   }
   if (
-    /\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|ultrasound)\b/i.test(queryContextText) &&
-    /\b(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histology|microscop)\b/i.test(candidateText)
+    /\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|tomografia|ultrasound|ultrassom|ultrassonografia|e-?fast)\b/i.test(queryContextText) &&
+    /(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histolog|microscop|diatom|microfossil|brightfield)/i.test(candidateText)
   ) {
     score -= 90;
   }
@@ -462,17 +472,67 @@ export async function searchWikipediaMedicalImages(
           pages?: Record<
             string,
             {
+              pageid?: number;
               title?: string;
+              thumbnail?: { source?: string; width?: number; height?: number };
+              original?: { source?: string; width?: number; height?: number };
               images?: Array<{ title?: string }>;
             }
           >;
         };
       };
 
+      const expectedTokenSet = new Set(
+        tokenizeNormalized([...enQueries, ptQuery].join(' ')).filter(
+          (tok) => !['medical', 'clinical', 'exam', 'image', 'photo', 'sign'].includes(tok)
+        )
+      );
+
       const fileTitles = new Set<string>();
       for (const page of Object.values(pData.query?.pages || {})) {
+        // 1) Prefer the Wikipedia article's primary lead pageimage first
+        const leadUrl = page.thumbnail?.source || page.original?.source;
+        const leadWidth = page.thumbnail?.width || page.original?.width || 400;
+        const leadHeight = page.thumbnail?.height || page.original?.height || 300;
+        if (
+          leadUrl &&
+          leadWidth >= 200 &&
+          leadHeight >= 130 &&
+          !isSpamOrLogoImageUrl(leadUrl, page.title || '')
+        ) {
+          const canonicalKey = normalizeImageCanonicalKey(leadUrl, page.title || '');
+          if (!seenKeys.has(canonicalKey)) {
+            seenKeys.add(canonicalKey);
+            const safeSlug = (page.title || query)
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '_')
+              .replace(/^_|_$/g, '')
+              .slice(0, 44);
+            results.push({
+              id: `wp-${lang}-lead-${page.pageid || results.length}`,
+              title: (page.title || query).slice(0, 85),
+              thumbUrl: leadUrl,
+              fullUrl: page.original?.source || leadUrl,
+              description: `Imagem principal do artigo médico "${page.title || query}" (${lang}.wikipedia.org).`,
+              suggestedFilename: `${safeSlug || 'wikipedia_med'}.jpg`,
+              defaultLegend: `Imagem clínica referente a ${page.title || query}.`,
+              source: `Wikipedia Medical (${lang.toUpperCase()})`,
+              isSvg: leadUrl.toLowerCase().endsWith('.svg'),
+            });
+          }
+        }
+
+        // 2) Only keep secondary embedded article files that lexically or clinically match the query/modality
         for (const img of page.images || []) {
-          if (img.title && !isSpamOrLogoImageUrl(img.title, img.title)) {
+          if (!img.title || isSpamOrLogoImageUrl(img.title, img.title)) continue;
+          const fileToks = tokenizeNormalized(img.title);
+          const sharesToken =
+            expectedTokenSet.size === 0 ||
+            fileToks.some((t) => expectedTokenSet.has(t)) ||
+            MODALITY_KEYWORDS.some(
+              (m) => m.ptEnTrigger.test(`${enQueries.join(' ')} ${ptQuery}`) && m.candidateMatch.test(img.title || '')
+            );
+          if (sharesToken) {
             fileTitles.add(img.title);
           }
         }
@@ -1030,6 +1090,7 @@ export async function searchMedicalImages(
         query: rawSearch,
         topic,
         question,
+        answer,
         enQueries,
       }),
     };
@@ -1039,8 +1100,12 @@ export async function searchMedicalImages(
     }
   }
 
-  const ranked = Array.from(dedupedMap.values())
-    .filter((c) => (c.relevanceScore ?? 0) > 0)
+  const allScored = Array.from(dedupedMap.values());
+  const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
+  const minThreshold = maxScore >= 18 ? 12 : 1;
+
+  const ranked = allScored
+    .filter((c) => (c.relevanceScore ?? 0) >= minThreshold)
     .sort((a, b) => {
       // Raster always outranks schematic SVG unless score gap is extreme
       const aSvg = Boolean(a.isSvg);

@@ -294,6 +294,16 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                     <span className="text-slate-400 tabular-nums shrink-0">
                       {Math.max(1, Math.round(pdf.size / 1024))} KB
                     </span>
+                    {pdf.extractedImages && pdf.extractedImages.length > 0 && (
+                      <>
+                        <span className="text-slate-600" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="text-emerald-400 text-[11px] font-medium tabular-nums shrink-0">
+                          {pdf.extractedImages.length} fig.
+                        </span>
+                      </>
+                    )}
                   </div>
                   <button
                     type="button"

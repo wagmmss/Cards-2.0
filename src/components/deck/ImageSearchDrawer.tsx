@@ -68,10 +68,10 @@ export const ImageSearchDrawer: React.FC<ImageSearchDrawerProps> = ({
       <div className="flex items-center justify-between gap-2">
         <div>
           <h4 className="text-xs font-semibold text-slate-100">
-            Buscar Imagem Médica Real (Web / LITFL / Radiopaedia / Wikimedia)
+            Buscar Imagem Médica (Seus Materiais + Web)
           </h4>
           <p className="text-[11px] text-slate-400">
-            Selecione abaixo, cole uma URL direta ou pressione <kbd className="px-1 py-0.5 bg-slate-800 rounded font-mono text-slate-200">Ctrl+V</kbd> com uma imagem copiada.
+            Combina figuras extraídas dos seus PDFs/textos com busca clínica real (LITFL, Radiopaedia, Wikimedia). Ou pressione <kbd className="px-1 py-0.5 bg-slate-800 rounded font-mono text-slate-200">Ctrl+V</kbd>.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -115,7 +115,7 @@ export const ImageSearchDrawer: React.FC<ImageSearchDrawerProps> = ({
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 disabled:opacity-50 rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
         >
           <Search className="w-3.5 h-3.5" />
-          <span>{isSearchingImages ? 'Buscando...' : 'Buscar na Web'}</span>
+          <span>{isSearchingImages ? 'Buscando...' : 'Buscar'}</span>
         </button>
       </form>
 
@@ -153,8 +153,18 @@ export const ImageSearchDrawer: React.FC<ImageSearchDrawerProps> = ({
                   <div className="text-[11px] font-semibold text-slate-200 line-clamp-1">
                     {img.title}
                   </div>
-                  <span className="text-[10px] text-sky-400 font-mono shrink-0">
-                    {img.source.split(' ')[0]}
+                  <span
+                    className={`text-[10px] font-mono shrink-0 ${
+                      img.fromMaterial
+                        ? 'px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-700/70 text-emerald-300'
+                        : 'text-sky-400'
+                    }`}
+                  >
+                    {img.fromMaterial
+                      ? img.source?.includes('Markdown')
+                        ? 'Material'
+                        : `PDF p.${img.pageNumber ?? 1}`
+                      : img.source.split(' ')[0]}
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-400 line-clamp-2 leading-snug">

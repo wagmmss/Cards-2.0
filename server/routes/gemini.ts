@@ -67,6 +67,43 @@ function resolveEffectiveDomainProfile(
   return inferDomainProfile(deckKey, textHint);
 }
 
+function formatPdfImagesCatalogBlock(pdfImagesCatalog: unknown): string {
+  if (!Array.isArray(pdfImagesCatalog) || pdfImagesCatalog.length === 0) {
+    return '';
+  }
+  const lines = pdfImagesCatalog
+    .slice(0, 45)
+    .map((item) => {
+      const rec = (item || {}) as Record<string, unknown>;
+      const id = sanitizeCardTextForPrompt(rec.id, 60);
+      if (!id) return null;
+      const pdfName = sanitizeCardTextForPrompt(rec.pdfName, 50) || 'material.pdf';
+      const pageNum = Number(rec.pageNumber) || 1;
+      const caption = sanitizeCardTextForPrompt(rec.captionHint, 90);
+      const snippet = sanitizeCardTextForPrompt(rec.pageTextSnippet, 140);
+      const desc = [caption, snippet].filter(Boolean).join(' — ');
+      return `  * pdfimg:${id} | ${pdfName} (Pág. ${pageNum})${desc ? ` | Contexto: ${desc}` : ''}`;
+    })
+    .filter(Boolean);
+
+  if (lines.length === 0) return '';
+  return `\nCATÁLOGO DE IMAGENS EXTRAÍDAS DOS MATERIAIS ANEXADOS (prefira <img src="pdfimg:ID_EXATO"> quando houver correspondência clínica; caso contrário use <img src="buscar_imagem: termo clínico">):\n${lines.join('\n')}\n`;
+}
+
+function formatVerifiedGuidelinesBlock(clinicalMap: unknown): string {
+  const mapRec = (clinicalMap || {}) as { guidelineUpdates?: unknown };
+  const updates = Array.isArray(mapRec.guidelineUpdates)
+    ? mapRec.guidelineUpdates
+        .map((u) => sanitizeCardTextForPrompt(u, 280))
+        .filter(Boolean)
+        .slice(0, 15)
+    : [];
+  if (updates.length === 0) return '';
+  return `\nDIRETRIZES ATUALIZADAS VERIFICADAS (FONTE DE VERDADE CLÍNICA — aplique estas doses, esquemas e prazos nos cards):\n${updates
+    .map((u) => `- ${u}`)
+    .join('\n')}\n`;
+}
+
 export function createGeminiRouter(): express.Router {
   const router = express.Router();
 
@@ -139,20 +176,78 @@ export function createGeminiRouter(): express.Router {
       );
       const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
 
-      const prompt = `Analise os documentos PDF anexados (se houver) e o tema médico indicado pela Deck Key "${deckKey}".
-${existingJsonSummary ? `Resumo do deck atual enviado pelo usuário:\n${existingJsonSummary}\n` : ''}
-${
-  useGoogleSearch
-    ? 'Utilize o Google Search para verificar diretrizes atualizadas do Ministério da Saúde (MS), Sociedades Médicas Brasileiras (FEBRASGO, SBC, SBP, SBGG, CBC, CFM, etc.), consensos internacionais recentes e referências de exames/normas aplicáveis a este tema.'
-    : ''
-}
+      // Estágio 1: Pesquisa Clínica Multi-Eixo dedicada via Google Search Grounding (sem disputa com JSON)
+      let groundedDossierText = '';
+      let groundedSources: Array<{ title: string; uri: string }> = [];
+      let groundedSearchQueries: string[] = [];
+      let googleSearchUsed = false;
 
+      if (useGoogleSearch) {
+        const searchPrompt = `Realize múltiplas consultas no Google Search para levantar um dossiê clínico COMPLETO e ATUALIZADO (2023–2026) sobre o tema "${deckKey}" (perfil de domínio: ${effectiveProfile}).
+${existingJsonSummary ? `Contexto resumido dos cards já existentes no baralho:\n${existingJsonSummary}\n` : ''}
+PESQUISE OBRIGATORIAMENTE OS 6 EIXOS ABAIXO (use várias buscas específicas por fonte brasileira e internacional — Ministério da Saúde / PCDT, FEBRASGO, SBC, SBP, SBGG, AMB, CFM, CDC, WHO):
+1. Diagnóstico, critérios classificatórios, estadiamento e pontos de corte laboratoriais/imagem atualizados.
+2. Tratamento de 1ª linha (drogas, doses exatas, via, intervalo e duração) e critérios claros de internação vs. manejo ambulatorial.
+3. Regimes alternativos e populações especiais (gestantes, lactantes, alergia a beta-lactâmicos/fármaco-chave, disfunção renal/hepática, pediatria/idoso).
+4. Profilaxias (PEP/PrEP/antibioticoprofilaxia/imunização), rastreamento e manejo de parcerias sexuais ou contactantes (janelas e prazos).
+5. Sinais de alarme, complicações graves, falha terapêutica, tempo-dependência e critérios de retorno/seguimento.
+6. Normas éticas, legais e vigilância epidemiológica (notificação compulsória imediata vs. semanal, prazos, sigilo, B.O./autorização judicial quando aplicável).
+
+Organize a resposta em tópicos objetivos por eixo, sempre citando a fonte e o ano da diretriz encontrada, doses completas e mudanças recentes de protocolo.`;
+
+        try {
+          const searchResult = await withGeminiKeyRotation(
+            (ai) =>
+              generateContentWithRetry(
+                ai,
+                {
+                  model: PRIMARY_GEMINI_MODEL,
+                  contents: searchPrompt,
+                  config: {
+                    maxOutputTokens: 16384,
+                    thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+                    tools: [{ googleSearch: {} }],
+                  },
+                },
+                { signal, timeoutMs: 85_000, enableModelFallback: true }
+              ),
+            signal
+          );
+          groundedDossierText = (searchResult.text || '').trim();
+          groundedSources = searchResult.groundingSources || [];
+          groundedSearchQueries = searchResult.searchQueries || [];
+          googleSearchUsed =
+            groundedSources.length > 0 ||
+            groundedSearchQueries.length > 0 ||
+            groundedDossierText.length > 120;
+        } catch (searchErr) {
+          if (signal.aborted || !isRetryableGeminiError(searchErr)) {
+            throw searchErr;
+          }
+          console.warn(
+            '[clinical-map] Stage 1 googleSearch failed with retryable error, proceeding to Stage 2:',
+            extractErrorDetails(searchErr)
+          );
+        }
+      }
+
+      const dossierBlock = groundedDossierText
+        ? `\nDOSSIÊ CLÍNICO OBTIDO VIA GOOGLE SEARCH GROUNDING (USE ESTES DADOS E FONTES COMO BASE):\n${groundedDossierText.slice(0, 14000)}\n`
+        : '';
+
+      const prompt = `Analise os documentos PDF anexados (se houver), o dossiê de diretrizes pesquisado e o tema médico indicado pela Deck Key "${deckKey}".
+${existingJsonSummary ? `Resumo do deck atual enviado pelo usuário:\n${existingJsonSummary}\n` : ''}${dossierBlock}
 ${profilePromptBlock}
 
 Gere um Mapa Clínico estruturado segundo a Doutrina Internato-First (P1 a P4) ADAPTADA ESTRITAMENTE AO PERFIL DE DOMÍNIO "${effectiveProfile}" acima para guiar a criação/recriação do deck.
 - Não force cenário de "Sala Vermelha" nem viés obstétrico/de emergência se o tema pertencer a outro perfil!
 - Inclua em P2 conceitos de Reconhecimento Visual de exames/imagens reais da internet APENAS quando exames complementares visuais fizerem sentido para o tema (ex.: ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, lâminas). Para temas normativos/ética/legais sem exame de imagem típico, foque P2 em documentação, prazos e interpretação de medidas/indicadores.
 - Aplique o Filtro Negativo: exclua genética de bancada, história da medicina e epidemiologia percentual que não mude conduta.
+
+REQUISITO DE PROFUNDIDADE PARA "guidelineUpdates":
+- Retorne entre **7 e 12 pontos clínicos detalhados, densos e acionáveis** (NUNCA retorne apenas 2 ou 3 resumos genéricos!).
+- Cubra múltiplos eixos do tema: diagnóstico/pontos de corte, 1ª linha com doses e duração exatas, critérios de internação/gravidade, regimes alternativos (gestante/alergia/disfunção orgânica), profilaxias/parcerias/vacinas, complicações/seguimento e normas ético-legais/notificação quando pertinente.
+- Formate cada item iniciando com "[Eixo · Fonte/Ano]: ..." (ex.: "[1ª Linha · PCDT IST/MS 2025]: ...").
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no seguinte formato exato:
 {
@@ -161,7 +256,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no
   "deckKey": "${deckKey}",
   "profile": "${effectiveProfile}",
   "guidelineUpdates": [
-    "Resumo objetivo de atualização de diretriz MS / Sociedade Brasileira / Norma CFM / Consenso com pontos de corte e condutas"
+    "[Diagnóstico · Fonte/Ano]: Critério objetivo, escore ou ponto de corte que muda conduta...",
+    "[1ª Linha · Fonte/Ano]: Esquema completo com droga, dose, via, intervalo e duração...",
+    "[Alternativa/Gestante · Fonte/Ano]: Opção segura ou ajuste na alergia/gestação/disfunção...",
+    "[Profilaxia/Parcerias · Fonte/Ano]: Janela temporal, vacina/imunoglobulina ou tratamento de contactantes...",
+    "[Internação/Alarme · Fonte/Ano]: Critérios objetivos de internação, falha terapêutica ou gravidade...",
+    "[Vigilância/Norma · Fonte/Ano]: Notificação compulsória, prazo, sigilo ou fluxo legal aplicável..."
   ],
   "items": [
     {
@@ -175,69 +275,38 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no
     }
   ]
 }
-Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
+Gere entre 10 e 16 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
 
-      let result: {
-        text: string;
-        finishReason?: string;
-        modelUsed: string;
-        groundingSources: Array<{ title: string; uri: string }>;
-      };
-
-      try {
-        result = await withGeminiKeyRotation(async (ai, keyFp) => {
-          const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
-          parts.push({ text: prompt });
-          return generateContentWithRetry(
-            ai,
-            {
-              model: PRIMARY_GEMINI_MODEL,
-              contents: { parts },
-              config: {
-                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-                maxOutputTokens: 32768,
-                thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
-                ...(useGoogleSearch
-                  ? { tools: [{ googleSearch: {} }] }
-                  : { responseMimeType: 'application/json' }),
-              },
+      const result = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: PRIMARY_GEMINI_MODEL,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              maxOutputTokens: 32768,
+              responseMimeType: 'application/json',
+              thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
             },
-            { signal, timeoutMs: 120_000, enableModelFallback: true }
-          );
-        }, signal);
-      } catch (primaryErr) {
-        if (!signal.aborted && useGoogleSearch && isRetryableGeminiError(primaryErr)) {
-          console.warn(
-            '[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:',
-            extractErrorDetails(primaryErr)
-          );
-          result = await withGeminiKeyRotation(async (ai, keyFp) => {
-            const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
-            parts.push({ text: prompt });
-            return generateContentWithRetry(
-              ai,
-              {
-                model: PRIMARY_GEMINI_MODEL,
-                contents: { parts },
-                config: {
-                  systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-                  maxOutputTokens: 32768,
-                  responseMimeType: 'application/json',
-                  thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-                },
-              },
-              { signal, timeoutMs: 90_000, enableModelFallback: true }
-            );
-          }, signal);
-        } else {
-          throw primaryErr;
-        }
-      }
+          },
+          { signal, timeoutMs: 120_000, enableModelFallback: true }
+        );
+      }, signal);
 
       if (res.writableEnded) return;
       const rawText = result.text || '{}';
       const cleanedJson = extractJsonBlock(rawText);
       const parsed = JSON.parse(cleanedJson);
+
+      const mergedSources =
+        groundedSources.length > 0
+          ? groundedSources
+          : result.groundingSources.length > 0
+          ? result.groundingSources
+          : parsed.groundingSources || [];
 
       return res.json({
         ...parsed,
@@ -248,16 +317,132 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil 
           existingJsonSummary
         ),
         modelUsed: result.modelUsed,
-        groundingSources:
-          result.groundingSources.length > 0
-            ? result.groundingSources
-            : parsed.groundingSources || [],
+        groundingSources: mergedSources,
+        searchQueries:
+          groundedSearchQueries.length > 0
+            ? groundedSearchQueries
+            : result.searchQueries || [],
+        googleSearchUsed,
       });
     } catch (error: unknown) {
       if (res.writableEnded) return;
       return res.status(200).json({
         fallback: true,
         error: formatGeminiError(error, 'Erro ao gerar o Mapa Clínico com Gemini.'),
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  // Passo 1b — Aprofundar Diretrizes via Google Search Grounding (expande pontos e fontes sob demanda)
+  router.post('/deepen-guidelines', async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 120_000);
+    try {
+      const {
+        deckKey = 'tema_clinico_internato',
+        themeTitle = '',
+        profile = 'auto',
+        focusQuery = '',
+        existingUpdates = [],
+      } = req.body || {};
+
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error:
+            'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
+        });
+      }
+
+      const effectiveProfile = resolveEffectiveDomainProfile(profile, deckKey, themeTitle);
+      const cleanExisting = Array.isArray(existingUpdates)
+        ? existingUpdates.map((u) => sanitizeCardTextForPrompt(u, 220)).filter(Boolean).slice(0, 20)
+        : [];
+      const cleanFocus = sanitizeCardTextForPrompt(focusQuery, 180);
+
+      const searchPrompt = `Você é um preceptor médico brasileiro atualizando diretrizes para prova de Residência (USP/Unicamp) e Internato via Google Search.
+Tema: "${themeTitle || deckKey}" (perfil: ${effectiveProfile}).
+${cleanFocus ? `FOCO SOLICITADO PELO USUÁRIO: "${cleanFocus}".` : 'FOCO: Expanda subtópicos críticos ainda NÃO detalhados abaixo (ex.: esquemas de 2ª linha, gestantes/alergias, doses pediátricas/ajuste renal, critérios de internação/alta, vacinas/rastreamento, complicações e atualizações recentes 2024–2026).'}
+
+PONTOS JÁ COBERTOS (NÃO REPITA ESTES):
+${cleanExisting.length > 0 ? cleanExisting.map((u) => `- ${u}`).join('\n') : '(nenhum ainda)'}
+
+Pesquise no Google Search diretrizes oficiais (MS/PCDT, FEBRASGO, SBC, SBP, AMB, CFM, CDC, WHO) e traga de 5 a 8 NOVOS achados clínicos objetivos com fonte, ano, doses exatas, pontos de corte e condutas específicas.`;
+
+      const searchResult = await withGeminiKeyRotation(
+        (ai) =>
+          generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: searchPrompt,
+              config: {
+                maxOutputTokens: 12288,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+                tools: [{ googleSearch: {} }],
+              },
+            },
+            { signal, timeoutMs: 75_000, enableModelFallback: true }
+          ),
+        signal
+      );
+
+      if (signal.aborted || res.writableEnded) return;
+
+      const synthPrompt = `Extraia do dossiê pesquisado abaixo entre 5 e 8 NOVOS pontos clínicos concisos e de alto rendimento para o tema "${themeTitle || deckKey}", sem repetir nenhum dos pontos já cobertos.
+Cada string deve seguir o padrão "[Eixo · Fonte/Ano]: recomendação exata com doses, cortes ou prazos".
+
+PONTOS JÁ COBERTOS:
+${cleanExisting.map((u) => `- ${u}`).join('\n')}
+
+DOSSIÊ PESQUISADO:
+${(searchResult.text || '').slice(0, 12000)}
+
+Retorne EXCLUSIVAMENTE um JSON válido:
+{
+  "newUpdates": [
+    "[Eixo · Fonte/Ano]: ..."
+  ]
+}`;
+
+      const synthResult = await withGeminiKeyRotation(
+        (ai) =>
+          generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: synthPrompt,
+              config: {
+                responseMimeType: 'application/json',
+                maxOutputTokens: 4096,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              },
+            },
+            { signal, timeoutMs: 40_000, enableModelFallback: true }
+          ),
+        signal
+      );
+
+      if (res.writableEnded) return;
+      const parsed = JSON.parse(extractJsonBlock(synthResult.text || '{}')) as {
+        newUpdates?: unknown[];
+      };
+      const newUpdates = Array.isArray(parsed?.newUpdates)
+        ? parsed.newUpdates.map((u) => String(u || '').trim()).filter(Boolean)
+        : [];
+
+      return res.json({
+        newUpdates,
+        groundingSources: searchResult.groundingSources || [],
+        searchQueries: searchResult.searchQueries || [],
+        modelUsed: searchResult.modelUsed,
+      });
+    } catch (error: unknown) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao aprofundar pesquisa de diretrizes no Google.'),
       });
     } finally {
       cleanup();
@@ -271,6 +456,7 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil 
       const {
         deckKey = 'tema_clinico_internato',
         pdfs = [],
+        pdfImagesCatalog = [],
         clinicalMap = null,
         existingMetadata = null,
         batchCards = null,
@@ -352,6 +538,9 @@ Gere entre 8 e 14 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil 
           : `MODO DE GERAÇÃO INTEGRAL DO BARALHO (${subsetCards.length} cards originais fornecidos):
 - Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos clínicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Clínico P1–P4.`;
 
+        const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
+        const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+
         const prompt = `Reconstrua profundamente e lapide o baralho canônico para o tema "${deckKey}".
 
 ${profilePromptBlock}
@@ -362,7 +551,7 @@ DADOS DO BARALHO ANTIGO (COMPLETO COM PERGUNTA, RESPOSTA E COMENTÁRIO ORIGINAL)
 - Total de cards no baralho original: ${existingIds.length}
 - Primeiro novo ID exclusivo reservado para este lote (se precisar desmembrar algum card deste lote): ${subsetNewIdStart}
 - Tags de Mídia Originais: ${JSON.stringify(mediaTags)}
-${outlineText ? `- ÍNDICE GLOBAL DE TODOS OS LOTES (use para não duplicar outros lotes nem transformar um card deste lote no tema de outro lote):\n${outlineText}\n` : ''}- Cards Originais DESTE LOTE para Reconstrução Profunda:
+${pdfCatalogBlock}${guidelinesBlock}${outlineText ? `- ÍNDICE GLOBAL DE TODOS OS LOTES (use para não duplicar outros lotes nem transformar um card deste lote no tema de outro lote):\n${outlineText}\n` : ''}- Cards Originais DESTE LOTE para Reconstrução Profunda:
 ${rawCardsSummary}
 
 ${isBatchMode ? 'DIRETRIZES CLÍNICAS DE REFERÊNCIA DO TEMA (apenas referência clínica — NÃO gere cards para itens que não estão nos Cards Originais deste lote; lacunas serão preenchidas após os lotes):' : 'MAPA CLÍNICO APROVADO (P1 a P4):'}
@@ -376,11 +565,18 @@ CHECKLIST DE VALIDAÇÃO ANTES DE GERAR CADA CARD:
 3. Se "cloze":
    - "question": contém ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposição pendurada no final, SEM "::dica" e SEM partir expressões ao meio (ex.: proibido "{{c1::3 critérios maiores e 1}} menor"). Mantenha a âncora clínica enxuta e natural: NÃO invente idade nem tempo cronológico artificial no enunciado quando a regra numérica é geral.
    - "answer": "" (string vazia).
-4. Zero Mídias Órfãs, Posicionamento Correto e Coerência Factual: NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>. Se o card original tiver <img src="..."> no "hint" (especialmente tabelas, algoritmos ou esquemas de resposta), MANTENHA a tag <img src="..."> e sua <i>Legenda</i> no INÍCIO do "hint" ("<img ...><br><i>Legenda</i><br><br><b>Comentário:</b> ..."), NUNCA movendo tabelas/esquemas para "question" nem colocando "<b>Comentário:</b>" antes da imagem. Garanta 100% de coerência numérica entre pergunta e hint.
+4. Raciocínio Visual Proativo (Materiais + Web), Zero Mídias Órfãs e Posicionamento Correto:
+   - NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>.
+   - Se o card original já tiver <img src="..."> válido no "hint" (especialmente tabelas, algoritmos ou esquemas de resposta), MANTENHA a tag <img src="..."> e sua <i>Legenda</i> no INÍCIO do "hint" ("<img ...><br><i>Legenda</i><br><br><b>Comentário:</b> ...").
+   - PROATIVO: Mesmo que o card original NÃO tenha imagem, avalie se ele se beneficia clinicamente de um ECG, radiografia, TC, USG, CTG, foto semiológica/dermatoscopia, lâmina ou fluxograma:
+     * Se houver imagem correspondente no CATÁLOGO DE IMAGENS DOS MATERIAIS ANEXADOS acima, insira <img src="pdfimg:ID_EXATO">!
+     * Se não houver no catálogo dos PDFs, insira <img src="buscar_imagem: query clínica precisa"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">)!
+     * Use na "question" ("image_mode": "recognition") quando o aluno precisa interpretar a imagem para responder, ou no início do "hint" ("image_mode": "feedback") quando ela serve para feedback visual/fluxograma. Não force imagens em cards puramente teóricos/normativos sem valor visual.
+   - Garanta 100% de coerência numérica entre pergunta e hint.
 5. Duplo Salto Cognitivo Implícito: NUNCA faça pergunta composta ("Qual o diagnóstico e a conduta?"). Apresente o caso clínico e pergunte apenas 1 decisão atômica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre parênteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <img ...><br><i>Legenda</i>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases (180 a 300 caracteres visíveis no comentário textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.
+8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <i>Legenda</i> ou <img ...>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases (180 a 300 caracteres visíveis no comentário textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.
 9. NÃO inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
@@ -486,6 +682,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         deckKey = 'tema_clinico_internato',
         clinicalMap = null,
         rebuiltCards = [],
+        pdfImagesCatalog = [],
         nextNewIdStart = 171000200,
       } = req.body || {};
 
@@ -519,6 +716,8 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
             )
             .join('\n')
         : '';
+      const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
 
       const prompt = `Audite a cobertura clínica do baralho reconstruído "${deckKey}" comparando-o com o Mapa Clínico P1–P4 aprovado para o perfil "${effectiveProfile}".
 
@@ -526,7 +725,7 @@ ${profilePromptBlock}
 
 MAPA CLÍNICO APROVADO:
 ${JSON.stringify(checkedMapItems, null, 2)}
-
+${guidelinesBlock}${pdfCatalogBlock}
 CARDS JÁ GERADOS NOS LOTES:
 ${existingDigest || 'Nenhum card gerado.'}
 
@@ -534,10 +733,10 @@ TAREFA CIRÚRGICA:
 - Identifique APENAS os conceitos essenciais do Mapa Clínico que ficaram SEM UM CARD PRÓPRIO DEDICADO (uma menção passageira dentro do comentário/"hint" ou lista lateral de outro card NÃO conta como card dedicado!).
 - Para cada lacuna real encontrada, crie 1 card atômico seguindo rigorosamente Andy Matuschak & Michael Nielsen, atribuindo IDs sequenciais a partir de ${nextNewIdStart}:
   * "topic": formato "Tema - Subtema" sem spoiler por palavra ou radical INCLUSIVE no prefixo antes de " - ".
-  * Para lacunas marcadas no mapa com "image_mode": "recognition" quando não existir arquivo de imagem no acervo original, formule pergunta clínica objetiva pelo achado esperado sem simular ou inventar <img>.
+  * Raciocínio visual proativo: se a lacuna envolve exame/lesão/traçado/algoritmo que ganhe retenção com imagem, use <img src="pdfimg:ID_EXATO"> (se presente no catálogo acima) ou <img src="buscar_imagem: query clínica específica"> na "question" ("image_mode": "recognition") ou no início do "hint" ("image_mode": "feedback"). NUNCA invente arquivos locais.
   * Se "basic": "question" <= 45–50 palavras (vinheta ou pergunta causal), "answer" com 1 a 12 palavras terminado em ponto final (.), sem ";".
   * Se "cloze": exatamente 1 lacuna {{c1::...}} (1 a 5 palavras) e "answer": "".
-  * "hint": comece com "<b>Comentário:</b> ", tenha entre 180 e 300 caracteres visíveis (medidos APÓS "<b>Comentário:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema.
+  * "hint": comece com "<b>Comentário:</b> " (precedido por <i>Legenda</i> ou <img ...><br> quando aplicável), tenha entre 180 e 300 caracteres visíveis (medidos APÓS "<b>Comentário:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema.
 - Se TODOS os conceitos do Mapa Clínico já possuírem card próprio dedicado acima, retorne "notes": [].
 - NUNCA duplique conceitos já cobertos nos cards existentes acima.
 - NÃO inclua o campo "sources".
@@ -663,6 +862,147 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
       return res.status(200).json({
         fallback: true,
         error: formatGeminiError(error, 'Erro ao auto-reparar cards com Gemini.'),
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  // Raciocínio Visual Proativo — Avalia quais cards sem imagem ganhariam valor clínico com uma figura (Materiais + Web)
+  router.post('/suggest-visual-cards', async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 130_000);
+    try {
+      const {
+        deckKey = 'internato_deck',
+        cards = [],
+        pdfImagesCatalog = [],
+      } = req.body || {};
+
+      const candidateCards = (Array.isArray(cards) ? cards : [])
+        .filter((c: { question?: unknown; hint?: unknown }) => {
+          const combined = `${String(c?.question || '')} ${String(c?.hint || '')}`;
+          return !/<img\b/i.test(combined);
+        })
+        .slice(0, 40);
+
+      if (candidateCards.length === 0) {
+        return res.json({ deckKey, suggestions: [] });
+      }
+
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error:
+            'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
+        });
+      }
+
+      const cardsDigest = candidateCards
+        .map(
+          (c: {
+            id?: unknown;
+            type?: unknown;
+            topic?: unknown;
+            question?: unknown;
+            answer?: unknown;
+            hint?: unknown;
+          }) =>
+            `- cardId: ${Number(c.id)} | type: ${c.type === 'cloze' ? 'cloze' : 'basic'} | topic: "${sanitizeCardTextForPrompt(c.topic, 80)}" | Q: "${sanitizeCardTextForPrompt(c.question, 220)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 110)}"` : ''} | Hint: "${sanitizeCardTextForPrompt(c.hint, 200)}"`
+        )
+        .join('\n');
+
+      const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
+
+      const prompt = `Você é um preceptor de Internato analisando flashcards médicos SEM imagem do deck "${deckKey}".
+Raciocine criticamente sobre QUAIS cards realmente se beneficiariam de uma imagem clínica para aumentar a retenção (ex.: traçado de ECG/CTG, radiografia, TC, USG, dermatoscopia/lesão cutânea, fundoscopia, esfregaço/lâmina, exame físico/sinal semiológico, fluxograma diagnóstico ou figura presente nos materiais anexados).
+
+REGRAS ESTRITAS:
+1. NÃO sugira imagem para cards puramente conceituais, definições éticas/normativas, doses isoladas ou cálculos simples onde uma figura seria decorativa ou aleatória.
+2. Escolha o "mode" ideal:
+   - "recognition": coloque a imagem na FRENTE (question) quando ver o exame/traçado/lesão ajuda no reconhecimento clínico (apenas em cards "basic" cujo enunciado não vire spoiler).
+   - "feedback": coloque a imagem no VERSO (hint) quando ela ilustra/confirma o achado, classificação, algoritmo ou comparação anatômica após o estudante responder (ideal para "cloze" e condutas).
+3. Se uma figura do CATÁLOGO DE MATERIAIS ANEXADOS abaixo corresponder bem ao conceito do card, preencha "pdfImageId" com o ID exato (ex.: "pdfimg_123_p4_1" — sem o prefixo "pdfimg:"). Mesmo quando usar "pdfImageId", preencha "searchQuery" como fallback médico preciso.
+4. "searchQuery": termo curto, específico e clínico em português ou inglês com diagnóstico + modalidade (ex.: "bloqueio de ramo direito V1 ECG", "pneumotorax hipertensivo radiografia torax", "cardiotocografia desaceleracao tardia"). NUNCA gere termos genéricos ("exame medico", "paciente", "sintoma").
+5. "legend": 1 frase clínica objetiva (máx. 130 chars) descrevendo o achado visual SEM dar spoiler caso seja "recognition".
+${pdfCatalogBlock}
+CARDS SEM IMAGEM PARA AVALIAR:
+${cardsDigest}
+
+Retorne EXCLUSIVAMENTE um JSON válido no formato:
+{
+  "suggestions": [
+    {
+      "cardId": 171000101,
+      "mode": "recognition",
+      "pdfImageId": "",
+      "searchQuery": "diagnostico + modalidade exame",
+      "legend": "Exame complementar evidenciando...",
+      "reason": "Justificativa curta do ganho pedagógico"
+    }
+  ]
+}`;
+
+      const response = await withGeminiKeyRotation(
+        (ai) =>
+          generateContentWithRetry(
+            ai,
+            {
+              model: PRIMARY_GEMINI_MODEL,
+              contents: prompt,
+              config: {
+                responseMimeType: 'application/json',
+                maxOutputTokens: 16384,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+              },
+            },
+            { signal, timeoutMs: 110_000, enableModelFallback: true }
+          ),
+        signal
+      );
+
+      if (res.writableEnded) return;
+      const parsed = JSON.parse(extractJsonBlock(response.text || '{}')) as {
+        suggestions?: Array<Record<string, unknown>>;
+      };
+      const validIds = new Set(candidateCards.map((c: { id?: unknown }) => Number(c.id)));
+      const rawList = Array.isArray(parsed?.suggestions)
+        ? parsed.suggestions
+        : Array.isArray(parsed)
+        ? parsed
+        : [];
+
+      const suggestions = rawList
+        .map((item: Record<string, unknown>) => {
+          const cardId = Number(item.cardId);
+          const searchQuery = String(item.searchQuery || '').trim();
+          if (!Number.isFinite(cardId) || !validIds.has(cardId) || !searchQuery) {
+            return null;
+          }
+          const rawPdfId = String(item.pdfImageId || '')
+            .replace(/^pdfimg:\s*/i, '')
+            .trim();
+          const mode: 'recognition' | 'feedback' =
+            item.mode === 'recognition' ? 'recognition' : 'feedback';
+          return {
+            cardId,
+            mode,
+            ...(rawPdfId ? { pdfImageId: rawPdfId } : {}),
+            searchQuery: searchQuery.slice(0, 120),
+            legend: String(item.legend || '').trim().slice(0, 180),
+            reason: String(item.reason || '').trim().slice(0, 160),
+          };
+        })
+        .filter((s): s is NonNullable<typeof s> => s !== null);
+
+      return res.json({ deckKey, suggestions, modelUsed: response.modelUsed });
+    } catch (error: unknown) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(
+          error,
+          'Erro ao analisar cards para sugestão proativa de imagens.'
+        ),
       });
     } finally {
       cleanup();

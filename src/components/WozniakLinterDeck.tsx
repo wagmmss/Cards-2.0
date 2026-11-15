@@ -6,6 +6,7 @@ import {
   DeckCurationStats,
   ExtractedDeckMetadata,
   MedicalImageResult,
+  PdfExtractedImage,
 } from '../types/deck';
 import {
   applyCanvasSpoilerMask,
@@ -13,6 +14,10 @@ import {
   sanitizeDeckKey,
   searchMedicalImagesApi,
 } from '../utils/apiClient';
+import {
+  matchMaterialImagesForCard,
+  mergeMaterialAndWebImages,
+} from '../utils/materialImageMatcher';
 import {
   applyResolvedWebImageToCard,
   convertBasicToCloze,
@@ -31,10 +36,14 @@ interface WozniakLinterDeckProps {
   deckKey: string;
   extractedMeta: ExtractedDeckMetadata;
   curationStats?: DeckCurationStats | null;
+  materialImages?: PdfExtractedImage[];
   onRemoveMissingMediaFromCard: (cardId: number) => void;
   onRemoveAllMissingMedia: () => void;
   onAutoResolveMissingImages: () => void;
+  onSuggestVisualCards?: () => void;
+  onCancelVisualActions?: () => void;
   isAutoResolvingImages?: boolean;
+  isSuggestingVisuals?: boolean;
   onOpenQuickReview: () => void;
   onCurateAndRebalance: () => void;
   onUpdateCard: (updated: CanonicalCard) => void;
@@ -51,10 +60,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   deckKey,
   extractedMeta,
   curationStats,
+  materialImages = [],
   onRemoveMissingMediaFromCard,
   onRemoveAllMissingMedia,
   onAutoResolveMissingImages,
+  onSuggestVisualCards,
+  onCancelVisualActions,
   isAutoResolvingImages = false,
+  isSuggestingVisuals = false,
   onOpenQuickReview,
   onCurateAndRebalance,
   onUpdateCard,
@@ -101,6 +114,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const clozeCount = cards.filter((c) => c.type === 'cloze').length;
   const basicPct = cards.length > 0 ? Math.round((basicCount / cards.length) * 100) : 0;
   const clozePct = cards.length > 0 ? 100 - basicPct : 0;
+  const cardsWithoutImageCount = cards.filter(
+    (c) => !/<img\b/i.test(`${c.question || ''} ${c.hint || ''}`)
+  ).length;
 
   const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
 
@@ -150,26 +166,39 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     const controller = new AbortController();
     searchAbortRef.current = controller;
 
-    setImageResults([]);
+    const cleanQuestion = stripHtml(targetCard.question);
+    const cleanAnswer = stripHtml(targetCard.answer);
+    const cleanHint = stripHtml(targetCard.hint);
+
+    const materialHits = matchMaterialImagesForCard(materialImages, {
+      query: queryText,
+      topic: targetCard.topic,
+      question: cleanQuestion,
+      answer: cleanAnswer,
+      hint: cleanHint,
+    });
+
+    setImageResults(materialHits);
     setIsSearchingImages(true);
     try {
       const webImages = await searchMedicalImagesApi(
         {
           query: queryText,
           topic: targetCard.topic,
-          question: stripHtml(targetCard.question),
-          answer: stripHtml(targetCard.answer),
-          hint: stripHtml(targetCard.hint),
+          question: cleanQuestion,
+          answer: cleanAnswer,
+          hint: cleanHint,
           preferGoogleGrounding: true,
         },
         controller.signal
       );
       if (controller.signal.aborted) return;
-      setImageResults(webImages);
-      if (webImages.length > 0) {
+      const mergedDrawer = mergeMaterialAndWebImages(materialHits, webImages, 12);
+      setImageResults(mergedDrawer);
+      if (mergedDrawer.length > 0) {
         onUpdateCard({
           ...targetCard,
-          imageAlternatives: webImages.slice(0, 6),
+          imageAlternatives: mergedDrawer.slice(0, 6),
         });
       }
     } finally {
@@ -179,6 +208,26 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     }
   };
 
+  const buildDefaultVisualQuery = (card: CanonicalCard): string => {
+    const placeholderMatch = `${card.question || ''} ${card.hint || ''}`.match(
+      /buscar_imagem:([^"'>]+)/i
+    );
+    if (placeholderMatch?.[1]?.trim()) {
+      return placeholderMatch[1].trim();
+    }
+    const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
+    const legend = italicMatch?.[1] ? stripHtml(italicMatch[1]).replace(/\.$/, '').trim() : '';
+    if (legend) return legend;
+
+    const clozeMatch = (card.question || '').match(/\{\{c\d+::([^}:]+)/i);
+    if (clozeMatch?.[1]?.trim()) {
+      return stripHtml(clozeMatch[1]).replace(/\.$/, '').trim();
+    }
+
+    const cleanAnswer = stripHtml(card.answer).replace(/\.$/, '').trim();
+    return cleanAnswer || card.topic.replace(/\s*-\s*/g, ' ').trim();
+  };
+
   const handleOpenImagePicker = (card: CanonicalCard) => {
     if (imagePickerCardId === card.id) {
       searchAbortRef.current?.abort();
@@ -186,8 +235,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
       return;
     }
     setImagePickerCardId(card.id);
-    const cleanAnswer = stripHtml(card.answer).replace(/\.$/, '').trim();
-    const defaultQuery = cleanAnswer || card.topic.replace(/\s*-\s*/g, ' ').trim();
+    const defaultQuery = buildDefaultVisualQuery(card);
     setImageSearchTerm(defaultQuery);
     void triggerMedicalImageSearch(card, defaultQuery);
   };
@@ -195,22 +243,32 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const handleRefreshQuickGallery = async (card: CanonicalCard) => {
     setRefreshingStripCardId(card.id);
     try {
+      const cleanQuestion = stripHtml(card.question);
       const cleanAnswer = stripHtml(card.answer).replace(/\.$/, '').trim();
-      const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
-      const legend = italicMatch?.[1] ? stripHtml(italicMatch[1]) : '';
-      const q = cleanAnswer || legend || card.topic;
+      const cleanHint = stripHtml(card.hint);
+      const q = buildDefaultVisualQuery(card);
+
+      const materialHits = matchMaterialImagesForCard(materialImages, {
+        query: q,
+        topic: card.topic,
+        question: cleanQuestion,
+        answer: cleanAnswer,
+        hint: cleanHint,
+      });
+
       const webImages = await searchMedicalImagesApi({
         query: q,
         topic: card.topic,
-        question: stripHtml(card.question),
+        question: cleanQuestion,
         answer: cleanAnswer,
-        hint: stripHtml(card.hint),
+        hint: cleanHint,
         preferGoogleGrounding: true,
       });
-      if (webImages.length > 0) {
+      const merged = mergeMaterialAndWebImages(materialHits, webImages, 6);
+      if (merged.length > 0) {
         onUpdateCard({
           ...card,
-          imageAlternatives: webImages.slice(0, 6),
+          imageAlternatives: merged,
         });
       }
     } finally {
@@ -383,7 +441,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         mediaCount={mediaManifest.length}
         totalFlaggedCards={totalFlaggedCards}
         totalCardsWithMissingMedia={totalCardsWithMissingMedia}
+        cardsWithoutImageCount={cardsWithoutImageCount}
         isAutoResolvingImages={isAutoResolvingImages}
+        isSuggestingVisuals={isSuggestingVisuals}
         isRepairing={isRepairing}
         curationStats={curationStats}
         filterMode={filterMode}
@@ -397,6 +457,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         onCurateAndRebalance={onCurateAndRebalance}
         onAutoRepairAllFlagged={onAutoRepairAllFlagged}
         onAutoResolveMissingImages={onAutoResolveMissingImages}
+        onSuggestVisualCards={onSuggestVisualCards || (() => {})}
+        onCancelVisualActions={onCancelVisualActions}
         onRemoveAllMissingMedia={onRemoveAllMissingMedia}
         onCopyJson={() => void handleCopyJson()}
         onAddNewCard={onAddNewCard}

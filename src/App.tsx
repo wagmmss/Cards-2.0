@@ -27,6 +27,7 @@ import {
   surgicalRepairCardLocal,
 } from './utils/wozniakLinter';
 import { sanitizeDeckKey } from './utils/apiClient';
+import { collectAllMaterialImages } from './utils/materialImageMatcher';
 import { buildGenericClinicalMap, GENERIC_SAMPLE_DECK_JSON } from './data/demoDecks';
 import {
   loadSavedDeckSnapshot,
@@ -94,22 +95,30 @@ export default function App() {
     curationStats,
   });
 
+  const materialImages = useMemo(() => collectAllMaterialImages(pdfs), [pdfs]);
+
   const {
     isAutoResolvingImages,
+    isSuggestingVisuals,
     autoResolveDeckMissingImages,
+    suggestAndAttachVisualCards,
     cancelAutoResolve,
+    cancelSuggestVisuals,
   } = useImageAutoResolver({
+    materialImages,
     setCards,
     showStatus,
   });
 
   const {
     isGeneratingMap,
+    isDeepeningGuidelines,
     isGeneratingDeck,
     isRepairing,
     progress,
     cancelGeneration,
     handleGenerateClinicalMap,
+    handleDeepenGuidelines,
     handleRecreateCanonicalDeck,
     handleAutoRepairAllFlagged,
   } = useBatchDeckGenerator({
@@ -544,6 +553,8 @@ export default function App() {
           onToggleMapItem={handleToggleMapItem}
           onToggleItemCardType={handleToggleItemCardType}
           onAddCustomMapItem={handleAddCustomMapItem}
+          onDeepenGuidelines={(q) => void handleDeepenGuidelines(q)}
+          isDeepeningGuidelines={isDeepeningGuidelines}
           onRecreateCanonicalDeck={() => {
             setSelectedStep(3);
             void handleRecreateCanonicalDeck();
@@ -557,10 +568,18 @@ export default function App() {
           deckKey={deckKey}
           extractedMeta={extractedMeta}
           curationStats={curationStats}
+          materialImages={materialImages}
           onRemoveMissingMediaFromCard={handleRemoveMissingMediaFromCard}
           onRemoveAllMissingMedia={handleRemoveAllMissingMedia}
           onAutoResolveMissingImages={() => void autoResolveDeckMissingImages(cards)}
+          onSuggestVisualCards={() => void suggestAndAttachVisualCards(cards, deckKey)}
+          onCancelVisualActions={() => {
+            cancelAutoResolve();
+            cancelSuggestVisuals();
+            showStatus('Busca/sugestão visual cancelada.', 'info');
+          }}
           isAutoResolvingImages={isAutoResolvingImages}
+          isSuggestingVisuals={isSuggestingVisuals}
           onOpenQuickReview={() => setIsQuickReviewOpen(true)}
           onCurateAndRebalance={handleCurateAndRebalance}
           onUpdateCard={handleUpdateCard}
@@ -594,6 +613,7 @@ export default function App() {
         onClose={() => setIsQuickReviewOpen(false)}
         cards={cards}
         deckKey={deckKey}
+        materialImages={materialImages}
         onUpdateCard={handleUpdateCard}
       />
     </div>

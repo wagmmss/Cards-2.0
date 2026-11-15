@@ -9,6 +9,7 @@ import {
 } from '../types/deck';
 import { buildGenericClinicalMap } from '../data/demoDecks';
 import { fetchJsonWithTimeout, sanitizeDeckKey } from '../utils/apiClient';
+import { buildPdfImagesCatalog } from '../utils/materialImageMatcher';
 import {
   curateAndRebalanceDeck,
   lintCard,
@@ -58,6 +59,7 @@ export function useBatchDeckGenerator(params: {
   } = params;
 
   const [isGeneratingMap, setIsGeneratingMap] = useState(false);
+  const [isDeepeningGuidelines, setIsDeepeningGuidelines] = useState(false);
   const [isGeneratingDeck, setIsGeneratingDeck] = useState(false);
   const [isRepairing, setIsRepairing] = useState(false);
   const [progress, setProgress] = useState<GenerationProgress | null>(null);
@@ -91,6 +93,7 @@ export function useBatchDeckGenerator(params: {
     }
     stopTimerAndReset();
     setIsGeneratingMap(false);
+    setIsDeepeningGuidelines(false);
     setIsGeneratingDeck(false);
     setIsRepairing(false);
     showStatus('Operação cancelada. Seu baralho atual foi preservado sem alterações.', 'info');
@@ -181,18 +184,20 @@ export function useBatchDeckGenerator(params: {
   );
 
   const serializePdfsForApi = (sourcePdfs: UploadedPdfFile[]) =>
-    sourcePdfs.map((p) =>
-      p.fileUri
-        ? {
-            name: p.name,
-            size: p.size,
-            mimeType: p.mimeType,
-            fileUri: p.fileUri,
-            fileName: p.fileName,
-            docRole: p.docRole,
-          }
-        : p
-    );
+    sourcePdfs.map((p) => {
+      if (p.fileUri) {
+        return {
+          name: p.name,
+          size: p.size,
+          mimeType: p.mimeType,
+          fileUri: p.fileUri,
+          fileName: p.fileName,
+          docRole: p.docRole,
+        };
+      }
+      const { extractedImages: _omitExtracted, ...rest } = p;
+      return rest;
+    });
 
   const handleGenerateClinicalMap = useCallback(async (): Promise<ClinicalMapResponse> => {
     const effectiveKey = sanitizeDeckKey(
@@ -264,8 +269,10 @@ export function useBatchDeckGenerator(params: {
 
       if (data && Array.isArray(data.items) && data.items.length > 0) {
         setClinicalMap(data);
+        const updCount = Array.isArray(data.guidelineUpdates) ? data.guidelineUpdates.length : 0;
+        const srcCount = Array.isArray(data.groundingSources) ? data.groundingSources.length : 0;
         showStatus(
-          `Mapa Clínico P1–P4 gerado para "${data.themeTitle}" (${data.items.length} conceitos).`,
+          `Mapa Clínico P1–P4 gerado para "${data.themeTitle}" (${data.items.length} conceitos · ${updCount} achados clínicos · ${srcCount} fontes web).`,
           'success'
         );
         return data;
@@ -298,6 +305,95 @@ export function useBatchDeckGenerator(params: {
     stopTimerAndReset,
     useGoogleSearch,
   ]);
+
+  const handleDeepenGuidelines = useCallback(
+    async (focusQuery?: string) => {
+      if (!clinicalMap) return;
+      const effectiveKey = sanitizeDeckKey(
+        clinicalMap.deckKey || deckKey.trim() || 'tema_clinico_internato'
+      );
+      setIsDeepeningGuidelines(true);
+      try {
+        const data = await fetchJsonWithTimeout<{
+          newUpdates?: string[];
+          groundingSources?: Array<{ title: string; uri: string }>;
+          searchQueries?: string[];
+          fallback?: boolean;
+          error?: string;
+        }>('/api/gemini/deepen-guidelines', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deckKey: effectiveKey,
+            themeTitle: clinicalMap.themeTitle,
+            profile: clinicalMap.profile || selectedProfile,
+            focusQuery: (focusQuery || '').trim(),
+            existingUpdates: clinicalMap.guidelineUpdates || [],
+          }),
+          timeoutMs: 110_000,
+        });
+
+        if (data?.fallback || data?.error) {
+          showStatus(
+            `Não foi possível aprofundar no Google Search (${data.error || 'erro desconhecido'}).`,
+            'error'
+          );
+          return;
+        }
+
+        const newUpdates = Array.isArray(data.newUpdates) ? data.newUpdates : [];
+        const newSources = Array.isArray(data.groundingSources) ? data.groundingSources : [];
+        const newQueries = Array.isArray(data.searchQueries) ? data.searchQueries : [];
+
+        setClinicalMap((prev) => {
+          if (!prev) return prev;
+          const existingUpd = new Set(
+            (prev.guidelineUpdates || []).map((u) => u.trim().toLowerCase())
+          );
+          const mergedUpdates = [...(prev.guidelineUpdates || [])];
+          for (const u of newUpdates) {
+            const norm = u.trim().toLowerCase();
+            if (u.trim() && !existingUpd.has(norm)) {
+              existingUpd.add(norm);
+              mergedUpdates.push(u.trim());
+            }
+          }
+
+          const existingUris = new Set((prev.groundingSources || []).map((s) => s.uri));
+          const mergedSources = [...(prev.groundingSources || [])];
+          for (const s of newSources) {
+            if (s?.uri && !existingUris.has(s.uri)) {
+              existingUris.add(s.uri);
+              mergedSources.push(s);
+            }
+          }
+
+          const mergedQueries = Array.from(
+            new Set([...(prev.searchQueries || []), ...newQueries])
+          );
+
+          return {
+            ...prev,
+            guidelineUpdates: mergedUpdates,
+            groundingSources: mergedSources,
+            searchQueries: mergedQueries,
+            googleSearchUsed: true,
+          };
+        });
+
+        showStatus(
+          `${newUpdates.length} novo(s) achado(s) clínico(s) e ${newSources.length} fonte(s) web adicionados ao Mapa Clínico.`,
+          'success'
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'erro de rede';
+        showStatus(`Falha ao aprofundar diretrizes (${msg}).`, 'error');
+      } finally {
+        setIsDeepeningGuidelines(false);
+      }
+    },
+    [clinicalMap, deckKey, selectedProfile, setClinicalMap, showStatus]
+  );
 
   const handleRecreateCanonicalDeck = useCallback(
     async (mapOverride?: ClinicalMapResponse) => {
@@ -333,6 +429,7 @@ export function useBatchDeckGenerator(params: {
       try {
         const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, controller.signal);
         const apiPdfs = serializePdfsForApi(preparedPdfs);
+        const pdfImagesCatalog = buildPdfImagesCatalog(preparedPdfs);
         const allRebuiltNotes: CanonicalCard[] = [];
 
         if (sourceCards.length > 0) {
@@ -392,6 +489,7 @@ export function useBatchDeckGenerator(params: {
                 body: JSON.stringify({
                   deckKey: effectiveKey,
                   pdfs: apiPdfs,
+                  pdfImagesCatalog,
                   clinicalMap: activeMap,
                   existingMetadata: extractedMeta,
                   batchCards,
@@ -467,6 +565,7 @@ export function useBatchDeckGenerator(params: {
                   deckKey: effectiveKey,
                   clinicalMap: activeMap,
                   rebuiltCards: allRebuiltNotes,
+                  pdfImagesCatalog,
                   nextNewIdStart: gapNewIdStart,
                 }),
                 timeoutMs: 145_000,
@@ -507,6 +606,7 @@ export function useBatchDeckGenerator(params: {
             body: JSON.stringify({
               deckKey: effectiveKey,
               pdfs: apiPdfs,
+              pdfImagesCatalog,
               clinicalMap: activeMap,
               existingMetadata: extractedMeta,
             }),
@@ -677,11 +777,13 @@ export function useBatchDeckGenerator(params: {
 
   return {
     isGeneratingMap,
+    isDeepeningGuidelines,
     isGeneratingDeck,
     isRepairing,
     progress,
     cancelGeneration,
     handleGenerateClinicalMap,
+    handleDeepenGuidelines,
     handleRecreateCanonicalDeck,
     handleAutoRepairAllFlagged,
   };

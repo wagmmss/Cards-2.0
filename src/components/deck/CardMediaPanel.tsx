@@ -133,7 +133,7 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
                         type="button"
                         onClick={() => onQuickSwap(alt, imgMeta.localFilename)}
                         title={`${alt.title} (${alt.source})`}
-                        className={`h-12 rounded border overflow-hidden bg-slate-950 flex items-center justify-center cursor-pointer transition-all ${
+                        className={`relative h-12 rounded border overflow-hidden bg-slate-950 flex items-center justify-center cursor-pointer transition-all ${
                           isSelected
                             ? 'border-emerald-400 ring-1 ring-emerald-400/50'
                             : 'border-slate-800 hover:border-sky-400'
@@ -145,6 +145,11 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
                           loading="lazy"
                           className="max-h-full max-w-full object-contain"
                         />
+                        {alt.fromMaterial && (
+                          <span className="absolute bottom-0.5 right-0.5 px-1 py-0.2 rounded bg-emerald-950/90 border border-emerald-600/70 text-[9px] font-mono font-semibold text-emerald-300 leading-tight">
+                            PDF
+                          </span>
+                        )}
                       </button>
                     );
                   })}

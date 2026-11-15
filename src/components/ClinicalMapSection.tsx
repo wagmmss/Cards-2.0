@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckSquare, Square, ExternalLink, Plus, Sparkles, XCircle } from 'lucide-react';
+import { CheckSquare, Square, ExternalLink, Plus, Search, Sparkles, XCircle } from 'lucide-react';
 import {
   CardType,
   ClinicalMapItem,
@@ -21,6 +21,8 @@ interface ClinicalMapSectionProps {
   ) => void;
   onRecreateCanonicalDeck: () => void;
   onCancelGeneration: () => void;
+  onDeepenGuidelines?: (focusQuery?: string) => void;
+  isDeepeningGuidelines?: boolean;
   isGeneratingDeck: boolean;
 }
 
@@ -31,6 +33,8 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   onAddCustomMapItem,
   onRecreateCanonicalDeck,
   onCancelGeneration,
+  onDeepenGuidelines,
+  isDeepeningGuidelines = false,
   isGeneratingDeck,
 }) => {
   const [activePriorityFilter, setActivePriorityFilter] = useState<'ALL' | PriorityLevel>('ALL');
@@ -39,6 +43,7 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
   const [newConcept, setNewConcept] = useState('');
   const [newCardType, setNewCardType] = useState<CardType>('basic');
   const [showAddForm, setShowAddForm] = useState(false);
+  const [deepenFocusQuery, setDeepenFocusQuery] = useState('');
 
   if (!clinicalMap || clinicalMap.items.length === 0) {
     return (
@@ -123,19 +128,73 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
 
       {(clinicalMap.guidelineUpdates.length > 0 ||
         clinicalMap.groundingSources.length > 0) && (
-        <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2 text-xs">
-          <div className="font-semibold text-sky-400">
-            Diretrizes Consultadas (Google Search Grounding)
+        <div className="p-4 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-3 text-xs">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="font-semibold text-sky-400">
+              Diretrizes Consultadas (Google Search Grounding · {clinicalMap.guidelineUpdates.length}{' '}
+              achado{clinicalMap.guidelineUpdates.length === 1 ? '' : 's'}
+              {clinicalMap.groundingSources.length > 0
+                ? ` · ${clinicalMap.groundingSources.length} fonte${clinicalMap.groundingSources.length === 1 ? '' : 's'} web`
+                : ''}
+              )
+            </div>
+
+            {onDeepenGuidelines && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  onDeepenGuidelines(deepenFocusQuery);
+                  setDeepenFocusQuery('');
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={deepenFocusQuery}
+                  onChange={(e) => setDeepenFocusQuery(e.target.value)}
+                  placeholder="Aprofundar eixo (ex.: gestantes, 2ª linha, doses...)"
+                  disabled={isDeepeningGuidelines}
+                  className="px-2.5 py-1 text-[11px] bg-slate-900 border border-slate-700 rounded-md text-slate-100 placeholder:text-slate-500 w-56 sm:w-64 focus:border-sky-400 focus:outline-none disabled:opacity-50"
+                />
+                <button
+                  type="submit"
+                  disabled={isDeepeningGuidelines}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-sky-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  <Search className="w-3 h-3" />
+                  <span>{isDeepeningGuidelines ? 'Buscando...' : 'Buscar mais pontos'}</span>
+                </button>
+              </form>
+            )}
           </div>
-          <ul className="space-y-1 text-slate-300">
-            {clinicalMap.guidelineUpdates.map((upd, idx) => (
-              <li key={idx} className="leading-relaxed">
-                • {upd}
-              </li>
-            ))}
+
+          <ul className="space-y-1.5 text-slate-300">
+            {clinicalMap.guidelineUpdates.map((upd, idx) => {
+              const bracketMatch = upd.match(/^(\[[^\]]+\])\s*:?\s*(.*)$/);
+              return (
+                <li key={idx} className="leading-relaxed">
+                  {bracketMatch ? (
+                    <>
+                      • <span className="font-semibold text-slate-100">{bracketMatch[1]}:</span>{' '}
+                      {bracketMatch[2]}
+                    </>
+                  ) : (
+                    <>• {upd}</>
+                  )}
+                </li>
+              );
+            })}
           </ul>
+
+          {clinicalMap.searchQueries && clinicalMap.searchQueries.length > 0 && (
+            <div className="pt-1 text-[11px] text-slate-400">
+              <span className="font-semibold text-slate-300">Buscas executadas:</span>{' '}
+              {clinicalMap.searchQueries.slice(0, 6).join(' · ')}
+            </div>
+          )}
+
           {clinicalMap.groundingSources.length > 0 && (
-            <div className="pt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+            <div className="pt-1 flex flex-wrap items-center gap-3 text-[11px] text-slate-400 border-t border-slate-800/80">
               {clinicalMap.groundingSources.map((src, i) => (
                 <a
                   key={`${src.uri}-${i}`}
