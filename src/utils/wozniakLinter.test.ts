@@ -9,6 +9,10 @@ import {
   extractUnresolvedLocalImages,
   formatCanonicalDeckJson,
   lintCard,
+  lintDeck,
+  detectModalityConflict,
+  detectRedundantVisualDescription,
+  findDuplicateDeckImages,
   reconcileDeckIdsAndMedia,
   removeMissingMediaFromCard,
   resolveOrCreateNoteGuid,
@@ -670,3 +674,259 @@ test('readMultipleDocumentFiles snapshots live FileList before awaits so clearin
   assert.equal(docs[2].docRole, 'questoes');
   assert.equal(docs[2].textContent, 'Questao 1 USP');
 });
+
+test('lintDeck flags DUPLICATE_IMAGE_IN_DECK when two or more cards share the same <img src> before .apkg export', () => {
+  const card1: CanonicalCard = {
+    id: 171000201,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cardiologia - Emergência Coronariana',
+    question:
+      'Na Sala de Emergência, paciente com dor torácica típica realiza o exame abaixo. Qual a conduta imediata de primeira escolha?<br><img src="https://upload.wikimedia.org/wikipedia/commons/ecg_anterior.jpg">',
+    answer: 'Dupla antiagregação plaquetária e angioplastia primária imediata.',
+    hint: '<i>ECG de 12 derivações evidenciando supradesnivelamento de ST em parede anterior.</i><br><br><b>Comentário:</b> A <b>reperfusão imediata</b> reduz mortalidade no IAMCSST, diferentemente do <b>manejo conservador</b>.',
+  };
+
+  const card2SameImg: CanonicalCard = {
+    id: 171000202,
+    type: 'cloze',
+    image_mode: 'feedback',
+    topic: 'Cardiologia - Critério Eletrocardiográfico',
+    question:
+      'No IAMCSST anterior, o supradesnivelamento significativo do ponto J em V2-V3 em homens ≥ 40 anos exige amplitude ≥ {{c1::2 mm}}.',
+    answer: '',
+    hint: '<img src="https://upload.wikimedia.org/wikipedia/commons/ecg_anterior.jpg"><br><i>ECG de 12 derivações com supradesnivelamento em derivações precordiais anteriores.</i><br><br><b>Comentário:</b> O corte em <b>V2-V3 (≥ 2 mm)</b> diferencia homens ≥ 40 anos de <b>mulheres (≥ 1,5 mm)</b>.',
+  };
+
+  const card3UniqueImg: CanonicalCard = {
+    id: 171000203,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Pneumologia - Derrame Pleural',
+    question:
+      'No Pronto-Socorro, paciente dispneico realiza o exame de tórax abaixo. Qual a conduta diagnóstica inicial?<br><img src="https://upload.wikimedia.org/wikipedia/commons/rx_derrame_pleural.jpg">',
+    answer: 'Toracocentese diagnóstica guiada por ultrassonografia.',
+    hint: '<i>Radiografia de tórax PA evidenciando velamento homogêneo em base direita.</i><br><br><b>Comentário:</b> A <b>toracocentese com critérios de Light</b> distingue exsudato de transudato, diferente da <b>drenagem imediata</b> reservada ao empiema.',
+  };
+
+  const auditWithDup = lintDeck([card1, card2SameImg], [], 'cardiologia_emergencia');
+  assert.equal(auditWithDup.canExport, false);
+  assert.equal(auditWithDup.isValid, false);
+  assert.equal(auditWithDup.duplicateImages.length, 1);
+  assert.deepEqual(auditWithDup.duplicateImages[0].cardIds, [171000201, 171000202]);
+  assert.equal(
+    auditWithDup.errors.some((e) => e.code === 'DUPLICATE_IMAGE_IN_DECK'),
+    true
+  );
+
+  // Distinct local/web images pass duplicate check
+  assert.equal(findDuplicateDeckImages([card1, card3UniqueImg]).length, 0);
+  const auditClean = lintDeck([card1, card3UniqueImg], [], 'emergencia_clinica');
+  assert.equal(auditClean.canExport, true);
+  assert.equal(auditClean.isValid, true);
+});
+
+test('lintCard and lintDeck flag IMAGE_MISSING_LEGEND when <img> in Question or Hint lacks an <i>...</i> legend with >= 6 descriptive words', () => {
+  const missingLegendQuestionImg: CanonicalCard = {
+    id: 171000301,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Abdome Agudo - Avaliação Inicial',
+    question:
+      'No Pronto-Socorro, paciente com dor abdominal súbita realiza o exame abaixo. Qual o próximo passo imediato?<br><img src="https://upload.wikimedia.org/wikipedia/commons/rx_abdomen.jpg">',
+    answer: 'Laparotomia exploradora de urgência.',
+    hint: '<b>Comentário:</b> A presença de <b>ar livre subdiafragmático</b> confirma perfuração de víscera oca, superando o <b>tratamento clínico isolado</b>.',
+  };
+
+  const shortLegendHintImg: CanonicalCard = {
+    id: 171000302,
+    type: 'cloze',
+    image_mode: 'feedback',
+    topic: 'Obstetrícia - Vitalidade Fetal',
+    question:
+      'Na presença de desacelerações tardias recorrentes, a primeira medida de reanimação intrauterina é {{c1::decúbito lateral esquerdo}}.',
+    answer: '',
+    hint: '<img src="https://upload.wikimedia.org/wikipedia/commons/ctg_late.jpg"><br><i>Legenda visual: CTG alterada.</i><br><br><b>Comentário:</b> O <b>decúbito lateral esquerdo</b> reduz compressão aortocava, diferentemente da <b>infusão de ocitocina</b> que deve ser suspensa.',
+  };
+
+  const validLegendHintImg: CanonicalCard = {
+    id: 171000303,
+    type: 'cloze',
+    image_mode: 'feedback',
+    topic: 'Obstetrícia - Vitalidade Fetal',
+    question:
+      'Na presença de desacelerações tardias recorrentes, a primeira medida de reanimação intrauterina é {{c1::decúbito lateral esquerdo}}.',
+    answer: '',
+    hint: '<img src="https://upload.wikimedia.org/wikipedia/commons/ctg_late_ok.jpg"><br><i>Traçado cardiotocográfico evidenciando desacelerações tardias após contrações uterinas.</i><br><br><b>Comentário:</b> O <b>decúbito lateral esquerdo</b> reduz compressão aortocava, diferentemente da <b>infusão de ocitocina</b> que deve ser suspensa.',
+  };
+
+  const lint1 = lintCard(missingLegendQuestionImg, []);
+  assert.equal(lint1.isValid, false);
+  assert.equal(
+    lint1.warnings.some((w) => w.severity === 'error' && w.message.includes('IMAGE_MISSING_LEGEND')),
+    true
+  );
+
+  const lint2 = lintCard(shortLegendHintImg, []);
+  assert.equal(lint2.isValid, false);
+  assert.equal(
+    lint2.warnings.some((w) => w.severity === 'error' && w.message.includes('IMAGE_MISSING_LEGEND')),
+    true
+  );
+
+  const deckAudit = lintDeck([missingLegendQuestionImg, shortLegendHintImg], [], 'obstetricia');
+  assert.equal(deckAudit.canExport, false);
+  assert.equal(
+    deckAudit.errors.filter((e) => e.code === 'IMAGE_MISSING_LEGEND').length,
+    2
+  );
+
+  const validAudit = lintDeck([validLegendHintImg], [], 'obstetricia');
+  assert.equal(validAudit.canExport, true);
+  assert.equal(
+    validAudit.allIssues.some((i) => i.code === 'IMAGE_MISSING_LEGEND'),
+    false
+  );
+});
+
+test('lintCard and lintDeck detect MODALITY_CONFLICT between card text and legend without false positives on comparative comments', () => {
+  const laparoscopiaVsUsgCard: CanonicalCard = {
+    id: 171000401,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Ginecologia - Doença Inflamatória Pélvica',
+    question:
+      'Na laparoscopia diagnóstica de paciente com dor pélvica crônica, observa-se o achado abaixo. Qual síndrome é caracterizada?',
+    answer: 'Síndrome de Fitz-Hugh-Curtis.',
+    hint: '<i>Ultrassonografia pélvica transvaginal demonstrando líquido livre e espessamento anexial importante.</i><br><br><b>Comentário:</b> A <b>peri-hepatite gonocócica ou por clamídia</b> gera aderências em cordas de violino, diferente da <b>apendicite aguda</b>.',
+  };
+  // Attach image to question
+  laparoscopiaVsUsgCard.question += '<br><img src="https://upload.wikimedia.org/wikipedia/commons/usg_pelvica.jpg">';
+
+  const usgVsLaparoscopiaCard: CanonicalCard = {
+    id: 171000402,
+    type: 'basic',
+    image_mode: 'feedback',
+    topic: 'Ginecologia - Propedêutica Pélvica',
+    question:
+      'Na suspeita de abscesso tubo-ovariano, qual achado na USG transvaginal confirma o diagnóstico?',
+    answer: 'Coleção anexial multiloculada com paredes espessas.',
+    hint: '<img src="https://upload.wikimedia.org/wikipedia/commons/lap_ato.jpg"><br><i>Videolaparoscopia pélvica evidenciando aderências tubárias extensas e pus livre.</i><br><br><b>Comentário:</b> A <b>USG transvaginal</b> identifica coleções septadas à beira-leito, reservando-se a <b>laparoscopia</b> aos casos duvidosos ou refratários.',
+  };
+
+  // Valid card where Comentário compares TC vs USG, while question is modality-neutral
+  const comparativeCommentValidCard: CanonicalCard = {
+    id: 171000403,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cirurgia - Abdome Agudo',
+    question:
+      'No Pronto-Socorro, adulto jovem com dor migratória em fossa ilíaca direita realiza o exame abaixo. Qual a conduta imediata?<br><img src="https://upload.wikimedia.org/wikipedia/commons/tc_apendicite.jpg">',
+    answer: 'Antibioticoprofilaxia e apendicectomia.',
+    hint: '<i>Tomografia computadorizada de abdome demonstrando apêndice distendido e borramento adiposo.</i><br><br><b>Comentário:</b> A <b>TC de abdome</b> tem alta sensibilidade em adultos, ao passo que a <b>USG</b> é preferida inicialmente em gestantes.',
+  };
+
+  // Valid multi-step card mentioning prior USG and current RM
+  const multiStepModalityValidCard: CanonicalCard = {
+    id: 171000404,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cirurgia - Gestante com Dor Abdominal',
+    question:
+      'Após USG inconclusiva em gestante de 22 semanas, solicita-se a RM abaixo. Qual a conduta definitiva?<br><img src="https://upload.wikimedia.org/wikipedia/commons/rm_apendice.jpg">',
+    answer: 'Apendicectomia videolaparoscópica.',
+    hint: '<i>Ressonância magnética pélvica demonstrando apêndice retrocecal espessado sem radiação ionizante.</i><br><br><b>Comentário:</b> A <b>RM sem gadolínio</b> esclarece casos duvidosos na gestação após USG, evitando atraso cirúrgico frente à <b>perfuração apendicular</b>.',
+  };
+
+  assert.equal(detectModalityConflict(laparoscopiaVsUsgCard).hasConflict, true);
+  assert.equal(detectModalityConflict(usgVsLaparoscopiaCard).hasConflict, true);
+  assert.equal(detectModalityConflict(comparativeCommentValidCard).hasConflict, false);
+  assert.equal(detectModalityConflict(multiStepModalityValidCard).hasConflict, false);
+
+  const conflictDeckAudit = lintDeck(
+    [laparoscopiaVsUsgCard, usgVsLaparoscopiaCard],
+    [],
+    'dipa_gineco'
+  );
+  assert.equal(conflictDeckAudit.canExport, false);
+  assert.equal(
+    conflictDeckAudit.errors.filter((e) => e.code === 'MODALITY_CONFLICT').length,
+    2
+  );
+
+  const validDeckAudit = lintDeck(
+    [comparativeCommentValidCard, multiStepModalityValidCard],
+    [],
+    'abdome_agudo'
+  );
+  assert.equal(validDeckAudit.canExport, true);
+  assert.equal(
+    validDeckAudit.allIssues.some((i) => i.code === 'MODALITY_CONFLICT'),
+    false
+  );
+});
+
+test('lintCard and lintDeck warn with REDUNDANT_VISUAL_DESCRIPTION when Med_Basic_Inverted_v2 question textually describes the image finding', () => {
+  const redundantBasicCard: CanonicalCard = {
+    id: 171000501,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cardiologia - Dor Torácica Aguda',
+    question:
+      'Na Sala de Emergência, paciente realiza o ECG abaixo evidenciando supradesnivelamento de ST em parede anterior. Qual é a conduta imediata de primeira escolha?<br><img src="https://upload.wikimedia.org/wikipedia/commons/ecg_stemi_redundant.jpg">',
+    answer: 'Dupla antiagregação plaquetária e angioplastia primária imediata.',
+    hint: '<i>ECG de 12 derivações evidenciando supradesnivelamento de ST em parede anterior.</i><br><br><b>Comentário:</b> A <b>reperfusão coronariana imediata</b> preserva miocárdio viável, diferentemente do <b>manejo clínico isolado</b>.',
+  };
+
+  const redundantLegendOverlapCard: CanonicalCard = {
+    id: 171000502,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Ginecologia - Salpingite',
+    question:
+      'Na imagem abaixo observam-se pregas tubárias edemaciadas em sinal da roda dentada. Qual o diagnóstico?<br><img src="https://upload.wikimedia.org/wikipedia/commons/usg_roda_dentada.jpg">',
+    answer: 'Salpingite aguda (doença inflamatória pélvica).',
+    hint: '<i>Ultrassonografia transvaginal demonstrando pregas tubárias edemaciadas em sinal da roda dentada.</i><br><br><b>Comentário:</b> O <b>sinal da roda dentada</b> traduz processo inflamatório agudo, diferente da <b>hidrossalpinge crônica</b> em contas de rosário.',
+  };
+
+  const nonRedundantRecognitionCard: CanonicalCard = {
+    id: 171000503,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cardiologia - Dor Torácica Aguda',
+    question:
+      'Na Sala de Emergência, paciente de 58 anos com dor torácica típica e sudorese fria realiza o exame abaixo. Qual é a conduta imediata de primeira escolha?<br><img src="https://upload.wikimedia.org/wikipedia/commons/ecg_stemi_clean.jpg">',
+    answer: 'Dupla antiagregação plaquetária e angioplastia primária imediata.',
+    hint: '<i>ECG de 12 derivações evidenciando supradesnivelamento de ST em parede anterior.</i><br><br><b>Comentário:</b> A <b>reperfusão coronariana imediata</b> preserva miocárdio viável e reduz mortalidade no IAMCSST, diferentemente do <b>manejo clínico isolado</b>.',
+  };
+
+  assert.equal(detectRedundantVisualDescription(redundantBasicCard).isRedundant, true);
+  assert.equal(detectRedundantVisualDescription(redundantLegendOverlapCard).isRedundant, true);
+  assert.equal(detectRedundantVisualDescription(nonRedundantRecognitionCard).isRedundant, false);
+
+  const lintRedundant = lintCard(redundantBasicCard, []);
+  assert.equal(
+    lintRedundant.warnings.some(
+      (w) => w.severity === 'warning' && w.message.includes('REDUNDANT_VISUAL_DESCRIPTION')
+    ),
+    true
+  );
+
+  const audit = lintDeck(
+    [redundantBasicCard, nonRedundantRecognitionCard],
+    [],
+    'cardiologia'
+  );
+  assert.equal(audit.canExport, true);
+  assert.equal(
+    audit.warnings.some(
+      (w) => w.code === 'REDUNDANT_VISUAL_DESCRIPTION' && w.cardId === 171000501
+    ),
+    true
+  );
+  assert.equal(
+    audit.allIssues.some((w) => w.cardId === 171000503),
+    false
+  );
+});
+

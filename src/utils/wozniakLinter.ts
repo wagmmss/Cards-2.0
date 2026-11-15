@@ -8,6 +8,7 @@ import {
   LinterWarning,
   MediaBundleItem,
   MedicalImageResult,
+  WarningCode,
 } from '../types/deck';
 
 export const MAX_CLOZE_WORDS = 5;
@@ -15,6 +16,43 @@ export const MAX_BASIC_ANSWER_WORDS = 15;
 export const MAX_BASIC_ANSWER_CHARS = 110;
 export const MAX_QUESTION_WORDS = 50;
 export const MAX_COMMENT_CHARS = 320;
+export const MIN_VISUAL_LEGEND_WORDS = 6;
+
+export type DeckAuditWarningCode =
+  | WarningCode
+  | 'DUPLICATE_IMAGE_IN_DECK'
+  | 'IMAGE_MISSING_LEGEND'
+  | 'MODALITY_CONFLICT'
+  | 'REDUNDANT_VISUAL_DESCRIPTION';
+
+export interface DeckAuditWarning {
+  code: DeckAuditWarningCode;
+  cardId?: number;
+  cardIds?: number[];
+  src?: string;
+  field: 'question' | 'answer' | 'hint' | 'topic' | 'type' | 'deck';
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+export interface DuplicateDeckImage {
+  src: string;
+  normalizedSrc: string;
+  cardIds: number[];
+}
+
+export interface DeckAuditResult {
+  deckKey: string;
+  isValid: boolean;
+  canExport: boolean;
+  errorCount: number;
+  warningCount: number;
+  errors: DeckAuditWarning[];
+  warnings: DeckAuditWarning[];
+  allIssues: DeckAuditWarning[];
+  duplicateImages: DuplicateDeckImage[];
+  cardResults: CardLintResult[];
+}
 
 const DANGLING_STOPWORDS = new Set([
   'a', 'ao', 'aos', 'as', 'com', 'contra', 'da', 'das', 'de', 'do', 'dos',
@@ -800,6 +838,472 @@ function expandWithSynonyms(words: Iterable<string>): Set<string> {
   return out;
 }
 
+export interface VisualLegendEntry {
+  rawHtml: string;
+  text: string;
+  descriptiveText: string;
+  wordCount: number;
+}
+
+const DIAGNOSTIC_MODALITY_PATTERNS: Array<{
+  modality: string;
+  label: string;
+  pattern: RegExp;
+}> = [
+  {
+    modality: 'USG',
+    label: 'USG / Ultrassonografia',
+    pattern:
+      /\b(?:usg|ultrassonografia|ultrassom|ultrassonogr[aá]fic[ao]|ecografia|ecogr[aá]fic[ao]|e-?fast|doppler|ultrasound|sonography)\b/i,
+  },
+  {
+    modality: 'ECOCARDIOGRAMA',
+    label: 'Ecocardiograma',
+    pattern:
+      /\b(?:ecocardiograma|ecocardiografia|ecocardiogr[aá]fic[ao]|echocardiogra(?:m|phy))\b/i,
+  },
+  {
+    modality: 'TC',
+    label: 'TC / Tomografia Computadorizada',
+    pattern:
+      /\b(?:tc|tomografia(?:\s+computadorizada)?|angiotomografia|angio-?tc|urotomografia|ct\s+scan|computed\s+tomography)\b/i,
+  },
+  {
+    modality: 'RM',
+    label: 'RM / Ressonância Magnética',
+    pattern:
+      /\b(?:rm|rnm|resson[aâ]ncia(?:\s+magn[eé]tica)?|colangiorresson[aâ]ncia|angiorresson[aâ]ncia|mri|magnetic\s+resonance)\b/i,
+  },
+  {
+    modality: 'RX',
+    label: 'RX / Radiografia',
+    pattern:
+      /\b(?:rx|raio-?x|raios-?x|radiografia|radiogr[aá]fic[ao]|teleradiografia|telerradiografia|x-?ray|chest\s+radiograph)\b/i,
+  },
+  {
+    modality: 'ECG',
+    label: 'ECG / Eletrocardiograma',
+    pattern:
+      /\b(?:ecg|eletrocardiograma|eletrocardiogr[aá]fic[ao]|electrocardiogra(?:m|phy))\b/i,
+  },
+  {
+    modality: 'CTG',
+    label: 'CTG / Cardiotocografia',
+    pattern:
+      /\b(?:ctg|cardiotocografia|cardiotocogr[aá]fic[ao]|cardiotocograma|cardiotocography)\b/i,
+  },
+  {
+    modality: 'LAPAROSCOPIA',
+    label: 'Laparoscopia / Videolaparoscopia',
+    pattern:
+      /\b(?:laparoscopia|videolaparoscopia|laparosc[oó]pic[ao]|videolaparosc[oó]pic[ao]|laparoscopy)\b/i,
+  },
+  {
+    modality: 'EDA',
+    label: 'EDA / Endoscopia Digestiva',
+    pattern:
+      /\b(?:eda|endoscopia(?:\s+digestiva(?:\s+alta)?)?|endosc[oó]pic[ao])\b/i,
+  },
+  {
+    modality: 'COLONOSCOPIA',
+    label: 'Colonoscopia / Retossigmoidoscopia',
+    pattern: /\b(?:colonoscopia|retossigmoidoscopia|colonosc[oó]pic[ao])\b/i,
+  },
+  {
+    modality: 'HISTEROSCOPIA',
+    label: 'Histeroscopia',
+    pattern: /\b(?:histeroscopia|histerosc[oó]pic[ao])\b/i,
+  },
+  {
+    modality: 'COLPOSCOPIA',
+    label: 'Colposcopia',
+    pattern: /\b(?:colposcopia|colposc[oó]pic[ao])\b/i,
+  },
+  {
+    modality: 'BRONCOSCOPIA',
+    label: 'Broncoscopia',
+    pattern: /\b(?:broncoscopia|broncosc[oó]pic[ao])\b/i,
+  },
+  {
+    modality: 'FUNDOSCOPIA',
+    label: 'Fundoscopia / Retinografia',
+    pattern:
+      /\b(?:fundoscopia|fundo\s+de\s+olho|mapeamento\s+de\s+retina|retinografia|fundoscopy)\b/i,
+  },
+  {
+    modality: 'DERMATOSCOPIA',
+    label: 'Dermatoscopia',
+    pattern: /\b(?:dermatoscopia|dermatosc[oó]pic[ao]|dermoscopy)\b/i,
+  },
+  {
+    modality: 'OTOSCOPIA',
+    label: 'Otoscopia',
+    pattern: /\b(?:otoscopia|otosc[oó]pic[ao]|otoscopy)\b/i,
+  },
+  {
+    modality: 'HISTOPATOLOGIA',
+    label: 'Histopatologia / Biópsia / Esfregaço',
+    pattern:
+      /\b(?:histopatol[oó]gic[ao]|anatomopatol[oó]gic[ao]|histologia|l[aâ]mina\s+histol[oó]gica|esfrega[cç]o\s+(?:de\s+)?sangue|blood\s+smear|microscopia|bi[oó]psia)\b/i,
+  },
+  {
+    modality: 'MAMOGRAFIA',
+    label: 'Mamografia',
+    pattern: /\b(?:mamografia|mamogr[aá]fic[ao]|mammogra(?:m|phy))\b/i,
+  },
+  {
+    modality: 'ESPIROMETRIA',
+    label: 'Espirometria',
+    pattern: /\b(?:espirometria|espirom[eé]tric[ao]|curva\s+fluxo-?volume)\b/i,
+  },
+  {
+    modality: 'PARTOGRAMA',
+    label: 'Partograma',
+    pattern: /\b(?:partograma|partogram)\b/i,
+  },
+  {
+    modality: 'ARTERIOGRAFIA',
+    label: 'Arteriografia / Cateterismo',
+    pattern:
+      /\b(?:arteriografia|angiografia|cineangiocoronariografia|cateterismo\s+card[ií]aco)\b/i,
+  },
+];
+
+const VISUAL_OVERLAP_STOPWORDS = new Set([
+  'paciente', 'gestante', 'parturiente', 'lactente', 'escolar', 'idoso', 'idosa',
+  'adulto', 'adulta', 'mulher', 'homem', 'crianca', 'clinico', 'clinica',
+  'diagnostico', 'diagnostica', 'conduta', 'exame', 'imagem', 'figura', 'foto',
+  'abaixo', 'acima', 'anexo', 'mostrado', 'mostrada', 'apresentado', 'apresentada',
+  'evidencia', 'evidenciando', 'demonstra', 'demonstrando', 'mostra', 'mostrando',
+  'revela', 'revelando', 'observa', 'nota', 'indica', 'indicando', 'correlacao',
+  'padrao', 'caracteristico', 'caracteristica', 'achado', 'achados', 'sinal', 'sinais',
+  'aspecto', 'lesao', 'alteracao', 'alteracoes', 'normal', 'agudo', 'aguda',
+  'cronico', 'cronica', 'direito', 'direita', 'esquerdo', 'esquerda', 'bilateral',
+  'anterior', 'posterior', 'inferior', 'superior', 'torax', 'toracico', 'toracica',
+  'abdome', 'abdominal', 'pelve', 'pelvico', 'pelvica', 'cranio', 'cerebral',
+  'pulmonar', 'cardiaco', 'cardiaca', 'renal', 'hepatico', 'hepatica', 'uterino',
+  'uterina', 'fetal', 'intraparto', 'obstetrico', 'obstetrica', 'emergencia',
+  'pronto', 'socorro', 'sala', 'ambulatorio', 'enfermaria', 'centro', 'qual', 'quais',
+  'imediata', 'imediato', 'primeira', 'segunda', 'escolha', 'linha', 'ecg', 'usg',
+  'tc', 'rm', 'rx', 'ctg', 'eda', 'eletrocardiograma', 'ultrassonografia', 'ultrassom',
+  'tomografia', 'computadorizada', 'ressonancia', 'magnetica', 'radiografia',
+  'cardiotocografia', 'cardiotocografico', 'laparoscopia', 'videolaparoscopia',
+  'endoscopia', 'colonoscopia', 'derivacoes', 'ortostase', 'contraste', 'tracado',
+  'corte', 'incidencia', 'legenda', 'visual', 'complementar', 'internato', 'medico',
+  'medica', 'caso', 'quadro', 'realiza', 'realizou', 'submetida', 'submetido',
+  'dor', 'febre', 'dispneia', 'sudorese', 'cefaleia', 'nausea', 'vomito', 'vomitos',
+  'palpitacoes', 'semanas', 'meses', 'anos', 'horas', 'minutos', 'tipica', 'tipico',
+  'suspeita', 'avaliacao', 'manejo', 'tratamento', 'abordagem', 'classificacao',
+  'fisiologica', 'patologica', 'compatível', 'compativel', 'presenca', 'ausencia',
+]);
+
+const VISUAL_FINDING_PATTERNS: RegExp[] = [
+  /\bsupradesnivelamento\s+(?:convexo\s+)?(?:do\s+segmento\s+|de\s+)?st\b/i,
+  /\binfradesnivelamento\s+(?:do\s+segmento\s+|de\s+)?st\b/i,
+  /\bonda\s+q\s+patol[oó]gica\b/i,
+  /\bpneumoperit[oô]nio\b/i,
+  /\bn[ií]vel\s+hidroa[eé]reo\b/i,
+  /\bempilhamento\s+de\s+moedas\b/i,
+  /\bpar[aá]bola\s+de\s+damoiseau\b/i,
+  /\bsinal\s+d[aoe]\s+(?:roda\s+dentada|alvo|menisco|duplo\s+contorno|dupla\s+bolha|gr[aã]o\s+de\s+caf[eé]|tartaruga|campan[aá]rio|polegar|anel\s+de\s+fogo|halo|contas\s+de\s+ros[aá]rio)\b/i,
+  /\bcordas\s+de\s+violino\b/i,
+  /\bdesacelera[cç][õo]es?\s+tardias?\b/i,
+  /\bvariabilidade\s+ausente\b/i,
+  /\bvidro\s+fosco\b/i,
+  /\bconsolida[cç][aã]o\s+lobar\b/i,
+  /\bborramento\s+da\s+gordura\b/i,
+  /\bespessamento\s+(?:parietal|tub[aá]rio|endometrial)\b/i,
+  /\bsombra\s+ac[uú]stica\b/i,
+  /\bhipotranspar[eê]ncia\b/i,
+  /\bhipertranspar[eê]ncia\b/i,
+  /\bimagem\s+(?:hipoecoica|hiperecoica|anecoica|hiperdensa|hipodensa)\b/i,
+  /\bvelamento\s+d[eo]\s+seio\b/i,
+  /\balargamento\s+(?:de\s+|do\s+)?mediastino\b/i,
+  /\blente\s+biconvexa\b/i,
+  /\bforma\s+de\s+crescente\b/i,
+];
+
+function normalizeImageSrcForDedup(rawSrc: string): string {
+  const trimmed = (rawSrc || '').trim();
+  if (!trimmed) return '';
+  if (/^data:/i.test(trimmed)) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const u = new URL(trimmed);
+      return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${u.pathname}${u.search}`.replace(
+        /\/+$/,
+        ''
+      );
+    } catch {
+      return trimmed.toLowerCase();
+    }
+  }
+  return (trimmed.split(/[\\/]/).pop() || trimmed).toLowerCase();
+}
+
+export function extractImageSrcOccurrences(
+  card: CanonicalCard
+): Array<{ src: string; normalizedSrc: string; field: 'question' | 'hint' }> {
+  const results: Array<{ src: string; normalizedSrc: string; field: 'question' | 'hint' }> = [];
+  const fields: Array<['question' | 'hint', string]> = [
+    ['question', card.question || ''],
+    ['hint', card.hint || ''],
+  ];
+
+  for (const [field, html] of fields) {
+    const regex = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(html)) !== null) {
+      const src = (m[1] || '').trim();
+      const normalizedSrc = normalizeImageSrcForDedup(src);
+      if (normalizedSrc) {
+        results.push({ src, normalizedSrc, field });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Extracts `<i>...</i>` visual legend entries associated with a card (prioritizing legends
+ * in `hint` before `<b>Comentário:</b>`, plus any `<i>` caption in `question` or `hint`).
+ */
+export function extractVisualLegendEntries(card: CanonicalCard): VisualLegendEntry[] {
+  const entries: VisualLegendEntry[] = [];
+  const rawHint = (card.hint || '')
+    .replace(/<table[\s\S]*?<\/table>/gi, ' ')
+    .replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, ' ');
+
+  const commentSplit = rawHint.split(/<b>\s*Coment[áa]rio:\s*<\/b>/i);
+  const preCommentHint = commentSplit[0] || '';
+  const hasCommentSplit = commentSplit.length > 1;
+
+  const sourcesToScan = [
+    hasCommentSplit ? preCommentHint : rawHint,
+    card.question || '',
+  ];
+
+  const seenRaw = new Set<string>();
+  for (const srcHtml of sourcesToScan) {
+    const italicRegex = /<i\b[^>]*>([\s\S]*?)<\/i>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = italicRegex.exec(srcHtml)) !== null) {
+      const rawHtml = m[0];
+      if (seenRaw.has(rawHtml)) continue;
+      seenRaw.add(rawHtml);
+      const text = stripHtml(m[1] || '').replace(/\s+/g, ' ').trim();
+      const descriptiveText = text
+        .replace(/^(?:legenda(?:\s+visual)?|achado(?:\s+visual)?|imagem)\s*:\s*/i, '')
+        .trim();
+      const wordCount = descriptiveText ? descriptiveText.split(/\s+/).filter(Boolean).length : 0;
+      entries.push({ rawHtml, text, descriptiveText, wordCount });
+    }
+  }
+
+  // Fallback: if <img> is inside <b>Comentário:</b> and legend was placed right after it
+  if (entries.length === 0 && hasCommentSplit && /<img\b/i.test(commentSplit.slice(1).join(' '))) {
+    const postComment = commentSplit.slice(1).join(' ');
+    const italicRegex = /<i\b[^>]*>([\s\S]*?)<\/i>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = italicRegex.exec(postComment)) !== null) {
+      const text = stripHtml(m[1] || '').replace(/\s+/g, ' ').trim();
+      const descriptiveText = text
+        .replace(/^(?:legenda(?:\s+visual)?|achado(?:\s+visual)?|imagem)\s*:\s*/i, '')
+        .trim();
+      const wordCount = descriptiveText ? descriptiveText.split(/\s+/).filter(Boolean).length : 0;
+      entries.push({ rawHtml: m[0], text, descriptiveText, wordCount });
+    }
+  }
+
+  return entries;
+}
+
+export function extractDiagnosticModalities(text: string): Array<{ modality: string; label: string }> {
+  const plain = stripHtml(stripClozeMarkup(text || ''));
+  if (!plain) return [];
+  const found: Array<{ modality: string; label: string }> = [];
+  const seen = new Set<string>();
+  for (const entry of DIAGNOSTIC_MODALITY_PATTERNS) {
+    if (entry.pattern.test(plain) && !seen.has(entry.modality)) {
+      seen.add(entry.modality);
+      found.push({ modality: entry.modality, label: entry.label });
+    }
+  }
+  return found;
+}
+
+export function detectModalityConflict(card: CanonicalCard): {
+  hasConflict: boolean;
+  cardModalities: string[];
+  legendModalities: string[];
+  message?: string;
+} {
+  const legendEntries = extractVisualLegendEntries(card);
+  const legendCombined = legendEntries.map((e) => e.text).join(' ');
+  const legendMods = extractDiagnosticModalities(legendCombined);
+  if (legendMods.length === 0) {
+    return { hasConflict: false, cardModalities: [], legendModalities: [] };
+  }
+
+  // Extract modalities from card prompt text (topic + question), excluding <b>Comentário:</b>
+  // and next-step procedures in answer so comparative remarks or subsequent procedures never produce false conflicts.
+  const cardTextCombined = [card.topic || '', card.question || ''].join(' ');
+  const cardMods = extractDiagnosticModalities(cardTextCombined);
+  if (cardMods.length === 0) {
+    return {
+      hasConflict: false,
+      cardModalities: [],
+      legendModalities: legendMods.map((m) => m.label),
+    };
+  }
+
+  const legendSet = new Set(legendMods.map((m) => m.modality));
+  const hasOverlap = cardMods.some((m) => legendSet.has(m.modality));
+  if (hasOverlap) {
+    return {
+      hasConflict: false,
+      cardModalities: cardMods.map((m) => m.label),
+      legendModalities: legendMods.map((m) => m.label),
+    };
+  }
+
+  const cardLabels = cardMods.map((m) => m.label).join(' / ');
+  const legendLabels = legendMods.map((m) => m.label).join(' / ');
+  return {
+    hasConflict: true,
+    cardModalities: cardMods.map((m) => m.label),
+    legendModalities: legendMods.map((m) => m.label),
+    message: `Conflito de modalidade texto × legenda: texto do card cita ${cardLabels}, mas a legenda visual descreve ${legendLabels}.`,
+  };
+}
+
+function extractVisualFindingStems(text: string): Set<string> {
+  const norm = stripHtml(stripClozeMarkup(text || ''))
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ');
+  const stems = new Set<string>();
+  for (const tok of norm.split(/\s+/)) {
+    if (
+      tok.length >= 5 &&
+      !DANGLING_STOPWORDS.has(tok) &&
+      !MEDICAL_UNITS_AND_STOPWORDS.has(tok) &&
+      !VISUAL_OVERLAP_STOPWORDS.has(tok)
+    ) {
+      stems.add(stemPortugueseWord(tok));
+    }
+  }
+  return stems;
+}
+
+export function detectRedundantVisualDescription(card: CanonicalCard): {
+  isRedundant: boolean;
+  reason?: string;
+} {
+  // Applies specifically to Med_Basic_Inverted_v2 (type === 'basic') with <img> in question
+  if (card.type !== 'basic' || !/<img\b/i.test(card.question || '')) {
+    return { isRedundant: false };
+  }
+
+  const qWithoutImgs = (card.question || '').replace(/<img\b[^>]*>/gi, ' ');
+  const qVisible = stripHtml(stripClozeMarkup(qWithoutImgs));
+  if (!qVisible) return { isRedundant: false };
+
+  // Signal 1: Distinctive visual finding lexicon appears in question text
+  for (const pattern of VISUAL_FINDING_PATTERNS) {
+    const match = qVisible.match(pattern);
+    if (match) {
+      return {
+        isRedundant: true,
+        reason: `Enunciado descreve textualmente o achado visual ("${match[0]}") em card Med_Basic_Inverted_v2 com imagem na pergunta.`,
+      };
+    }
+  }
+
+  // Signal 2: Question shares >= 2 distinctive visual-finding stems with the <i> legend
+  const legendEntries = extractVisualLegendEntries(card);
+  const legendText = legendEntries.map((e) => e.descriptiveText).join(' ');
+  if (legendText) {
+    const qStems = extractVisualFindingStems(qVisible);
+    const legendStems = extractVisualFindingStems(legendText);
+    const shared: string[] = [];
+    for (const st of legendStems) {
+      if (qStems.has(st)) shared.push(st);
+    }
+    if (shared.length >= 2) {
+      return {
+        isRedundant: true,
+        reason: `Enunciado antecipa textualmente o achado da legenda visual (${shared.slice(0, 3).join(', ')}) em card Med_Basic_Inverted_v2 com imagem na pergunta.`,
+      };
+    }
+  }
+
+  // Signal 3: Non-interrogative visual narration ("o ECG/exame abaixo mostra/evidencia <achado>")
+  const sentences = qVisible.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean);
+  for (const sentence of sentences) {
+    if (/^(?:qual|quais|o\s+que|como|por\s+que|quando|onde)\b/i.test(sentence)) {
+      continue;
+    }
+    const narrationMatch = sentence.match(
+      /\b(?:exame|imagem|figura|foto|tra[cç]ado|ecg|ctg|rx|radiografia|tc|tomografia|rm|resson[aâ]ncia|usg|ultrassonografia|laparoscopia|videolaparoscopia|endoscopia|eda|fundoscopia|dermatoscopia|l[aâ]mina)\s+(?:abaixo|acima|anexo|apresentad[ao]|mostrad[ao])?[^,]*?\b(?:mostra|mostrando|evidencia|evidenciando|revela|revelando|demonstra|demonstrando|exibe|exibindo|observa-se|nota-se|visualiza-se|identifica-se)\s+(.+)$/i
+    );
+    if (narrationMatch && narrationMatch[1]) {
+      const findingStems = extractVisualFindingStems(narrationMatch[1]);
+      if (findingStems.size >= 2) {
+        return {
+          isRedundant: true,
+          reason: `Enunciado narra o achado visual da imagem ("${narrationMatch[1].slice(0, 60).trim()}") em card Med_Basic_Inverted_v2.`,
+        };
+      }
+    }
+  }
+
+  return { isRedundant: false };
+}
+
+export function findDuplicateDeckImages(cards: CanonicalCard[]): DuplicateDeckImage[] {
+  const byNormalizedSrc = new Map<
+    string,
+    { rawSrc: string; cardIndexSet: Set<number>; cardIds: number[] }
+  >();
+
+  cards.forEach((card, idx) => {
+    const occurrences = extractImageSrcOccurrences(card);
+    const seenInThisCard = new Set<string>();
+    for (const occ of occurrences) {
+      if (seenInThisCard.has(occ.normalizedSrc)) continue;
+      seenInThisCard.add(occ.normalizedSrc);
+      let entry = byNormalizedSrc.get(occ.normalizedSrc);
+      if (!entry) {
+        entry = {
+          rawSrc: occ.src,
+          cardIndexSet: new Set<number>(),
+          cardIds: [],
+        };
+        byNormalizedSrc.set(occ.normalizedSrc, entry);
+      }
+      if (!entry.cardIndexSet.has(idx)) {
+        entry.cardIndexSet.add(idx);
+        entry.cardIds.push(card.id);
+      }
+    }
+  });
+
+  const duplicates: DuplicateDeckImage[] = [];
+  for (const [normalizedSrc, info] of byNormalizedSrc.entries()) {
+    if (info.cardIndexSet.size > 1) {
+      duplicates.push({
+        src: info.rawSrc,
+        normalizedSrc,
+        cardIds: info.cardIds,
+      });
+    }
+  }
+  return duplicates;
+}
+
 /**
  * Evaluates a single card against all rules from lint.py, DIRETRIZ_CRIACAO_DE_CARDS.md, and SYSTEM_PROMPT_CRIADOR.md,
  * including MISSING_MEDIA validation for orphan <img src="..."> and <audio> tags.
@@ -1216,9 +1720,13 @@ export function lintCard(
     }
   }
 
-  // 10. Image mode recognition validation (from lint.py)
+  // 10. Image mode recognition validation, visual legend (>= 6 words), modality conflict, and visual redundancy
+  const hasQuestionImg = /<img\b/i.test(questionText);
+  const hasHintImg = /<img\b/i.test(hintText);
+  const hasAnyImg = hasQuestionImg || hasHintImg;
+
   if (card.image_mode === 'recognition') {
-    if (card.type !== 'basic' || !/<img\b/i.test(questionText)) {
+    if (card.type !== 'basic' || !hasQuestionImg) {
       warnings.push({
         code: 'RECOGNITION_MISMATCH',
         field: 'question',
@@ -1226,22 +1734,50 @@ export function lintCard(
         message: 'image_mode "recognition" exige card basic com <img src="..."> na pergunta.',
       });
     }
-    if (!/<i>[\s\S]*?<\/i>/i.test(hintText)) {
-      warnings.push({
-        code: 'RECOGNITION_MISMATCH',
-        field: 'hint',
-        severity: 'warning',
-        message:
-          'Cards recognition devem trazer <i>Descrição do achado visual...</i> no início do hint.',
-      });
-    }
-    if (/<img\b/i.test(questionText) && /<img\b/i.test(hintText)) {
+    if (hasQuestionImg && hasHintImg) {
       warnings.push({
         code: 'RECOGNITION_MISMATCH',
         field: 'hint',
         severity: 'warning',
         message:
           'Não repita a mesma tag <img> no hint de cards recognition (use apenas a legenda <i>...</i>).',
+      });
+    }
+  }
+
+  if (hasAnyImg) {
+    const legendEntries = extractVisualLegendEntries(card);
+    const hasValidLegend = legendEntries.some((entry) => entry.wordCount >= MIN_VISUAL_LEGEND_WORDS);
+    if (!hasValidLegend) {
+      const bestCount = legendEntries.reduce((max, e) => Math.max(max, e.wordCount), 0);
+      warnings.push({
+        code: 'RECOGNITION_MISMATCH',
+        field: 'hint',
+        severity: 'error',
+        message:
+          legendEntries.length === 0
+            ? `[IMAGE_MISSING_LEGEND] Imagem sem legenda descritiva em <i>...</i> (mín. ${MIN_VISUAL_LEGEND_WORDS} palavras) associada ao card.`
+            : `[IMAGE_MISSING_LEGEND] Legenda visual em <i>...</i> muito curta (${bestCount}/${MIN_VISUAL_LEGEND_WORDS} palavras descritivas mínimas).`,
+      });
+    }
+
+    const modalityCheck = detectModalityConflict(card);
+    if (modalityCheck.hasConflict && modalityCheck.message) {
+      warnings.push({
+        code: 'RECOGNITION_MISMATCH',
+        field: 'hint',
+        severity: 'error',
+        message: `[MODALITY_CONFLICT] ${modalityCheck.message}`,
+      });
+    }
+
+    const redundancyCheck = detectRedundantVisualDescription(card);
+    if (redundancyCheck.isRedundant && redundancyCheck.reason) {
+      warnings.push({
+        code: 'RECOGNITION_MISMATCH',
+        field: 'question',
+        severity: 'warning',
+        message: `[REDUNDANT_VISUAL_DESCRIPTION] ${redundancyCheck.reason}`,
       });
     }
   }
@@ -2528,4 +3064,69 @@ export function resolveOrCreateNoteGuid(
   return { guid, key: regKey };
 }
 
+/**
+ * Full deck-level and card-level deterministic audit prior to `.apkg` export.
+ * Enforces:
+ * 1. DUPLICATE_IMAGE_IN_DECK (error): same `<img src="...">` used across multiple cards in the deck
+ * 2. IMAGE_MISSING_LEGEND (error): any `<img>` in Question or Hint without `<i>...</i>` (>= 6 words)
+ * 3. MODALITY_CONFLICT (error): card text modality conflicts with `<i>` legend modality (e.g. laparoscopia vs USG)
+ * 4. REDUNDANT_VISUAL_DESCRIPTION (warning): `Med_Basic_Inverted_v2` (`basic`) card with image in Question that describes the visual finding in text
+ * plus all per-card Wozniak/Matuschak/Nielsen/FSRS rules from `lintCard`.
+ */
+export function lintDeck(
+  cards: CanonicalCard[],
+  availableMediaNames?: Iterable<string>,
+  deckKey: string = 'internato_deck'
+): DeckAuditResult {
+  const cardResults = cards.map((card) => lintCard(card, availableMediaNames));
+  const duplicateImages = findDuplicateDeckImages(cards);
+  const allIssues: DeckAuditWarning[] = [];
 
+  for (const dup of duplicateImages) {
+    allIssues.push({
+      code: 'DUPLICATE_IMAGE_IN_DECK',
+      cardIds: dup.cardIds,
+      src: dup.src,
+      field: 'deck',
+      severity: 'error',
+      message: `Imagem duplicada no mesmo deck: "${dup.src}" aparece em ${dup.cardIds.length} cards (IDs: ${dup.cardIds.join(', ')}).`,
+    });
+  }
+
+  for (const res of cardResults) {
+    for (const w of res.warnings) {
+      let semanticCode: DeckAuditWarningCode = w.code;
+      if (w.message.startsWith('[IMAGE_MISSING_LEGEND]')) {
+        semanticCode = 'IMAGE_MISSING_LEGEND';
+      } else if (w.message.startsWith('[MODALITY_CONFLICT]')) {
+        semanticCode = 'MODALITY_CONFLICT';
+      } else if (w.message.startsWith('[REDUNDANT_VISUAL_DESCRIPTION]')) {
+        semanticCode = 'REDUNDANT_VISUAL_DESCRIPTION';
+      }
+
+      allIssues.push({
+        code: semanticCode,
+        cardId: res.cardId,
+        field: w.field,
+        severity: w.severity,
+        message: w.message,
+      });
+    }
+  }
+
+  const errors = allIssues.filter((i) => i.severity === 'error');
+  const warnings = allIssues.filter((i) => i.severity === 'warning');
+
+  return {
+    deckKey,
+    isValid: errors.length === 0,
+    canExport: errors.length === 0,
+    errorCount: errors.length,
+    warningCount: warnings.length,
+    errors,
+    warnings,
+    allIssues,
+    duplicateImages,
+    cardResults,
+  };
+}
