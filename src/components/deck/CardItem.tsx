@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
+  Copy,
   Edit3,
   Image as ImageIcon,
   Search,
@@ -18,8 +17,14 @@ import {
   MedicalImageResult,
   PriorityLevel,
 } from '../../types/deck';
-import { extractCardImagesWithMeta } from '../../utils/apiClient';
-import { CardMediaPanel } from './CardMediaPanel';
+import {
+  CardMediaPanel,
+  DeckImageUsageMap,
+  extractCardImagesWithMeta,
+  getOtherCardIdsForImage,
+  hasImageDescriptiveLegend,
+  ParsedCardImage,
+} from './CardMediaPanel';
 import { ImageSearchDrawer } from './ImageSearchDrawer';
 
 interface CardItemProps {
@@ -31,36 +36,49 @@ interface CardItemProps {
   isImagePickerOpen: boolean;
   isZoomed: boolean;
   isMasking: boolean;
-  isRefreshingStrip: boolean;
+  refreshingStripCardId: number | null;
   imageSearchTerm: string;
-  imageResults: MedicalImageResult[];
-  isSearchingImages: boolean;
-  onToggleEdit: () => void;
-  onToggleCardType: () => void;
-  onUpdateCard: (updated: CanonicalCard) => void;
-  onDeleteCard: () => void;
-  onAutoRepairCard: () => void;
-  onRemoveMissingMedia: () => void;
-  onOpenImagePicker: () => void;
-  onCloseImagePicker: () => void;
   onImageSearchTermChange: (val: string) => void;
-  onSearchImages: (query: string) => void;
+  imageResults: MedicalImageResult[];
+  pdfExtractedImages?: MedicalImageResult[];
+  isSearchingImages: boolean;
+  customImageUrl: string;
+  onCustomImageUrlChange: (val: string) => void;
+  customImageLegend: string;
+  onCustomImageLegendChange: (val: string) => void;
+  deckImageUsage: DeckImageUsageMap;
+  onToggleSingleCardType: (card: CanonicalCard) => void;
+  onAutoRepairSingleCard: (cardId: number) => void;
+  onOpenImagePicker: (card: CanonicalCard) => void;
+  onToggleEditing: (cardId: number) => void;
+  onDeleteCard: (cardId: number) => void;
+  onRemoveMissingMediaFromCard: (cardId: number) => void;
+  onUpdateCard: (updated: CanonicalCard) => void;
+  onSearchImagesSubmit: (card: CanonicalCard) => void;
   onAttachImage: (
+    card: CanonicalCard,
     imgUrl: string,
     legendText: string,
     mode: 'recognition' | 'feedback',
     suggestedFilename?: string
   ) => void;
-  onRemoveCardImages: () => void;
-  onToggleZoom: () => void;
-  onRefreshStrip: () => void;
-  onQuickSwap: (chosenImg: MedicalImageResult, currentLocalFilename: string) => void;
+  onRemoveCardImages: (card: CanonicalCard) => void;
+  onCloseImagePicker: () => void;
+  onToggleZoom: (cardId: number) => void;
   onApplySpoilerMask: (
-    imgMeta: { src: string; localFilename: string; index: number },
+    card: CanonicalCard,
+    imgMeta: ParsedCardImage,
     resolvedSrc: string,
     region: 'top' | 'bottom' | 'corner'
   ) => void;
-  onToggleVerified: () => void;
+  onToggleImageVerified: (card: CanonicalCard) => void;
+  onQuickSwapFromStrip: (
+    card: CanonicalCard,
+    chosenImg: MedicalImageResult,
+    currentLocalFilename: string,
+    alternatives: MedicalImageResult[]
+  ) => void;
+  onRefreshQuickGallery: (card: CanonicalCard) => void;
 }
 
 export const CardItem: React.FC<CardItemProps> = ({
@@ -72,36 +90,59 @@ export const CardItem: React.FC<CardItemProps> = ({
   isImagePickerOpen,
   isZoomed,
   isMasking,
-  isRefreshingStrip,
+  refreshingStripCardId,
   imageSearchTerm,
-  imageResults,
-  isSearchingImages,
-  onToggleEdit,
-  onToggleCardType,
-  onUpdateCard,
-  onDeleteCard,
-  onAutoRepairCard,
-  onRemoveMissingMedia,
-  onOpenImagePicker,
-  onCloseImagePicker,
   onImageSearchTermChange,
-  onSearchImages,
+  imageResults,
+  pdfExtractedImages = [],
+  isSearchingImages,
+  customImageUrl,
+  onCustomImageUrlChange,
+  customImageLegend,
+  onCustomImageLegendChange,
+  deckImageUsage,
+  onToggleSingleCardType,
+  onAutoRepairSingleCard,
+  onOpenImagePicker,
+  onToggleEditing,
+  onDeleteCard,
+  onRemoveMissingMediaFromCard,
+  onUpdateCard,
+  onSearchImagesSubmit,
   onAttachImage,
   onRemoveCardImages,
+  onCloseImagePicker,
   onToggleZoom,
-  onRefreshStrip,
-  onQuickSwap,
   onApplySpoilerMask,
-  onToggleVerified,
+  onToggleImageVerified,
+  onQuickSwapFromStrip,
+  onRefreshQuickGallery,
 }) => {
-  const [showTechnicalStats, setShowTechnicalStats] = useState(false);
-
   const questionImgs = extractCardImagesWithMeta(card.question, card.id, cleanDeckKey);
   const hintImgs = extractCardImagesWithMeta(card.hint, card.id, cleanDeckKey);
   const allCardImgs = [...questionImgs, ...hintImgs];
   const hasAnyImage = allCardImgs.length > 0;
   const missingFiles = lint.metrics.missingMediaFiles;
   const hasMissingMedia = missingFiles.length > 0;
+
+  const hasDescriptiveLegend = hasImageDescriptiveLegend(card.hint || '');
+  const isMissingDescriptiveLegend = hasAnyImage && !hasDescriptiveLegend;
+
+  const repeatedImageCardIds = Array.from(
+    new Set(
+      allCardImgs.flatMap((imgMeta) =>
+        getOtherCardIdsForImage(
+          deckImageUsage,
+          card.id,
+          imgMeta.src,
+          imgMeta.localFilename,
+          imgMeta.hasExplicitAnkiFile ||
+            (Boolean(imgMeta.src) && !/^(?:https?:|data:|blob:|\/)/i.test(imgMeta.src.trim()))
+        )
+      )
+    )
+  ).sort((a, b) => a - b);
+  const hasRepeatedImage = repeatedImageCardIds.length > 0;
 
   const questionTextOnly = card.question
     .replace(/<img\b[^>]*>/gi, '')
@@ -110,81 +151,140 @@ export const CardItem: React.FC<CardItemProps> = ({
 
   return (
     <article className="p-4 sm:p-5 bg-[#0F1623] space-y-3">
-      {/* Clean Header Row */}
+      {/* Metadata & Counters Row */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex flex-wrap items-center gap-2 text-slate-400 tabular-nums">
           <span className="font-mono font-semibold text-slate-100">
-            #{index + 1}
+            #{index + 1} · ID {card.id}
           </span>
           <span aria-hidden="true">·</span>
           <span className="font-medium text-sky-400">{card.priority || 'P1'}</span>
           <span aria-hidden="true">·</span>
           <button
             type="button"
-            onClick={onToggleCardType}
-            title="Alternar entre basic e cloze preservando ID FSRS"
+            onClick={() => onToggleSingleCardType(card)}
+            title="Converter entre basic e cloze mantendo o ID FSRS"
             className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800/90 hover:bg-slate-700 border border-slate-700 font-mono text-slate-200 cursor-pointer transition-colors"
           >
             <span>{card.type}</span>
             <ArrowLeftRight className="w-2.5 h-2.5 text-slate-400" />
           </button>
+          {card.image_mode && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono text-indigo-300">
+                img:{card.image_mode}
+              </span>
+            </>
+          )}
           <span aria-hidden="true">·</span>
-          <button
-            type="button"
-            onClick={() => setShowTechnicalStats((prev) => !prev)}
-            className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+          <span
+            className={
+              lint.metrics.questionWordCount > 50
+                ? 'text-red-400 font-medium'
+                : 'text-slate-400'
+            }
           >
-            {showTechnicalStats ? (
-              <ChevronUp className="w-3 h-3" />
-            ) : (
-              <ChevronDown className="w-3 h-3" />
-            )}
-            <span>Detalhes técnicos</span>
-          </button>
+            Enunciado: {lint.metrics.questionWordCount}/50 pal.
+          </span>
+          <span aria-hidden="true">·</span>
+          {card.type === 'basic' ? (
+            <span
+              className={
+                lint.metrics.answerWordCount > 15 || lint.metrics.answerWordCount === 0
+                  ? 'text-red-400 font-medium'
+                  : 'text-slate-400'
+              }
+            >
+              Resposta: {lint.metrics.answerWordCount}/15 pal.
+            </span>
+          ) : (
+            <span
+              className={
+                lint.metrics.clozeCount !== 1 || lint.metrics.maxClozeWords > 5
+                  ? 'text-red-400 font-medium'
+                  : 'text-slate-400'
+              }
+            >
+              Cloze: {lint.metrics.clozeCount}/1 ({lint.metrics.maxClozeWords}/5 pal.)
+            </span>
+          )}
+          <span aria-hidden="true">·</span>
+          <span
+            className={
+              lint.metrics.commentVisibleCharCount > 320 ||
+              lint.metrics.commentVisibleCharCount < 140
+                ? 'text-amber-400 font-medium'
+                : 'text-slate-400'
+            }
+          >
+            Comentário: {lint.metrics.commentVisibleCharCount}/320 chars
+          </span>
+
+          {/* Discreet visual alert badges for rapid clinical review */}
+          {hasRepeatedImage && (
+            <span
+              title={`Imagem repetida: também usada no(s) card(s) ID ${repeatedImageCardIds.join(', ')}`}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-700/70 text-[11px] font-medium text-amber-300"
+            >
+              <Copy className="w-3 h-3 text-amber-400 shrink-0" />
+              <span>Imagem repetida</span>
+            </span>
+          )}
+
+          {isMissingDescriptiveLegend && (
+            <span
+              title="Imagem sem legenda descritiva (<i>...</i>) no campo hint"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] font-medium text-amber-200"
+            >
+              <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+              <span>Sem legenda &lt;i&gt;</span>
+            </span>
+          )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex items-center gap-2.5">
           {lint.isValid ? (
             <span className="inline-flex items-center gap-1 text-xs text-emerald-400 font-medium">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Conforme</span>
+              <span>OK</span>
             </span>
           ) : (
             <button
               type="button"
-              onClick={onAutoRepairCard}
-              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-amber-300 bg-amber-950/60 border border-amber-700/60 hover:bg-amber-900/70 rounded transition-colors cursor-pointer whitespace-nowrap"
+              onClick={() => onAutoRepairSingleCard(card.id)}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-amber-300 bg-amber-950/60 border border-amber-700/60 hover:bg-amber-900/70 rounded transition-colors cursor-pointer"
             >
               <Zap className="w-3 h-3" />
-              <span>Corrigir ({lint.warnings.length})</span>
+              <span>Reparar ({lint.warnings.length})</span>
             </button>
           )}
 
           <button
             type="button"
-            onClick={onOpenImagePicker}
-            className={`inline-flex items-center gap-1 text-xs cursor-pointer transition-colors whitespace-nowrap ${
+            onClick={() => onOpenImagePicker(card)}
+            className={`inline-flex items-center gap-1 text-xs cursor-pointer transition-colors ${
               isImagePickerOpen || hasAnyImage
                 ? 'text-sky-400 hover:text-sky-300 font-medium'
                 : 'text-slate-400 hover:text-slate-100'
             }`}
           >
             <ImageIcon className="w-3.5 h-3.5" />
-            <span>{hasAnyImage ? 'Trocar imagem' : '+ Imagem'}</span>
+            <span>{hasAnyImage ? 'Buscar no Google/Web' : '+ Imagem Google'}</span>
           </button>
 
           <button
             type="button"
-            onClick={onToggleEdit}
-            className="text-xs text-slate-400 hover:text-slate-100 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+            onClick={() => onToggleEditing(card.id)}
+            className="text-xs text-slate-400 hover:text-slate-100 inline-flex items-center gap-1 cursor-pointer"
           >
             <Edit3 className="w-3 h-3" />
-            <span>{isEditing ? 'Concluir' : 'Editar'}</span>
+            <span>{isEditing ? 'Fechar' : 'Editar'}</span>
           </button>
 
           <button
             type="button"
-            onClick={onDeleteCard}
+            onClick={() => onDeleteCard(card.id)}
             aria-label={`Excluir card ${card.id}`}
             className="text-slate-500 hover:text-red-400 cursor-pointer"
           >
@@ -193,70 +293,44 @@ export const CardItem: React.FC<CardItemProps> = ({
         </div>
       </div>
 
-      {/* Expandable Technical Linter & FSRS Telemetry */}
-      {showTechnicalStats && (
-        <div className="px-3 py-2 rounded-md bg-[#0B0F17] border border-slate-800/90 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono text-slate-400 tabular-nums">
-          <span>ID FSRS: <strong className="text-slate-200">{card.id}</strong></span>
-          {card.image_mode && <span>Modo visual: <strong className="text-indigo-300">{card.image_mode}</strong></span>}
-          <span className={lint.metrics.questionWordCount > 50 ? 'text-red-400' : ''}>
-            Enunciado: {lint.metrics.questionWordCount}/50 pal.
-          </span>
-          {card.type === 'basic' ? (
-            <span className={lint.metrics.answerWordCount > 15 || lint.metrics.answerWordCount === 0 ? 'text-red-400' : ''}>
-              Resposta: {lint.metrics.answerWordCount}/15 pal.
-            </span>
-          ) : (
-            <span className={lint.metrics.clozeCount !== 1 || lint.metrics.maxClozeWords > 5 ? 'text-red-400' : ''}>
-              Cloze: {lint.metrics.clozeCount}/1 ({lint.metrics.maxClozeWords}/5 pal.)
-            </span>
-          )}
-          <span
-            className={
-              lint.metrics.commentVisibleCharCount > 320 ||
-              lint.metrics.commentVisibleCharCount < 140
-                ? 'text-amber-400'
-                : ''
-            }
-          >
-            Comentário: {lint.metrics.commentVisibleCharCount}/320 chars
-          </span>
-        </div>
-      )}
-
-      {/* Missing Media Alert */}
+      {/* Alert Box if automatic Google/Web search did not find a match */}
       {hasMissingMedia && (
         <div className="px-3.5 py-2.5 rounded-lg bg-red-950/50 border border-red-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="flex items-start gap-2 text-xs text-red-200">
             <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
             <div>
-              <span className="font-semibold text-red-300">Imagem pendente: </span>
-              <code className="font-mono text-red-200">{missingFiles.join(', ')}</code>
+              <span className="font-semibold text-red-300">
+                MISSING_MEDIA — Imagem ainda não resolvida:{' '}
+              </span>
+              <code className="font-mono text-red-200">
+                {missingFiles.join(', ')}
+              </code>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={onOpenImagePicker}
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer whitespace-nowrap"
+              onClick={() => onOpenImagePicker(card)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer"
             >
               <Search className="w-3 h-3" />
-              <span>Buscar imagem</span>
+              <span>Pesquisar no Google Imagens</span>
             </button>
 
             <button
               type="button"
-              onClick={onRemoveMissingMedia}
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-200 bg-red-900/70 hover:bg-red-800/80 border border-red-700 rounded cursor-pointer whitespace-nowrap"
+              onClick={() => onRemoveMissingMediaFromCard(card.id)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-200 bg-red-900/70 hover:bg-red-800/80 border border-red-700 rounded cursor-pointer"
             >
               <Trash2 className="w-3 h-3" />
-              <span>Remover referência</span>
+              <span>Remover tag ausente</span>
             </button>
           </div>
         </div>
       )}
 
-      {/* Linter Warnings */}
+      {/* Other Linter Warnings List */}
       {!lint.isValid && (
         <div className="px-3 py-2 rounded-md bg-amber-950/40 border border-amber-800/70 space-y-1">
           {lint.warnings.map((w, wIdx) => (
@@ -273,7 +347,7 @@ export const CardItem: React.FC<CardItemProps> = ({
         </div>
       )}
 
-      {/* Image Search Drawer */}
+      {/* Inline Medical Image Search Drawer */}
       {isImagePickerOpen && (
         <ImageSearchDrawer
           card={card}
@@ -281,17 +355,23 @@ export const CardItem: React.FC<CardItemProps> = ({
           imageSearchTerm={imageSearchTerm}
           onImageSearchTermChange={onImageSearchTermChange}
           imageResults={imageResults}
+          pdfExtractedImages={pdfExtractedImages}
           isSearchingImages={isSearchingImages}
-          onSearch={onSearchImages}
+          customImageUrl={customImageUrl}
+          onCustomImageUrlChange={onCustomImageUrlChange}
+          customImageLegend={customImageLegend}
+          onCustomImageLegendChange={onCustomImageLegendChange}
+          deckImageUsage={deckImageUsage}
+          currentCardImageSrcs={allCardImgs.map((img) => img.src)}
+          onSearchSubmit={() => onSearchImagesSubmit(card)}
           onAttachImage={onAttachImage}
           onRemoveCardImages={onRemoveCardImages}
           onClose={onCloseImagePicker}
         />
       )}
 
-      {/* Card Body (Edit vs Read) */}
       {isEditing ? (
-        <div className="space-y-3 pt-1">
+        <div className="space-y-3 pt-2">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <input
               type="text"
@@ -362,15 +442,17 @@ export const CardItem: React.FC<CardItemProps> = ({
 
           <CardMediaPanel
             card={card}
-            images={allCardImgs}
+            allCardImgs={allCardImgs}
             isZoomed={isZoomed}
             isMasking={isMasking}
-            isRefreshingStrip={isRefreshingStrip}
+            refreshingStripCardId={refreshingStripCardId}
+            deckImageUsage={deckImageUsage}
+            hasDescriptiveLegend={hasDescriptiveLegend}
             onToggleZoom={onToggleZoom}
-            onRefreshStrip={onRefreshStrip}
-            onQuickSwap={onQuickSwap}
             onApplySpoilerMask={onApplySpoilerMask}
-            onToggleVerified={onToggleVerified}
+            onToggleImageVerified={onToggleImageVerified}
+            onQuickSwapFromStrip={onQuickSwapFromStrip}
+            onRefreshQuickGallery={onRefreshQuickGallery}
           />
 
           {card.type === 'basic' && (
