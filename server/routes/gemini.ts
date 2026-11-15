@@ -227,6 +227,23 @@ function formatVerifiedGuidelinesBlock(clinicalMap: unknown): string {
     .join('\n')}\n`;
 }
 
+function sanitizeReturnedNotes(
+  notes: Array<Record<string, unknown>>
+): Array<Record<string, unknown>> {
+  return (Array.isArray(notes) ? notes : [])
+    .filter((n) => n && typeof n === 'object')
+    .map((n) => {
+      const copy: Record<string, unknown> = { ...n };
+      delete copy.sources;
+      const rawType = String(copy.type || 'basic').trim().toLowerCase();
+      copy.type = rawType === 'cloze' ? 'cloze' : 'basic';
+      if (copy.type === 'cloze') {
+        copy.answer = '';
+      }
+      return copy;
+    });
+}
+
 export function createGeminiRouter(): express.Router {
   const router = express.Router();
 
@@ -782,7 +799,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         return parsedNotes;
       };
 
-      const notes = await runDeckBatch(cardsForPrompt, effectiveNewIdStart);
+      const notes = sanitizeReturnedNotes(
+        await runDeckBatch(cardsForPrompt, effectiveNewIdStart)
+      );
       if (res.writableEnded) return;
 
       return res.json({
@@ -902,7 +921,11 @@ Retorne EXCLUSIVAMENTE um JSON válido:
       if (wasTruncated) {
         console.warn('[fill-map-gaps] Resposta truncada recuperada parcialmente:', notes.length);
       }
-      return res.json({ deck_key: deckKey, notes, modelUsed: response.modelUsed });
+      return res.json({
+        deck_key: deckKey,
+        notes: sanitizeReturnedNotes(notes),
+        modelUsed: response.modelUsed,
+      });
     } catch (error: unknown) {
       if (res.writableEnded) return;
       return res.status(200).json({
@@ -982,11 +1005,13 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
       const rawText = response.text || '{}';
       const cleanedJson = extractJsonBlock(rawText);
       const parsed = JSON.parse(cleanedJson);
-      const repairedCards = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed.repairedCards)
-        ? parsed.repairedCards
-        : [];
+      const repairedCards = sanitizeReturnedNotes(
+        Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed.repairedCards)
+          ? parsed.repairedCards
+          : []
+      );
 
       return res.json({ repairedCards, deckKey, modelUsed: response.modelUsed });
     } catch (error: unknown) {

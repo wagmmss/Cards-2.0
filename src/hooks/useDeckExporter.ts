@@ -15,6 +15,7 @@ import {
   computeDeterministicDeckId,
   extractDeckMediaManifest,
   formatCanonicalDeckJson,
+  lintDeck,
   resolveOrCreateNoteGuid,
 } from '../utils/wozniakLinter';
 
@@ -33,7 +34,7 @@ const ANKI_CONNECT_CLINICAL_CSS = `.card {
 b, strong { color: #0284c7; font-weight: 700; }
 i, em { font-style: italic; color: #334155; }
 .cloze { font-weight: 700; color: #0284c7; border-bottom: 2px solid #38bdf8; padding: 0 2px; }
-.front-content { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
+.front-content, .cloze-text { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
 .back-content { font-size: 18.5px; color: #0f172a; line-height: 1.58; margin-top: 10px; }
 .main-answer { font-size: 20px; font-weight: 700; color: #0f172a; margin-bottom: 12px; }
 .extra-box {
@@ -41,12 +42,18 @@ i, em { font-style: italic; color: #334155; }
   border-radius: 8px; border-left: 4px solid #0284c7;
   font-size: 16px; color: #334155; line-height: 1.52;
 }
+.extra-box i {
+  display: block; margin-top: 6px; margin-bottom: 6px;
+  font-size: 14px; color: #64748b; text-align: center;
+}
 hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
 img {
   max-width: 100%; max-height: 62vh; height: auto; border-radius: 8px;
   border: 1px solid #cbd5e1; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.10);
   margin: 14px auto 6px; background: #ffffff; padding: 4px; display: block; object-fit: contain;
 }
+img:first-child { margin-top: 0; }
+audio.med-audio { width: 100%; height: 36px; margin: 8px 0; display: block; }
 img + br + i, img + i, .extra-box > i:first-child {
   display: block; margin: 4px auto 12px; max-width: 94%; font-size: 13.5px;
   line-height: 1.45; color: #475569; text-align: center; font-style: italic;
@@ -68,13 +75,24 @@ table.med-table tbody tr:nth-child(even) td { background-color: #f8fafc; }
 .nightMode i, .nightMode em, .night_mode i, .night_mode em { color: #cbd5e1 !important; }
 .nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
 .nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
+.nightMode .extra-box i, .night_mode .extra-box i { color: #94a3b8 !important; }
 .nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
 .nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46 !important; }
 .nightMode img + br + i, .night_mode img + br + i, .nightMode img + i, .night_mode img + i, .nightMode .extra-box > i:first-child, .night_mode .extra-box > i:first-child { color: #cbd5e1 !important; }
 .nightMode table.med-table, .night_mode table.med-table { background-color: #18181b !important; color: #f4f4f5 !important; border-color: #475569 !important; }
 .nightMode table.med-table th, .night_mode table.med-table th { background-color: #0c4a6e !important; color: #e0f2fe !important; border-color: #475569 !important; }
 .nightMode table.med-table td, .night_mode table.med-table td { background-color: #1f2430 !important; border-color: #475569 !important; color: #f4f4f5 !important; }
-.nightMode table.med-table tbody tr:nth-child(even) td, .night_mode table.med-table tbody tr:nth-child(even) td { background-color: #27272a !important; }`;
+.nightMode table.med-table tbody tr:nth-child(even) td, .night_mode table.med-table tbody tr:nth-child(even) td { background-color: #27272a !important; }
+@media (max-width: 600px) {
+  .card { padding: 14px; font-size: 16.5px; }
+  .med-card { max-width: 100%; }
+  .front-content, .cloze-text { font-size: 17.5px; }
+  .back-content { font-size: 16.5px; }
+  .main-answer { font-size: 18px; }
+  .extra-box { padding: 10px 14px; font-size: 15px; }
+  img { max-height: 55vh; margin-top: 10px; }
+  img:first-child { margin-top: 0; }
+}`;
 
 function extractSanitizedGuidEntries(guidRegistry: GuidRegistryData): Record<string, string> {
   const raw =
@@ -191,6 +209,21 @@ export function useDeckExporter(params: {
       ? `Internato::${clinicalMap.themeTitle}`
       : `Internato::${cleanDeckKey}`;
 
+    const deckAudit = lintDeck(cards, undefined, cleanDeckKey);
+    const auditNotes: string[] = [];
+    if (deckAudit.duplicateImages.length > 0) {
+      auditNotes.push(`${deckAudit.duplicateImages.length} imagem(ns) repetida(s)`);
+    }
+    const missingLegendErrs = deckAudit.errors.filter((e) => e.code === 'IMAGE_MISSING_LEGEND').length;
+    if (missingLegendErrs > 0) {
+      auditNotes.push(`${missingLegendErrs} legenda(s) <i> curta(s)/ausente(s)`);
+    }
+    const modalityErrs = deckAudit.errors.filter((e) => e.code === 'MODALITY_CONFLICT').length;
+    if (modalityErrs > 0) {
+      auditNotes.push(`${modalityErrs} conflito(s) de modalidade`);
+    }
+    const auditSuffix = auditNotes.length > 0 ? ` | Auditoria visual: ${auditNotes.join(', ')}.` : '';
+
     // Ensure every exported note has a deterministic persisted GUID before packaging
     const flatGuidEntries = extractSanitizedGuidEntries(guidRegistry);
     const newlyEnsuredEntries: Record<string, string> = {};
@@ -255,9 +288,11 @@ export function useDeckExporter(params: {
 
       triggerBlobDownload(blob, `${cleanDeckKey}.apkg`);
 
-      if (missingCount > 0) {
+      if (missingCount > 0 || auditNotes.length > 0) {
         showStatus(
-          `Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS + ${resolvedCount}/${mediaManifest.length} mídia(s)), porém ${missingCount} mídia(s) não foram baixadas (${missingList}).`,
+          `Pacote ${cleanDeckKey}.apkg exportado (${cards.length} notes com FSRS + ${resolvedCount}/${mediaManifest.length} mídia(s))${
+            missingCount > 0 ? `, porém ${missingCount} mídia(s) não foram baixadas (${missingList})` : ''
+          }.${auditSuffix}`,
           'error'
         );
       } else {

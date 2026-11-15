@@ -12,6 +12,7 @@ import {
   Eye,
   PackageCheck,
   MonitorUp,
+  Sparkles,
 } from 'lucide-react';
 import {
   CanonicalCard,
@@ -47,6 +48,9 @@ interface WozniakLinterDeckProps {
   onRemoveAllMissingMedia: () => void;
   onAutoResolveMissingImages: () => void;
   isAutoResolvingImages?: boolean;
+  pdfExtractedImages?: MedicalImageResult[];
+  onSuggestVisualCards?: () => void;
+  isSuggestingVisuals?: boolean;
   onOpenQuickReview: () => void;
   onSyncAnkiConnect: () => void;
   isSyncingAnkiConnect?: boolean;
@@ -74,6 +78,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   onRemoveAllMissingMedia,
   onAutoResolveMissingImages,
   isAutoResolvingImages = false,
+  pdfExtractedImages = [],
+  onSuggestVisualCards,
+  isSuggestingVisuals = false,
   onOpenQuickReview,
   onSyncAnkiConnect,
   isSyncingAnkiConnect = false,
@@ -577,6 +584,23 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             </span>
           </button>
 
+          {onSuggestVisualCards && (
+            <button
+              type="button"
+              onClick={onSuggestVisualCards}
+              disabled={isSuggestingVisuals || isRepairing || cards.length === 0}
+              title="Analisa os cards clínicos e sugere/vincula imagens compatíveis (dos PDFs enviados ou Web) com validação multimodal"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-indigo-400 hover:bg-indigo-300 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>
+                {isSuggestingVisuals
+                  ? 'Sugerindo Imagens...'
+                  : '✨ Sugerir Imagens (IA)'}
+              </span>
+            </button>
+          )}
+
           {totalCardsWithMissingMedia > 0 && (
             <>
               <button
@@ -645,6 +669,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           </button>
 
           <button
+            id="exportar-apkg"
             type="button"
             onClick={onExportApkg}
             disabled={isExportingApkg}
@@ -766,6 +791,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                 imageSearchTerm={imageSearchTerm}
                 onImageSearchTermChange={setImageSearchTerm}
                 imageResults={imageResults}
+                pdfExtractedImages={pdfExtractedImages}
                 isSearchingImages={isSearchingImages}
                 customImageUrl={customImageUrl}
                 onCustomImageUrlChange={setCustomImageUrl}

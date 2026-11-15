@@ -301,6 +301,7 @@ export function useBatchDeckGenerator(params: {
     ensurePdfsUploadedToGemini,
     extractedMeta,
     pdfs,
+    selectedModel,
     selectedProfile,
     setClinicalMap,
     setDeckKey,
@@ -397,7 +398,7 @@ export function useBatchDeckGenerator(params: {
         setIsDeepeningGuidelines(false);
       }
     },
-    [clinicalMap, deckKey, selectedProfile, setClinicalMap, showStatus]
+    [clinicalMap, deckKey, selectedModel, selectedProfile, setClinicalMap, showStatus]
   );
 
   const handleRecreateCanonicalDeck = useCallback(
@@ -668,6 +669,7 @@ export function useBatchDeckGenerator(params: {
       ensurePdfsUploadedToGemini,
       extractedMeta,
       pdfs,
+      selectedModel,
       selectedProfile,
       setCards,
       setClinicalMap,
@@ -694,7 +696,8 @@ export function useBatchDeckGenerator(params: {
       cards,
       extractedMeta,
       effectiveKey,
-      activeMap
+      activeMap,
+      { skipTemplateGapAdditions: true }
     );
     setCards(curatedAndRepaired);
     setCurationStats(stats);
@@ -777,6 +780,7 @@ export function useBatchDeckGenerator(params: {
     clinicalMap,
     deckKey,
     extractedMeta,
+    selectedModel,
     setCards,
     setCurationStats,
     showStatus,

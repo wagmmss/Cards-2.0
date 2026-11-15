@@ -81,6 +81,24 @@ interface CardItemProps {
   onRefreshQuickGallery: (card: CanonicalCard) => void;
 }
 
+function formatInlineMedicalHtml(raw: string, highlightCloze: boolean): string {
+  let formatted = (raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/&lt;(\/?(?:b|strong|i|em|u|sub|sup))&gt;/gi, '<$1>')
+    .replace(/&lt;br\s*\/?&gt;/gi, '<br />');
+
+  if (highlightCloze) {
+    formatted = formatted.replace(/\{\{c\d+::([\s\S]*?)\}\}/g, (_match, inner) => {
+      const target = String(inner).split('::')[0].trim();
+      return `<span class="inline-block px-1.5 py-0.5 mx-0.5 rounded bg-sky-500/15 border border-sky-400/40 text-sky-300 font-semibold">${target}</span>`;
+    });
+  }
+
+  return formatted;
+}
+
 export const CardItem: React.FC<CardItemProps> = ({
   card,
   index,
@@ -436,9 +454,12 @@ export const CardItem: React.FC<CardItemProps> = ({
       ) : (
         <div className="space-y-2 text-xs">
           <div className="text-sky-400/90 font-medium">{card.topic}</div>
-          <div className="text-sm text-slate-100 font-medium leading-relaxed">
-            {questionTextOnly}
-          </div>
+          <div
+            className="text-sm text-slate-100 font-medium leading-relaxed [&_b]:text-sky-300 [&_strong]:text-sky-300 [&_i]:text-slate-300 [&_em]:text-slate-300"
+            dangerouslySetInnerHTML={{
+              __html: formatInlineMedicalHtml(questionTextOnly, true),
+            }}
+          />
 
           <CardMediaPanel
             card={card}
@@ -458,7 +479,12 @@ export const CardItem: React.FC<CardItemProps> = ({
           {card.type === 'basic' && (
             <div className="text-emerald-300 font-semibold pt-0.5">
               <span className="text-slate-500 font-mono mr-1.5">R:</span>
-              {card.answer}
+              <span
+                className="[&_b]:text-emerald-200 [&_strong]:text-emerald-200 [&_i]:text-emerald-200/80"
+                dangerouslySetInnerHTML={{
+                  __html: formatInlineMedicalHtml(card.answer || '', false),
+                }}
+              />
             </div>
           )}
           <div

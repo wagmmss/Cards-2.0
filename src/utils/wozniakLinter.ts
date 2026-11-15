@@ -230,8 +230,8 @@ export function resolveLocalMediaFilename(
   }
 
   const src = (rawSrc || '').trim();
-  // 2. If already a local filename (not http/https/data/blob)
-  if (src && !/^(?:https?:|data:|blob:|\/)/i.test(src)) {
+  // 2. If already a local filename (not http/https/data/blob/pdfimg/buscar_imagem)
+  if (src && !/^(?:https?:|data:|blob:|pdfimg:|buscar_imagem:|\/)/i.test(src)) {
     const base = src.split(/[\\/]/).pop() || src;
     return base.replace(/[^a-zA-Z0-9_.-]+/g, '_');
   }
@@ -515,9 +515,9 @@ export function stripOrphanAudioFromHtml(
 }
 
 /**
- * Extracts unresolved local `<img src="arquivo_local.png">` references from a card along with
- * a rich search query built from the visual legend `<i>...</i>` + `topic` + `question` so they can
- * be automatically resolved via Google/Web medical image search without manual upload.
+ * Extracts unresolved local `<img src="arquivo_local.png">`, `pdfimg:ID`, and `buscar_imagem:query`
+ * references from a card along with a rich search query built from the visual legend `<i>...</i>` +
+ * `topic` + `answer` so they can be automatically resolved from material PDFs or Google/Web search.
  */
 export function extractUnresolvedLocalImages(
   card: CanonicalCard,
@@ -527,6 +527,7 @@ export function extractUnresolvedLocalImages(
   field: 'question' | 'hint';
   legendText: string;
   searchQuery: string;
+  pdfImageId?: string;
 }> {
   const availableSet = new Set<string>();
   if (availableMediaNames) {
@@ -542,11 +543,12 @@ export function extractUnresolvedLocalImages(
 
   const italicMatch = (card.hint || '').match(/<i>([\s\S]*?)<\/i>/i);
   const legendText = italicMatch?.[1] ? stripHtml(italicMatch[1]).trim() : '';
+  const answerText = stripHtml(card.answer || '').trim();
   const cleanFileWords = (fname: string) =>
     fname
       .replace(/\.[a-z0-9]+$/i, '')
       .replace(/[_-]+/g, ' ')
-      .replace(/\b(?:img|image|card|fig|figura|\d+)\b/gi, ' ')
+      .replace(/\b(?:img|image|card|fig|figura|ficha|resumo|apostila|aula|slide|pagina|pag|p\d+|\d+)\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -556,20 +558,30 @@ export function extractUnresolvedLocalImages(
     field: 'question' | 'hint';
     legendText: string;
     searchQuery: string;
+    pdfImageId?: string;
   }> = [];
 
   for (const ref of refs) {
     if (ref.kind !== 'image') continue;
     const raw = (ref.sourceUrl || '').trim();
+    const isPdfPlaceholder = /^pdfimg:/i.test(raw);
+    const isSearchPlaceholder = /^buscar_imagem:/i.test(raw);
     const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
     const isLoadedLocally =
-      availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase());
+      !isPdfPlaceholder &&
+      !isSearchPlaceholder &&
+      (availableSet.has(ref.filename.toLowerCase()) || availableSet.has(raw.toLowerCase()));
 
     if (!isSelfContainedOrWeb && !isLoadedLocally) {
+      const pdfImageId = isPdfPlaceholder ? raw.replace(/^pdfimg:\s*/i, '').trim() : undefined;
+      const explicitSearch = isSearchPlaceholder
+        ? raw.replace(/^buscar_imagem:\s*/i, '').trim()
+        : '';
       const fileHint = cleanFileWords(ref.filename);
-      const searchQuery = [legendText, card.topic, fileHint]
-        .filter(Boolean)
-        .join(' ')
+      const searchQuery = (
+        explicitSearch ||
+        [legendText || answerText, card.topic, fileHint].filter(Boolean).join(' ')
+      )
         .slice(0, 140)
         .trim();
       unresolved.push({
@@ -577,6 +589,7 @@ export function extractUnresolvedLocalImages(
         field: ref.field,
         legendText,
         searchQuery: searchQuery || card.topic || 'medical exam',
+        ...(pdfImageId ? { pdfImageId } : {}),
       });
     }
   }
@@ -585,23 +598,108 @@ export function extractUnresolvedLocalImages(
 }
 
 /**
- * Replaces a card's local `<img src="...">` (or current image) with a resolved web image URL
- * while preserving `data-anki-file` and storing 4–6 alternative thumbnails on `card.imageAlternatives`.
+ * Formats a clean clinical visual legend inside `<i>Legenda visual: ...</i>`,
+ * guaranteeing at least 6 descriptive words and avoiding double prefixes.
+ */
+export function formatVisualLegendHtml(
+  rawLegend: string,
+  fallbackText?: string
+): string {
+  const cleanText = (val: string) =>
+    stripHtml(val || '')
+      .replace(/^(?:legenda(?:\s+visual)?|achado(?:\s+visual)?|imagem)\s*:\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  let body = cleanText(rawLegend);
+  const words = body.split(/\s+/).filter(Boolean);
+  if (words.length < 6) {
+    const fallbackBody = cleanText(fallbackText || '');
+    const fallbackWords = fallbackBody.split(/\s+/).filter(Boolean);
+    if (fallbackWords.length >= 6) {
+      body = fallbackBody;
+    } else if (words.length >= 2) {
+      body = `${body.replace(/[.!?]+$/, '')} para correlação diagnóstica e clínica do caso`;
+    } else {
+      body =
+        'Achado visual complementar do exame clínico para correlação diagnóstica no internato médico';
+    }
+  }
+
+  body = body.replace(/[;,:]+$/, '').trim();
+  if (!/[.!?]$/.test(body)) {
+    body += '.';
+  }
+  return `<i>Legenda visual: ${body}</i>`;
+}
+
+function injectVisualLegendIntoHint(
+  rawHint: string,
+  legendHtml: string,
+  mode: 'recognition' | 'feedback',
+  forceReplaceExisting: boolean
+): string {
+  let working = (rawHint || '').trim();
+  const leadingImgs: string[] = [];
+
+  if (mode === 'feedback') {
+    const imgMatch = working.match(/^(?:\s*<img\b[^>]*>\s*(?:<br\s*\/?>\s*)*)+/i);
+    if (imgMatch) {
+      const imgs = imgMatch[0].match(/<img\b[^>]*>/gi) || [];
+      leadingImgs.push(...imgs);
+      working = working.slice(imgMatch[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim();
+    }
+  } else {
+    working = working.replace(/<img\b[^>]*>(?:\s*<br\s*\/?>\s*)*/gi, '').trim();
+  }
+
+  const existingItalicMatch = working.match(/^<i>([\s\S]*?)<\/i>(?:\s*<br\s*\/?>\s*)*/i);
+  let chosenLegendHtml = legendHtml;
+
+  if (existingItalicMatch) {
+    const existingPlain = stripHtml(existingItalicMatch[1] || '');
+    const existingHasValidLegend =
+      existingPlain.split(/\s+/).filter(Boolean).length >= 6;
+
+    if (!forceReplaceExisting && existingHasValidLegend) {
+      chosenLegendHtml = `<i>${existingPlain}</i>`;
+    }
+    working = working.slice(existingItalicMatch[0].length).replace(/^(?:<br\s*\/?>\s*)+/i, '').trim();
+  }
+
+  const normalizedBody = /^<b>\s*Coment[áa]rio:/i.test(working)
+    ? working
+    : `<b>Comentário:</b> ${working.replace(/^Coment[áa]rio:\s*/i, '').trim()}`;
+
+  if (leadingImgs.length > 0) {
+    return `${leadingImgs.join('<br>')}<br>${chosenLegendHtml}<br><br>${normalizedBody}`;
+  }
+  return `${chosenLegendHtml}<br><br>${normalizedBody}`;
+}
+
+/**
+ * Replaces a card's local `<img src="...">` (or current image) with a resolved web/material image URL
+ * while preserving `data-anki-file`, storing 4–6 alternative thumbnails on `card.imageAlternatives`,
+ * and guaranteeing `<i>Legenda visual: ...</i>` before `<b>Comentário:</b>`.
  */
 export function applyResolvedWebImageToCard(
   card: CanonicalCard,
   targetFilename: string,
   chosenImage: MedicalImageResult,
-  alternatives: MedicalImageResult[]
+  alternatives: MedicalImageResult[],
+  legendOverride?: string
 ): CanonicalCard {
   const safeFile =
-    targetFilename.trim() ||
-    chosenImage.suggestedFilename ||
-    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
+    chosenImage.fromMaterial && chosenImage.suggestedFilename
+      ? chosenImage.suggestedFilename
+      : targetFilename.trim() ||
+        chosenImage.suggestedFilename ||
+        resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, card.deck_key || 'deck');
   const newImgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
 
   let question = card.question || '';
   let hint = card.hint || '';
+  let placedIn: 'question' | 'hint' = card.image_mode === 'feedback' ? 'hint' : 'question';
 
   const replaceTargetImg = (html: string): { updated: string; replaced: boolean } => {
     let replaced = false;
@@ -611,7 +709,8 @@ export function applyResolvedWebImageToCard(
       if (
         !targetFilename ||
         localName.toLowerCase() === targetFilename.toLowerCase() ||
-        srcVal.toLowerCase().includes(targetFilename.toLowerCase())
+        srcVal.toLowerCase().includes(targetFilename.toLowerCase()) ||
+        /^(?:pdfimg|buscar_imagem):/i.test(srcVal.trim())
       ) {
         replaced = true;
         return newImgTag;
@@ -624,25 +723,104 @@ export function applyResolvedWebImageToCard(
   const qRes = replaceTargetImg(question);
   if (qRes.replaced) {
     question = qRes.updated;
+    placedIn = 'question';
   } else {
     const hRes = replaceTargetImg(hint);
     if (hRes.replaced) {
       hint = hRes.updated;
+      placedIn = 'hint';
     } else if (/<img\b/i.test(question)) {
       question = question.replace(/<img\b[^>]*>/i, newImgTag);
+      placedIn = 'question';
     } else if (/<img\b/i.test(hint)) {
       hint = hint.replace(/<img\b[^>]*>/i, newImgTag);
+      placedIn = 'hint';
     } else {
       question = `${question}<br>${newImgTag}`;
+      placedIn = 'question';
     }
   }
 
+  const effectiveMode: 'recognition' | 'feedback' =
+    placedIn === 'hint' ? 'feedback' : 'recognition';
+  const fallbackDesc = `Achado visual complementar de ${stripHtml(card.topic)} para correlação diagnóstica no internato`;
+  const candidateLegend = (legendOverride || '').trim() || chosenImage.defaultLegend || '';
+  const legendHtml = formatVisualLegendHtml(candidateLegend, fallbackDesc);
+
+  hint = injectVisualLegendIntoHint(
+    hint,
+    legendHtml,
+    effectiveMode,
+    Boolean(legendOverride && legendOverride.trim().length > 0)
+  );
+
   return {
     ...card,
+    image_mode: effectiveMode,
     question,
     hint,
     imageAlternatives: alternatives.slice(0, 6),
     isResolvingImage: false,
+  };
+}
+
+/**
+ * Proactively attaches an image to a card that previously had none (choosing `recognition` on front
+ * or `feedback` on hint) while preserving Wozniak/Matuschak hint structure (`<i>Legenda visual: ...</i><br><br><b>Comentário:</b> ...`).
+ */
+export function attachVisualSuggestionToCard(
+  card: CanonicalCard,
+  chosenImage: MedicalImageResult,
+  legendText: string,
+  mode: 'recognition' | 'feedback',
+  alternatives: MedicalImageResult[]
+): CanonicalCard {
+  const cleanDeck =
+    (card.deck_key || 'deck').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_') || 'deck';
+  const safeFile =
+    chosenImage.suggestedFilename?.trim() ||
+    resolveLocalMediaFilename('', chosenImage.thumbUrl, card.id, 0, cleanDeck);
+
+  const cleanQ = (card.question || '')
+    .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+    .trim();
+  const cleanHint = (card.hint || '')
+    .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+    .replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '')
+    .trim();
+
+  const normalizedComment = /^<b>\s*Coment[áa]rio:/i.test(cleanHint)
+    ? cleanHint
+    : `<b>Comentário:</b> ${cleanHint.replace(/^Coment[áa]rio:\s*/i, '').trim()}`;
+
+  const fallbackDesc = `Achado visual complementar de ${stripHtml(card.topic)} para correlação diagnóstica no internato`;
+  const legendHtml = formatVisualLegendHtml(
+    (legendText || '').trim() || chosenImage.defaultLegend || '',
+    fallbackDesc
+  );
+
+  const imgTag = `<img src="${chosenImage.thumbUrl}" data-anki-file="${safeFile}">`;
+
+  if (mode === 'recognition') {
+    return {
+      ...card,
+      image_mode: 'recognition',
+      imageVerified: false,
+      isResolvingImage: false,
+      imageAlternatives: alternatives.slice(0, 6),
+      question: `${cleanQ}<br>${imgTag}`,
+      hint: `${legendHtml}<br><br>${normalizedComment}`,
+    };
+  }
+
+  return {
+    ...card,
+    image_mode: 'feedback',
+    imageVerified: false,
+    isResolvingImage: false,
+    imageAlternatives: alternatives.slice(0, 6),
+    question: cleanQ,
+    hint: `${imgTag}<br>${legendHtml}<br><br>${normalizedComment}`,
   };
 }
 
@@ -794,12 +972,38 @@ function normalizeForSpoiler(text: string): string {
     .trim();
 }
 
+const NON_SPOILER_ACRONYMS = new Set([
+  'IV', 'EV', 'VO', 'IM', 'SC', 'DU', 'MG', 'ML', 'KG', 'CM', 'MM', 'UI',
+  'PA', 'FC', 'FR', 'PH', 'RN', 'DE', 'DA', 'DO', 'EM', 'NO', 'NA', 'OS', 'AS',
+]);
+
+function extractAcronymTokens(text: string): string[] {
+  const plain = stripHtml(text);
+  const matches = plain.match(/\b[A-Z]{2,5}\b/g) || [];
+  return Array.from(new Set(matches.filter((tok) => !NON_SPOILER_ACRONYMS.has(tok))));
+}
+
 function extractCoreKeywords(text: string): string[] {
   const norm = normalizeForSpoiler(text);
   if (!norm) return [];
   return norm
     .split(/\s+/)
     .filter((w) => w.length > 3 && !MEDICAL_UNITS_AND_STOPWORDS.has(w));
+}
+
+function stemsCollideForSpoiler(a: string, b: string): boolean {
+  if (a.length < 4 || b.length < 4) return false;
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) >= 6) {
+    if (a.startsWith(b) || b.startsWith(a)) return true;
+    let common = 0;
+    const limit = Math.min(a.length, b.length);
+    while (common < limit && a[common] === b[common]) {
+      common++;
+    }
+    if (common >= 7) return true;
+  }
+  return false;
 }
 
 const PORTUGUESE_STEM_SUFFIXES = [
@@ -1313,6 +1517,8 @@ export function lintCard(
   availableMediaNames?: Iterable<string>
 ): CardLintResult {
   const warnings: LinterWarning[] = [];
+  const cardType: 'basic' | 'cloze' =
+    String(card.type || 'basic').toLowerCase() === 'cloze' ? 'cloze' : 'basic';
   const questionText = card.question || '';
   const answerText = card.answer || '';
   const hintText = card.hint || '';
@@ -1359,7 +1565,7 @@ export function lintCard(
   // 1. Measure question, answer & comment lengths
   const questionWordCount = countWords(questionText);
   const visibleAnswer = stripHtml(answerText);
-  const answerWordCount = card.type === 'basic' ? countWords(answerText) : 0;
+  const answerWordCount = cardType === 'basic' ? countWords(answerText) : 0;
   const answerCharCount = visibleAnswer.length;
   const commentVisibleCharCount = extractCommentVisibleText(hintText).length;
 
@@ -1484,7 +1690,7 @@ export function lintCard(
   }
 
   // 6. Basic vs Cloze specific rules
-  if (card.type === 'basic') {
+  if (cardType === 'basic') {
     if (answerWordCount === 0) {
       warnings.push({
         code: 'ANSWER_TOO_LONG',
@@ -1542,7 +1748,7 @@ export function lintCard(
           'Especifique a janela temporal na pergunta ("Qual é a conduta imediata de minuto zero?" ou "Qual o tratamento definitivo?").',
       });
     }
-  } else if (card.type === 'cloze') {
+  } else if (cardType === 'cloze') {
     if (clozeCount !== 1) {
       warnings.push({
         code: 'CLOZE_COUNT_INVALID',
@@ -1593,11 +1799,11 @@ export function lintCard(
 
   // 7B. Matuschak Focused & Tractable: Prohibit unfocused plural list/set enumerations ("Quais são as causas/critérios...?", "Cite...", or numbered lists)
   const unfocusedSetRegex =
-    /\b(?:quais\s+(?:s[aã]o\s+)?(?:os|as)\s+(?:principais\s+)?(?:causas|crit[eé]rios|sintomas|sinais|fatores|manifesta[cç][oõ]es|complica[cç][oõ]es|indica[cç][oõ]es|etapas|tipos)|cite\s+(?:os|as|\d+)|liste\s+(?:os|as))\b/i;
+    /\b(?:quais\s+(?:s[aã]o\s+)?(?:os|as)\s+(?:\d+\s+)?(?:principais\s+)?(?:causas|crit[eé]rios|sintomas|sinais|fatores|manifesta[cç][oõ]es|complica[cç][oõ]es|indica[cç][oõ]es|contraindica[cç][oõ]es|agentes|etapas|tipos)|cite\s+(?:os|as|\d+)|liste\s+(?:os|as))\b/i;
   const answerNumberedListRegex = /(?:^|\s)(?:1[.)]\s+.+2[.)]\s+|[-•]\s+.+[-•]\s+)/;
   if (
     unfocusedSetRegex.test(visibleQuestion) ||
-    (card.type === 'basic' && answerNumberedListRegex.test(visibleAnswer))
+    (cardType === 'basic' && answerNumberedListRegex.test(visibleAnswer))
   ) {
     warnings.push({
       code: 'MATUSCHAK_UNFOCUSED_SET',
@@ -1614,11 +1820,11 @@ export function lintCard(
   const binaryAnswerRegex = /^(?:sim|n[aã]o|verdadeiro|falso)(?:[.,!]|$)/i;
   if (
     passiveDefinitionRegex.test(visibleQuestion.trim()) ||
-    (card.type === 'basic' && binaryAnswerRegex.test(visibleAnswer.trim()))
+    (cardType === 'basic' && binaryAnswerRegex.test(visibleAnswer.trim()))
   ) {
     warnings.push({
       code: 'NIELSEN_PASSIVE_OR_BINARY',
-      field: card.type === 'basic' && binaryAnswerRegex.test(visibleAnswer.trim()) ? 'answer' : 'question',
+      field: cardType === 'basic' && binaryAnswerRegex.test(visibleAnswer.trim()) ? 'answer' : 'question',
       severity: 'error',
       message:
         'Prompt passivo/binário (viola Salience de Matuschak & LTM de Nielsen): evite definições de dicionário ("O que é...?") ou respostas Sim/Não; ancore em decisão clínica ou mecanismo causal.',
@@ -1641,6 +1847,7 @@ export function lintCard(
     const st = stemPortugueseWord(tw);
     if (st.length >= 4) topicStems.add(st);
   }
+  const topicAcronyms = new Set(extractAcronymTokens(topicText));
 
   const subtopicPart = topicText.includes(' - ')
     ? topicText.split(' - ').slice(1).join(' - ')
@@ -1652,20 +1859,19 @@ export function lintCard(
     if (st.length >= 4) subtopicStems.add(st);
   }
 
-  const targetAnswerString = card.type === 'basic' ? visibleAnswer : clozeTargets.join(' ');
+  const targetAnswerString = cardType === 'basic' ? visibleAnswer : clozeTargets.join(' ');
   const targetKeywords = extractCoreKeywords(targetAnswerString);
+  const targetAcronyms = extractAcronymTokens(targetAnswerString);
 
   let hasTopicSpoiler = false;
-  if (targetKeywords.length > 0 && topicWords.size > 0) {
+  const matchedAcronymInTopic = targetAcronyms.find((acr) => topicAcronyms.has(acr));
+  if ((targetKeywords.length > 0 && topicWords.size > 0) || matchedAcronymInTopic) {
     const matchedKws = targetKeywords.filter((kw) => {
       if (topicWords.has(kw)) return true;
       const kwStem = stemPortugueseWord(kw);
       if (kwStem.length >= 4 && topicStems.has(kwStem)) return true;
-      if (kwStem.length >= 5) {
-        const prefix5 = kwStem.slice(0, 5);
-        for (const ts of topicStems) {
-          if (ts.length >= 5 && ts.slice(0, 5) === prefix5) return true;
-        }
+      for (const ts of topicStems) {
+        if (stemsCollideForSpoiler(kwStem, ts)) return true;
       }
       return false;
     });
@@ -1677,7 +1883,8 @@ export function lintCard(
       (subtopicStems.has(firstTargetStem) || topicStems.has(firstTargetStem));
 
     if (
-      matchedKws.length === targetKeywords.length ||
+      Boolean(matchedAcronymInTopic) ||
+      (targetKeywords.length > 0 && matchedKws.length === targetKeywords.length) ||
       (targetKeywords.length >= 2 && matchedKws.length / targetKeywords.length >= 0.5) ||
       firstWordStemMatchesTopic ||
       matchedKws.some((kw) => kw.length >= 5)
@@ -1687,7 +1894,7 @@ export function lintCard(
         code: 'TOPIC_SPOILER',
         field: 'topic',
         severity: 'error',
-        message: `Spoiler no topic (radical/termo): entrega "${matchedKws[0] || firstTargetKw}" da resposta.`,
+        message: `Spoiler no topic (radical/termo): entrega "${matchedAcronymInTopic || matchedKws[0] || firstTargetKw}" da resposta.`,
       });
     }
   }
@@ -1702,14 +1909,16 @@ export function lintCard(
     const pNorm = normalizeForSpoiler(pText);
     if (!pNorm) continue;
     const pWords = expandWithSynonyms(pNorm.split(/\s+/));
+    const pAcronyms = new Set(extractAcronymTokens(pText));
     const exactLeak =
       targetNorm.length > 0 &&
       (targetNorm === pNorm || (targetNorm.length > 4 && pNorm.includes(targetNorm)));
+    const acronymLeak = targetAcronyms.some((acr) => pAcronyms.has(acr));
     const keywordLeak =
       targetKeywords.length >= 1 &&
       (targetKeywords.every((kw) => pWords.has(kw)) ||
         targetKeywords.some((kw) => kw.length >= 5 && pWords.has(kw)));
-    if (exactLeak || keywordLeak) {
+    if (exactLeak || acronymLeak || keywordLeak) {
       warnings.push({
         code: 'QUESTION_PAREN_SPOILER',
         field: 'question',
@@ -1726,7 +1935,7 @@ export function lintCard(
   const hasAnyImg = hasQuestionImg || hasHintImg;
 
   if (card.image_mode === 'recognition') {
-    if (card.type !== 'basic' || !hasQuestionImg) {
+    if (cardType !== 'basic' || !hasQuestionImg) {
       warnings.push({
         code: 'RECOGNITION_MISMATCH',
         field: 'question',
@@ -2153,9 +2362,16 @@ function splitLeadingMediaAndLegend(
   return { legendPrefix, bodyHint: working };
 }
 
+const COMMENT_BOLD_SKIP_WORDS = new Set([
+  'apenas', 'estudo', 'sempre', 'nunca', 'entre', 'sobre', 'antes', 'depois',
+  'quando', 'porque', 'mesmo', 'ainda', 'muito', 'pouco', 'forma', 'casos',
+  'passo', 'todas', 'todos', 'assim', 'entao', 'pode', 'podem', 'deve',
+  'devem', 'sendo', 'estar', 'diante', 'quadro', 'paciente', 'conduta', 'medida',
+]);
+
 /**
  * Highlights the first significant medical token in bold if the comment lacks inline <b> emphasis,
- * avoiding synthetic boilerplate text injection.
+ * skipping common adverbs/connectors and avoiding synthetic boilerplate text injection.
  */
 function ensureBoldEmphasisInComment(textHint: string): string {
   const afterPrefix = textHint.replace(/^<b>\s*Coment[áa]rio:\s*<\/b>\s*/i, '');
@@ -2165,16 +2381,29 @@ function ensureBoldEmphasisInComment(textHint: string): string {
   const prefix = prefixMatch ? prefixMatch[0] : '<b>Comentário:</b> ';
   const body = prefixMatch ? textHint.slice(prefix.length) : textHint;
 
-  // Bold the first standalone 5+ letter token outside HTML tags
+  // Bold the first meaningful standalone 5+ letter token outside HTML tags
   const parts = body.split(/(<\/?[a-zA-Z!][^>]*>)/g);
   let bolded = false;
   const updated = parts
     .map((part) => {
       if (bolded || /^<\/?[a-zA-Z!]/.test(part)) return part;
-      const m = part.match(/\b([A-Za-zÀ-ú]{5,}(?:-[A-Za-zÀ-ú0-9]+)?)\b/);
-      if (!m || m.index === undefined) return part;
-      bolded = true;
-      return `${part.slice(0, m.index)}<b>${m[1]}</b>${part.slice(m.index + m[1].length)}`;
+      const matches = Array.from(part.matchAll(/\b([A-Za-zÀ-ú]{5,}(?:-[A-Za-zÀ-ú0-9]+)?)\b/g));
+      for (const m of matches) {
+        if (m.index === undefined) continue;
+        const normalizedTok = m[1]
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        if (COMMENT_BOLD_SKIP_WORDS.has(normalizedTok)) continue;
+        bolded = true;
+        return `${part.slice(0, m.index)}<b>${m[1]}</b>${part.slice(m.index + m[1].length)}`;
+      }
+      if (matches.length > 0 && matches[0].index !== undefined) {
+        const m = matches[0];
+        bolded = true;
+        return `${part.slice(0, m.index)}<b>${m[1]}</b>${part.slice(m.index + m[1].length)}`;
+      }
+      return part;
     })
     .join('');
 
@@ -2267,27 +2496,30 @@ function sanitizeTopicAgainstSpoiler(
   answer: string,
   hint: string
 ): string {
+  const cardType: 'basic' | 'cloze' =
+    String(card.type || 'basic').toLowerCase() === 'cloze' ? 'cloze' : 'basic';
   const prefix = (topic.split(' - ')[0] || 'Tema Clínico').trim();
   const candidateWithNeutralSub = `${prefix} - Tomada de Decisão e Conduta`;
-  if (!lintCard({ ...card, topic: candidateWithNeutralSub, question, answer, hint }).metrics.hasTopicSpoiler) {
+  if (!lintCard({ ...card, type: cardType, topic: candidateWithNeutralSub, question, answer, hint }).metrics.hasTopicSpoiler) {
     return candidateWithNeutralSub;
   }
 
-  // Filter out prefix words whose stem/prefix collides with target answer stems
-  const targetStr = card.type === 'basic' ? answer : question;
+  // Filter out prefix words whose stem/acronym collides with target answer stems/acronyms
+  const targetStr = cardType === 'basic' ? answer : question;
   const targetKws = extractCoreKeywords(targetStr);
   const targetStems = new Set(targetKws.map((k) => stemPortugueseWord(k)).filter((s) => s.length >= 4));
+  const targetAcronyms = new Set(extractAcronymTokens(targetStr));
   const prefixTokens = prefix.split(/\s+/).filter(Boolean);
   const safeTokens = prefixTokens.filter((tok) => {
+    const tokAcronyms = extractAcronymTokens(tok);
+    if (tokAcronyms.some((acr) => targetAcronyms.has(acr))) return false;
     const kws = extractCoreKeywords(tok);
     if (kws.length === 0) return true;
     return !kws.some((kw) => {
       const st = stemPortugueseWord(kw);
       if (st.length >= 4 && targetStems.has(st)) return true;
-      if (st.length >= 5) {
-        for (const ts of targetStems) {
-          if (ts.length >= 5 && ts.slice(0, 5) === st.slice(0, 5)) return true;
-        }
+      for (const ts of targetStems) {
+        if (stemsCollideForSpoiler(st, ts)) return true;
       }
       return false;
     });
@@ -2298,7 +2530,7 @@ function sanitizeTopicAgainstSpoiler(
     const cleanedPrefix = safeTokens.join(' ').replace(/^(?:de|da|do|das|dos|em|na|no)\s+/i, '').trim();
     if (cleanedPrefix) {
       const candidate = `${cleanedPrefix} - Tomada de Decisão e Conduta`;
-      if (!lintCard({ ...card, topic: candidate, question, answer, hint }).metrics.hasTopicSpoiler) {
+      if (!lintCard({ ...card, type: cardType, topic: candidate, question, answer, hint }).metrics.hasTopicSpoiler) {
         return candidate;
       }
     }
@@ -2306,7 +2538,7 @@ function sanitizeTopicAgainstSpoiler(
 
   for (const fallbackPrefix of ['Manejo Clínico', 'Conduta Médica', 'Avaliação Diagnóstica', 'Tema Clínico']) {
     const candidate = `${fallbackPrefix} - Tomada de Decisão e Conduta`;
-    if (!lintCard({ ...card, topic: candidate, question, answer, hint }).metrics.hasTopicSpoiler) {
+    if (!lintCard({ ...card, type: cardType, topic: candidate, question, answer, hint }).metrics.hasTopicSpoiler) {
       return candidate;
     }
   }
@@ -2314,10 +2546,12 @@ function sanitizeTopicAgainstSpoiler(
 }
 
 /**
- * Deterministically repairs a card that violates Wozniak/Matuschak or desktop lint.py rules,
- * incorporating auto_heal_note from generator.py and _enforce_card_invariants from refiner.py.
+ * Deterministically repairs formatting, spoiler, and structural hygiene issues without truncating
+ * or mutating semantic Matuschak/Nielsen violations (which are preserved for AI repair).
  */
 export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
+  const cardType: 'basic' | 'cloze' =
+    String(card.type || 'basic').toLowerCase() === 'cloze' ? 'cloze' : 'basic';
   const mediaInQuestion = extractMediaFromString(card.question || '');
   let question = replaceLatexWithUnicode((card.question || '').trim());
   let answer = replaceLatexWithUnicode((card.answer || '').trim());
@@ -2355,35 +2589,19 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     'Qual a $1 imediata de primeira escolha'
   );
 
-  // 3B. Fix Matuschak unfocused set prompts ("Quais são as causas/critérios...?", "Cite...") -> focused single-attribute prompt
-  question = question.replace(
-    /\b(?:quais\s+(?:s[aã]o\s+)?(?:os|as)\s+(?:principais\s+)?(causas|crit[eé]rios|sintomas|sinais|fatores|manifesta[cç][oõ]es|complica[cç][oõ]es|indica[cç][oõ]es|etapas|tipos)|cite\s+(?:os|as|\d+)\s+([a-zà-ú]+)|liste\s+(?:os|as)\s+([a-zà-ú]+))/gi,
-    'Qual o achado ou parâmetro determinante de primeira linha'
-  );
-
-  // 3C. Fix Nielsen passive definition prompt ("O que é X?", "Defina X") -> salience clinical prompt
-  if (
-    /^\s*(?:o\s+que\s+[eé]\s+(?:o|a|um|uma)?\s*([a-zà-ú0-9\s-]{2,40})\??|defina\s+([a-zà-ú0-9\s-]{2,40})\.?|fale\s+sobre\s+(.+))$/i.test(
-      stripHtml(question).trim()
-    )
-  ) {
-    const cleanSub = stripHtml(topic.split(' - ').pop() || topic);
-    question = `Diante de suspeita clínica de ${cleanSub}, qual o achado determinante ou conduta imediata de primeira escolha?`;
-  }
-
   // 4. Fix vague temporal window ("Qual a conduta?") even if followed by media tags
   question = question.replace(
     /\bqual\s+(?:é\s+)?a\s+conduta\s*\?(?=\s*(?:<[^>]+>\s*)*$)/i,
     'Qual é a conduta imediata de primeira escolha?'
   );
 
-  // 5. Remove parenthetical spoilers in question
+  // 5. Remove explicit parenthetical spoilers in question
   question = question.replace(
     /\s*\((?:tratar com|usar|iniciar|diagn[oó]stico:?|conduta:?|hinchey\s+[i1v]+)[^)]*\)/gi,
     ''
   );
 
-  if (card.type === 'cloze') {
+  if (cardType === 'cloze') {
     answer = '';
     let seenFirstCloze = false;
     question = question.replace(/\{\{c\d+::([\s\S]*?)\}\}/g, (_match, inner: string) => {
@@ -2417,41 +2635,16 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
       return `<b>${cleanTarget}</b>`;
     });
 
-    if (!seenFirstCloze) {
-      question = `${question.replace(/\.$/, '')}: {{c1::conduta imediata de 1ª linha}}.`;
-    }
-
     // Remove post-cloze parenthetical crutches e.g. {{c1::...}} (critérios)
     question = question.replace(
       /(\{\{c1::[\s\S]*?\}\})\s*\((?:crit[eé]rios?|pontos?|dias?|anos?|itens?|sinais?)\)/gi,
       '$1'
     );
   } else {
-    // Basic card repair
+    // Basic card formatting hygiene (preserve semantic violations intact for Gemini repair)
     answer = answer.replace(/^(?:Resposta|R):\s*/i, '').trim();
     answer = answer.replace(/^<(b|strong)\b[^>]*>([\s\S]*?)<\/\1>\.?$/i, '$2').trim();
     answer = answer.replace(/^<\/?(?:b|strong)>\s*|\s*<\/?(?:b|strong)>$/gi, '').trim();
-
-    if (answer.includes(';')) {
-      const clauses = answer.split(';').map((c) => c.trim()).filter(Boolean);
-      answer = clauses.length > 1 ? clauses[1] : clauses[0];
-    }
-
-    // Strip numbered/bulleted multi-item lists in basic answers (Matuschak Focused)
-    if (/(?:^|\s)(?:1[.)]\s+.+2[.)]\s+|[-•]\s+.+[-•]\s+)/.test(answer)) {
-      answer = answer
-        .replace(/^\s*(?:1[.)]|[-•])\s*/, '')
-        .split(/\s+(?:2[.)]|[-•])\s+/)[0]
-        .trim();
-    }
-
-    // Replace binary Yes/No answers with atomic clinical conduct (Nielsen & Matuschak)
-    if (/^(?:sim|n[aã]o|verdadeiro|falso)(?:[.,!]\s*|$)/i.test(stripHtml(answer).trim())) {
-      const afterBinary = stripHtml(answer)
-        .replace(/^(?:sim|n[aã]o|verdadeiro|falso)[.,!:\s-]*/i, '')
-        .trim();
-      answer = afterBinary || `Conduta imediata guiada por ${stripHtml(topic.split(' - ').pop() || topic)}`;
-    }
 
     let plainWords = stripHtml(answer).replace(/\.$/, '').split(/\s+/).filter(Boolean);
     if (plainWords.length > MAX_BASIC_ANSWER_WORDS || stripHtml(answer).length > MAX_BASIC_ANSWER_CHARS) {
@@ -2460,33 +2653,17 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
         .replace(/\bvia\s+intravenosa\b/gi, 'IV')
         .replace(/\bpor\s+via\s+oral\b/gi, 'VO')
         .replace(/\bvia\s+oral\b/gi, 'VO')
+        .replace(/\bpor\s+via\s+intramuscular\b/gi, 'IM')
+        .replace(/\bvia\s+intramuscular\b/gi, 'IM')
         .replace(/\bdose\s+[úu]nica\b/gi, 'DU')
         .replace(/\bassociad[ao]s?\s+[àa]o?\b/gi, '+');
-      plainWords = stripHtml(answer).replace(/\.$/, '').split(/\s+/).filter(Boolean);
+      for (const [pattern, repl] of MEDICAL_ABBREVIATIONS) {
+        answer = answer.replace(pattern, repl);
+      }
+      answer = answer.replace(/\s+/g, ' ').trim();
     }
-    if (plainWords.length > MAX_BASIC_ANSWER_WORDS || stripHtml(answer).length > MAX_BASIC_ANSWER_CHARS) {
-      let cut = Math.min(plainWords.length, MAX_BASIC_ANSWER_WORDS);
-      while (cut > 1 && plainWords.slice(0, cut).join(' ').length > MAX_BASIC_ANSWER_CHARS - 1) {
-        cut--;
-      }
-      // Never slice right between a number and its measurement unit, nor end on a dangling stopword
-      while (
-        cut > 1 &&
-        (DANGLING_STOPWORDS.has(plainWords[cut - 1].toLowerCase().replace(/[,;:.]/g, '')) ||
-          /^\d+(?:[.,]\d+)?$/.test(plainWords[cut - 1]))
-      ) {
-        cut--;
-      }
-      // Also avoid leaving an orphan drug/noun before a removed bare number if the slice ended at a preposition
-      while (
-        cut > 1 &&
-        DANGLING_STOPWORDS.has(plainWords[cut - 1].toLowerCase().replace(/[,;:.]/g, ''))
-      ) {
-        cut--;
-      }
-      answer = plainWords.slice(0, cut).join(' ').replace(/[,;:+]+$/, '').trim();
-    }
-    if (!answer.endsWith('.')) {
+
+    if (answer && !answer.endsWith('.')) {
       answer = `${answer.replace(/[;:,?!]+$/, '')}.`;
     }
     if (answer.length > 1) {
@@ -2495,12 +2672,12 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
   }
 
   // 6. Clean remaining parenthetical spoilers that match answer or cloze keywords
-  const checkAfterAnswer = lintCard({ ...card, topic, question, answer, hint });
+  const checkAfterAnswer = lintCard({ ...card, type: cardType, topic, question, answer, hint });
   if (checkAfterAnswer.warnings.some((w) => w.code === 'QUESTION_PAREN_SPOILER')) {
     question = question.replace(/\s*\([^)]+\)/g, '');
   }
   if (checkAfterAnswer.metrics.hasTopicSpoiler) {
-    topic = sanitizeTopicAgainstSpoiler(card, topic, question, answer, hint);
+    topic = sanitizeTopicAgainstSpoiler({ ...card, type: cardType }, topic, question, answer, hint);
   }
 
   // Restore media in question if needed
@@ -2555,6 +2732,7 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
 
   return {
     ...card,
+    type: cardType,
     topic,
     question,
     answer,
@@ -2633,8 +2811,16 @@ export function convertClozeToBasic(card: CanonicalCard): CanonicalCard {
 
   // Remove the clause or phrase immediately revealing ___TARGET___ and turn into a direct question
   let questionBody = stem
-    .replace(/\s*(?::|é|são|consiste em|caracteriza-se por|define-se como|corresponde a)\s*___TARGET___[^.?!]*[.?!]?/i, '')
+    .replace(
+      /\s*(?::|é|são|consiste em|caracteriza-se por|define-se como|corresponde a)\s*___TARGET___[^.?!]*[.?!]?/i,
+      ''
+    )
+    .replace(
+      /\s+(?:feit[ao]\s+com|realizad[ao]\s+(?:por|com)|por\s+meio\s+de|atrav[eé]s\s+de|com|por|de|em|para|ao|à|no|na)\s+___TARGET___[^.?!]*[.?!]?/i,
+      ''
+    )
     .replace(/___TARGET___/g, 'qual parâmetro ou conduta específica')
+    .replace(/\s+(?:com|por|de|em|para|ao|à)\s*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -2823,7 +3009,7 @@ export function curateAndRebalanceDeck(
     for (const prev of survivingTokenSets) {
       const dice = computeDiceSimilarity(tokens, prev.tokens);
       const sameTarget = targetKey.length >= 2 && targetKey === prev.targetKey;
-      if (dice >= 0.96 || (sameTarget && dice >= 0.62)) {
+      if (dice >= 0.96 || (sameTarget && dice >= 0.82)) {
         isDuplicate = true;
         break;
       }
@@ -2838,7 +3024,7 @@ export function curateAndRebalanceDeck(
     survivingTokenSets.push({ tokens, targetKey });
   }
 
-  // Step 3: Add missing high-yield P1-P4 concepts from Clinical Map (if provided) with new IDs
+  // Step 3: Add missing high-yield P1-P4 concepts from Clinical Map (if provided and not skipped) with new IDs
   const cleanDeckKey = (deckKey || metadata.detectedDeckKey || 'internato_deck')
     .trim()
     .toLowerCase()
@@ -2867,48 +3053,65 @@ export function curateAndRebalanceDeck(
           .trim();
         const topic = `${topicPrefix} - ${item.subtopic}`;
 
-        const conceptWords = stripHtml(cleanConcept).split(/\s+/).filter(Boolean);
-        const shortTargetWords = conceptWords.slice(0, Math.min(conceptWords.length, 4));
-        while (
-          shortTargetWords.length > 1 &&
-          DANGLING_STOPWORDS.has(
-            shortTargetWords[shortTargetWords.length - 1].toLowerCase().replace(/[,;:.]/g, '')
-          )
-        ) {
-          shortTargetWords.pop();
+        let conciseConcept = stripHtml(cleanConcept).replace(/\s+/g, ' ').trim();
+        for (const [pattern, repl] of MEDICAL_ABBREVIATIONS) {
+          conciseConcept = conciseConcept.replace(pattern, repl);
         }
-        const shortTarget = shortTargetWords.join(' ') || 'Conduta prioritária';
+        conciseConcept = conciseConcept.replace(/\s+/g, ' ').trim();
+        const conceptWords = conciseConcept.split(/\s+/).filter(Boolean);
 
-        const rawNewCard: CanonicalCard =
-          item.targetCardType === 'cloze'
-            ? {
-                id: newId,
-                type: 'cloze',
-                priority: item.priority,
-                deck_key: cleanDeckKey,
-                topic,
-                question: `Na avaliação de <b>${item.subtopic}</b> no contexto de ${topicPrefix}, a conduta ou parâmetro prioritário fundamenta-se em {{c1::${shortTarget}}}.`,
-                answer: '',
-                hint: `<b>Comentário:</b> Em <b>${item.subtopic}</b>, aplica-se <b>${cleanConcept}</b> (${item.guidelineNote}), diferenciando-se das <b>condutas de 2ª linha</b> reservadas aos casos refratários.`,
-                tags: [cleanDeckKey, item.priority.toLowerCase()],
-              }
-            : {
-                id: newId,
-                type: 'basic',
-                priority: item.priority,
-                deck_key: cleanDeckKey,
-                topic,
-                question: `Diante de quadro compatível com <b>${item.subtopic}</b> (${topicPrefix}), qual a conduta ou definição imediata de primeira escolha?`,
-                answer: `${conceptWords.slice(0, 10).join(' ').replace(/[.;:,]+$/, '')}.`,
-                hint: `<b>Comentário:</b> A diretriz preconiza <b>${cleanConcept}</b> (${item.guidelineNote}), evitando atraso diagnóstico frente aos <b>diferenciais de menor gravidade</b>.`,
-                tags: [cleanDeckKey, item.priority.toLowerCase()],
-              };
+        // Never truncate long concepts into arbitrary 4-word cloze fragments; only use cloze if naturally concise (<= 5 words)
+        const canFitNaturalCloze =
+          item.targetCardType === 'cloze' && conceptWords.length > 0 && conceptWords.length <= MAX_CLOZE_WORDS;
+
+        const firstClause = conciseConcept.split(/[.;]/)[0]?.trim() || conciseConcept;
+        const clauseWords = firstClause.split(/\s+/).filter(Boolean);
+        let basicAnswerText =
+          clauseWords.length <= MAX_BASIC_ANSWER_WORDS && firstClause.length <= MAX_BASIC_ANSWER_CHARS
+            ? firstClause
+            : conciseConcept;
+        if (basicAnswerText.split(/\s+/).length > MAX_BASIC_ANSWER_WORDS || basicAnswerText.length > MAX_BASIC_ANSWER_CHARS) {
+          const safeWords = clauseWords.slice(0, MAX_BASIC_ANSWER_WORDS);
+          while (
+            safeWords.length > 1 &&
+            (safeWords.join(' ').length > MAX_BASIC_ANSWER_CHARS - 1 ||
+              DANGLING_STOPWORDS.has(safeWords[safeWords.length - 1].toLowerCase().replace(/[,;:.]/g, '')))
+          ) {
+            safeWords.pop();
+          }
+          basicAnswerText = safeWords.join(' ');
+        }
+        basicAnswerText = basicAnswerText.replace(/[.;:,?!]+$/, '').trim() || 'Conduta prioritária';
+
+        const rawNewCard: CanonicalCard = canFitNaturalCloze
+          ? {
+              id: newId,
+              type: 'cloze',
+              priority: item.priority,
+              deck_key: cleanDeckKey,
+              topic,
+              question: `Na avaliação de <b>${item.subtopic}</b> no contexto de ${topicPrefix}, a conduta ou parâmetro prioritário fundamenta-se em {{c1::${conciseConcept}}}.`,
+              answer: '',
+              hint: `<b>Comentário:</b> Em <b>${item.subtopic}</b>, aplica-se <b>${cleanConcept}</b> (${item.guidelineNote}), diferenciando-se das <b>condutas de 2ª linha</b> reservadas aos casos refratários.`,
+              tags: [cleanDeckKey, item.priority.toLowerCase()],
+            }
+          : {
+              id: newId,
+              type: 'basic',
+              priority: item.priority,
+              deck_key: cleanDeckKey,
+              topic,
+              question: `Diante de quadro compatível com <b>${item.subtopic}</b> (${topicPrefix}), qual a conduta ou parâmetro imediato de primeira escolha?`,
+              answer: `${basicAnswerText}.`,
+              hint: `<b>Comentário:</b> A diretriz preconiza <b>${cleanConcept}</b> (${item.guidelineNote}), evitando atraso diagnóstico frente aos <b>diferenciais de menor gravidade</b>.`,
+              tags: [cleanDeckKey, item.priority.toLowerCase()],
+            };
 
         const repairedNew = surgicalRepairCardLocal(rawNewCard);
         survivingCards.push(repairedNew);
         survivingTokenSets.push({
           tokens: itemTokens,
-          targetKey: shortTarget.toLowerCase(),
+          targetKey: (canFitNaturalCloze ? conciseConcept : basicAnswerText).toLowerCase(),
         });
         addedCount++;
       }

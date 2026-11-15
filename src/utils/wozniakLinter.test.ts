@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   applyResolvedWebImageToCard,
   computeDeterministicDeckId,
+  convertClozeToBasic,
   curateAndRebalanceDeck,
   extractDeckMediaManifest,
   extractDeckMetadata,
@@ -946,3 +947,187 @@ test('surgicalRepairCardLocal abbreviates long clozes in-place without leaking o
   assert.equal(repaired.question.includes('}} magnésio'), false);
   assert.equal(repaired.question.includes('{{c1::internação hospitalar e sulfato de magnésio IV}}'), true);
 });
+
+test('stemsCollideForSpoiler eliminates Greek-prefix false positives (hiper/hipot/pneum/cole) while catching medical acronym spoilers', () => {
+  const greekPairs: Array<[string, string]> = [
+    ['Tireoide - Hipertireoidismo', 'Hiperplasia nodular benigna.'],
+    ['Endocrinologia - Hipotireoidismo', 'Hipotermia severa.'],
+    ['Pneumologia - Pneumonia Adquirida', 'Pneumotórax hipertensivo.'],
+    ['Metabolismo - Hiperglicemia', 'Hipercalemia grave.'],
+  ];
+
+  for (const [topic, answer] of greekPairs) {
+    const card: CanonicalCard = {
+      id: 171000701,
+      type: 'basic',
+      topic,
+      question:
+        'Na Sala de Emergência, paciente adulto apresenta quadro agudo característico após avaliação inicial. Qual o diagnóstico prioritário?',
+      answer,
+      hint: '<b>Comentário:</b> O <b>achado clínico imediato</b> exige reconhecimento ágil no pronto-atendimento, diferenciando-se das <b>condições crônicas indolentes</b>.',
+    };
+    const result = lintCard(card);
+    assert.equal(
+      result.warnings.some((w) => w.code === 'TOPIC_SPOILER'),
+      false,
+      `Unexpected TOPIC_SPOILER for topic="${topic}" vs answer="${answer}"`
+    );
+  }
+
+  // Short medical acronyms (HNF, DIU, USG) MUST still trigger spoilers when matching topic or parenthetical
+  const hnfTopicSpoiler: CanonicalCard = {
+    id: 171000702,
+    type: 'basic',
+    topic: 'Anticoagulação - Uso de HNF',
+    question: 'Em paciente com ClCr < 15 mL/min e TVP aguda, qual anticoagulante parenteral escolher?',
+    answer: 'HNF em bomba de infusão.',
+    hint: '<b>Comentário:</b> A <b>HNF não depende de depuração renal</b>, diferente da <b>enoxaparina</b> que acumula na disfunção renal grave.',
+  };
+  assert.equal(
+    lintCard(hnfTopicSpoiler).warnings.some((w) => w.code === 'TOPIC_SPOILER'),
+    true
+  );
+
+  const diuParenSpoiler: CanonicalCard = {
+    id: 171000703,
+    type: 'basic',
+    topic: 'Ginecologia - Contracepção de Emergência',
+    question: 'Mulher atendida até 5 dias após coito desprotegido (opção: DIU) busca método mais eficaz. Qual escolher?',
+    answer: 'DIU de cobre.',
+    hint: '<b>Comentário:</b> O <b>DIU de cobre</b> apresenta taxa de falha < 0,1%, superando o <b>levonorgestrel oral</b> em eficácia.',
+  };
+  assert.equal(
+    lintCard(diuParenSpoiler).warnings.some((w) => w.code === 'QUESTION_PAREN_SPOILER'),
+    true
+  );
+
+  // 'DIPA - USG' should NOT flag TOPIC_SPOILER when answer is the ultrasound finding ('Sinal da roda dentada.')
+  const dipaUsgClean: CanonicalCard = {
+    id: 171000704,
+    type: 'basic',
+    topic: 'DIPA - USG',
+    question: 'Na propedêutica pélvica de mulher com salpingite aguda, qual achado confirma o diagnóstico à ultrassonografia?',
+    answer: 'Sinal da roda dentada.',
+    hint: '<b>Comentário:</b> O <b>sinal da roda dentada</b> traduz pregas tubárias espessadas na fase aguda, diferente das <b>contas de rosário</b> na fase crônica.',
+  };
+  assert.equal(
+    lintCard(dipaUsgClean).warnings.some((w) => w.code === 'TOPIC_SPOILER'),
+    false
+  );
+});
+
+test('surgicalRepairCardLocal preserves semantic Matuschak/Nielsen violations for /repair-cards instead of silently truncating them', () => {
+  const unfocusedCard: CanonicalCard = {
+    id: 171000801,
+    type: 'basic',
+    topic: 'Infectologia - Meningite',
+    question: 'Quais são os 5 principais agentes etiológicos da meningite bacteriana em adultos e idosos?',
+    answer: 'Pneumococo, meningococo, Haemophilus, Listeria e bacilos Gram-negativos.',
+    hint: '<b>Comentário:</b> A cobertura empírica com <b>ceftriaxona associada à ampicilina</b> abrange idosos e gestantes sob risco de <b>Listeria monocytogenes</b>.',
+  };
+  const repairedUnfocused = surgicalRepairCardLocal(unfocusedCard);
+  assert.equal(
+    lintCard(repairedUnfocused).warnings.some((w) => w.code === 'MATUSCHAK_UNFOCUSED_SET'),
+    true
+  );
+
+  const binaryCard: CanonicalCard = {
+    id: 171000802,
+    type: 'basic',
+    topic: 'Cardiologia - Endocardite',
+    question: 'É verdadeiro ou falso que a profilaxia de endocardite é indicada antes de toda endoscopia digestiva?',
+    answer: 'Falso.',
+    hint: '<b>Comentário:</b> A <b>profilaxia antibiótica</b> restringe-se a procedimentos odontológicos invasivos em cardiopatias de alto risco, não em <b>endoscopias de rotina</b>.',
+  };
+  const repairedBinary = surgicalRepairCardLocal(binaryCard);
+  assert.equal(
+    lintCard(repairedBinary).warnings.some((w) => w.code === 'NIELSEN_PASSIVE_OR_BINARY'),
+    true
+  );
+
+  const semicolonAndLongCard: CanonicalCard = {
+    id: 171000803,
+    type: 'basic',
+    topic: 'Obstetrícia - Hemorragia Pós-Parto',
+    question: 'Qual a sequência imediata completa de manejo da atonia uterina refratária à ocitocina?',
+    answer:
+      'Iniciar ácido tranexâmico precoce e realizar massagem bimanual; associar metilergometrina caso não haja hipertensão arterial sistêmica e preparar balão de tamponamento intrauterino.',
+    hint: '<b>Comentário:</b> A <b>hora de ouro na HPP</b> exige escalonamento ágil de uterotônicos e ácido tranexâmico, diferenciando-se da <b>laceração de trajeto</b> avaliada por revisão.',
+  };
+  const repairedSemilong = surgicalRepairCardLocal(semicolonAndLongCard);
+  const codes = lintCard(repairedSemilong).warnings.map((w) => w.code);
+  assert.equal(codes.includes('ANSWER_HAS_SEMICOLON'), true);
+  assert.equal(codes.includes('ANSWER_TOO_LONG'), true);
+});
+
+test('curateAndRebalanceDeck keeps distinct clinical scenarios sharing a short answer and avoids truncated Step 3 gap clozes', () => {
+  const distinctScenarioCards: CanonicalCard[] = [
+    {
+      id: 171000901,
+      type: 'basic',
+      topic: 'Obstetrícia - Iminência de Eclâmpsia',
+      question:
+        'Gestante de 34 semanas com PA 166x110 mmHg, cefaleia occipital intensa e escotomas cintilantes. Qual a droga de escolha para neuroproteção materna?',
+      answer: 'Sulfato de magnésio EV.',
+      hint: '<b>Comentário:</b> Na <b>iminência de eclâmpsia</b>, o sulfato de magnésio previne convulsões maternas, superando a <b>fenitoína</b>.',
+    },
+    {
+      id: 171000902,
+      type: 'basic',
+      topic: 'Obstetrícia - Neuroproteção Fetal',
+      question:
+        'Gestante em trabalho de parto prematuro inevitável com idade gestacional de 29 semanas. Qual fármaco reduz risco de paralisia cerebral fetal?',
+      answer: 'Sulfato de magnésio EV.',
+      hint: '<b>Comentário:</b> Antes de <b>32 semanas</b>, o sulfato de magnésio promove neuroproteção fetal intraparto, diferente da <b>betametasona</b> focada na maturação pulmonar.',
+    },
+  ];
+
+  const meta = extractDeckMetadata(JSON.stringify(distinctScenarioCards));
+  const customMap = buildGenericClinicalMap('obstetricia_urgencias', distinctScenarioCards);
+  customMap.items = [
+    {
+      id: 'long-gap-item',
+      priority: 'P1',
+      subtopic: 'Manejo da Hemorragia Pós-Parto Refratária',
+      concept: 'Indicação de ácido tranexâmico até três horas após o nascimento na atonia uterina grave',
+      guidelineNote: 'Diretriz OMS / FEBRASGO',
+      targetCardType: 'cloze',
+      checked: true,
+    },
+  ];
+
+  const { cards: curated, stats } = curateAndRebalanceDeck(
+    distinctScenarioCards,
+    meta,
+    'obstetricia_urgencias',
+    customMap
+  );
+
+  // Neither distinct scenario sharing "Sulfato de magnésio EV." may be pruned as duplicate
+  assert.equal(curated.some((c) => c.id === 171000901), true);
+  assert.equal(curated.some((c) => c.id === 171000902), true);
+  assert.equal(stats.prunedCount, 0);
+
+  // Step 3 fallback for a long concept must NOT create a truncated 4-word cloze chunk
+  const addedGapCard = curated.find((c) => c.id !== 171000901 && c.id !== 171000902);
+  assert.ok(addedGapCard, 'Expected a gap card to be added from customMap');
+  assert.equal(addedGapCard.type, 'basic');
+  assert.equal(addedGapCard.question.includes('{{c1::Indicação de ácido tranexâmico}}'), false);
+});
+
+test('convertClozeToBasic strips dangling prepositions before ___TARGET___ to yield natural interrogative prompts', () => {
+  const clozeWithPrep: CanonicalCard = {
+    id: 171001001,
+    type: 'cloze',
+    topic: 'Infectologia - Diagnóstico Laboratorial',
+    question: 'A confirmação sorológica inicial da sífilis primária é feita com {{c1::teste treponêmico rápido}}.',
+    answer: '',
+    hint: '<b>Comentário:</b> O <b>teste rápido treponêmico</b> inicia o fluxo diagnóstico no SUS, diferente do <b>VDRL quantitativo</b> utilizado no seguimento.',
+  };
+
+  const basic = convertClozeToBasic(clozeWithPrep);
+  assert.equal(basic.type, 'basic');
+  assert.equal(basic.answer, 'Teste treponêmico rápido.');
+  assert.equal(/\b(?:com|por|de|em|feita com)\s*\?/i.test(basic.question), false);
+});
+

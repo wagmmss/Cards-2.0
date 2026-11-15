@@ -1,4 +1,5 @@
 import { UploadedPdfFile } from '../types/deck';
+import { extractMarkdownTextImages } from './materialImageMatcher';
 
 export function inferDocRole(filename: string): UploadedPdfFile['docRole'] {
   const lower = filename.toLowerCase();
@@ -25,16 +26,21 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-async function readFileAsBase64(file: File): Promise<string> {
+async function readFileBufferAndBase64(
+  file: File
+): Promise<{ buffer: ArrayBuffer | null; base64Data: string }> {
   if (typeof file.arrayBuffer === 'function') {
     const buffer = await file.arrayBuffer();
-    return arrayBufferToBase64(buffer);
+    return { buffer, base64Data: arrayBufferToBase64(buffer) };
   }
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<{ buffer: ArrayBuffer | null; base64Data: string }>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const res = typeof reader.result === 'string' ? reader.result : '';
-      resolve(res.includes(',') ? res.split(',')[1] : res);
+      resolve({
+        buffer: null,
+        base64Data: res.includes(',') ? res.split(',')[1] : res,
+      });
     };
     reader.onerror = () => reject(reader.error || new Error(`Falha ao ler ${file.name}`));
     reader.readAsDataURL(file);
@@ -44,7 +50,7 @@ async function readFileAsBase64(file: File): Promise<string> {
 /**
  * Converte imediatamente a FileList viva do navegador para um array estático
  * antes de qualquer `await`, garantindo que `input.value = ''` nunca descarte
- * os demais arquivos selecionados em lote.
+ * os demais arquivos selecionados em lote. Extrai figuras reais de PDFs e Markdowns.
  */
 export async function readMultipleDocumentFiles(
   fileList: ArrayLike<File> | File[] | null | undefined
@@ -63,13 +69,23 @@ export async function readMultipleDocumentFiles(
         file.type === 'text/markdown';
 
       if (isPdf) {
-        const base64Data = await readFileAsBase64(file);
+        const { buffer, base64Data } = await readFileBufferAndBase64(file);
+        let extractedImages: UploadedPdfFile['extractedImages'] = [];
+        if (buffer && typeof document !== 'undefined') {
+          try {
+            const { extractImagesFromPdfBuffer } = await import('./pdfImageExtractor');
+            extractedImages = await extractImagesFromPdfBuffer(buffer, file.name);
+          } catch {
+            extractedImages = [];
+          }
+        }
         return {
           name: file.name,
           size: file.size,
           mimeType: 'application/pdf',
           base64Data,
           docRole: inferDocRole(file.name),
+          extractedImages,
         };
       }
 
@@ -82,6 +98,7 @@ export async function readMultipleDocumentFiles(
           base64Data: '',
           textContent,
           docRole: inferDocRole(file.name),
+          extractedImages: extractMarkdownTextImages(textContent, file.name),
         };
       }
 
