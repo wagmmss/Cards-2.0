@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CanonicalCard, PdfExtractedImage } from '../types/deck';
+import {
+  CanonicalCard,
+  GeminiModelOption,
+  MedicalImageResult,
+  PdfExtractedImage,
+} from '../types/deck';
 import {
   fetchJsonWithTimeout,
   sanitizeDeckKey,
   searchMedicalImagesApi,
+  validateCardImageApi,
 } from '../utils/apiClient';
 import {
   buildCatalogFromExtractedImages,
+  extractUsedImageKeysFromCards,
+  getImageCandidateTrackingKeys,
+  hasLocalModalityConflict,
   matchMaterialImagesForCard,
   mergeMaterialAndWebImages,
 } from '../utils/materialImageMatcher';
@@ -14,6 +23,7 @@ import {
   applyResolvedWebImageToCard,
   attachVisualSuggestionToCard,
   extractUnresolvedLocalImages,
+  removeMissingMediaFromCard,
   stripHtml,
 } from '../utils/wozniakLinter';
 
@@ -26,12 +36,120 @@ interface VisualCardSuggestion {
   reason?: string;
 }
 
+interface ValidatedImageSelection {
+  chosen: MedicalImageResult;
+  visualLegend: string;
+  imageVerified: boolean;
+  alternatives: MedicalImageResult[];
+  hadRejection: boolean;
+}
+
+async function pickValidatedUniqueCandidate(params: {
+  card: CanonicalCard;
+  candidates: MedicalImageResult[];
+  usedImageKeys: Set<string>;
+  imageMode: 'recognition' | 'feedback';
+  model?: GeminiModelOption;
+  signal: AbortSignal;
+}): Promise<ValidatedImageSelection | null> {
+  const { card, candidates, usedImageKeys, imageMode, model, signal } = params;
+  const cleanQ = stripHtml(card.question);
+  const cleanA = stripHtml(card.answer);
+  const cleanH = stripHtml(card.hint);
+  const expectedText = `${card.topic} ${cleanQ} ${cleanA}`;
+
+  const availableCandidates = candidates.filter((cand) => {
+    const keys = getImageCandidateTrackingKeys(cand);
+    return !keys.some((k) => usedImageKeys.has(k));
+  });
+
+  if (availableCandidates.length === 0) return null;
+
+  let hadRejection = false;
+  // Inspect up to 5 top unique candidates (material candidates first, then Web candidates)
+  for (const cand of availableCandidates.slice(0, 5)) {
+    if (signal.aborted) return null;
+
+    const candKeys = getImageCandidateTrackingKeys(cand);
+    // Re-check atomic availability right before async call
+    if (candKeys.some((k) => usedImageKeys.has(k))) {
+      continue;
+    }
+
+    // Fast pre-filter for obvious cross-modality conflicts on candidate metadata
+    if (
+      hasLocalModalityConflict(
+        expectedText,
+        `${cand.title || ''} ${cand.description || ''}`,
+        ''
+      )
+    ) {
+      hadRejection = true;
+      continue;
+    }
+
+    // Atomically reserve keys before awaiting Gemini Flash pixel inspection
+    for (const k of candKeys) usedImageKeys.add(k);
+
+    try {
+      const validation = await validateCardImageApi(
+        {
+          imageSource: cand.fullUrl || cand.thumbUrl,
+          cardTopic: card.topic,
+          cardQuestion: cleanQ,
+          cardAnswer: cleanA,
+          cardHint: cleanH,
+          imageMode,
+          captionHint: cand.description || cand.title,
+          model,
+        },
+        signal
+      );
+
+      if (signal.aborted) {
+        for (const k of candKeys) usedImageKeys.delete(k);
+        return null;
+      }
+
+      if (!validation.isCompatible) {
+        // Release keys so another card with matching modality can still use this figure if appropriate
+        for (const k of candKeys) usedImageKeys.delete(k);
+        hadRejection = true;
+        continue;
+      }
+
+      const alternatives = availableCandidates.filter((alt) => {
+        if (alt.id === cand.id) return true;
+        const altKeys = getImageCandidateTrackingKeys(alt);
+        return !altKeys.some((k) => usedImageKeys.has(k));
+      });
+
+      return {
+        chosen: cand,
+        visualLegend: validation.visualLegend || '',
+        imageVerified: Boolean(validation.validated && !validation.fallback),
+        alternatives: alternatives.slice(0, 6),
+        hadRejection,
+      };
+    } catch (err) {
+      for (const k of candKeys) usedImageKeys.delete(k);
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return null;
+      }
+      hadRejection = true;
+    }
+  }
+
+  return null;
+}
+
 export function useImageAutoResolver(params: {
   materialImages: PdfExtractedImage[];
+  selectedModel?: GeminiModelOption;
   setCards: React.Dispatch<React.SetStateAction<CanonicalCard[]>>;
   showStatus: (message: string, tone?: 'info' | 'success' | 'error') => void;
 }) {
-  const { materialImages, setCards, showStatus } = params;
+  const { materialImages, selectedModel, setCards, showStatus } = params;
   const [isAutoResolvingImages, setIsAutoResolvingImages] = useState(false);
   const [isSuggestingVisuals, setIsSuggestingVisuals] = useState(false);
 
@@ -71,7 +189,6 @@ export function useImageAutoResolver(params: {
 
   const autoResolveDeckMissingImages = useCallback(
     async (targetCards: CanonicalCard[], availableNames: string[] = []) => {
-      // Cancel any stale background run so loading a new deck never suffers race conditions
       cancelAutoResolve();
 
       const cardsNeedingWebImage = targetCards.filter(
@@ -83,6 +200,9 @@ export function useImageAutoResolver(params: {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      // Deck-wide tracking set ensures 1 image = max 1 card
+      const usedImageKeys = extractUsedImageKeysFromCards(targetCards, materialImages);
+
       setIsAutoResolvingImages(true);
       const pendingIds = new Set(cardsNeedingWebImage.map((c) => c.id));
       setCards((prev) =>
@@ -90,6 +210,7 @@ export function useImageAutoResolver(params: {
       );
 
       let resolvedCount = 0;
+      let leftTextOnlyCount = 0;
       let cursor = 0;
       const CONCURRENCY = 2;
 
@@ -104,6 +225,10 @@ export function useImageAutoResolver(params: {
           const cleanQuestion = stripHtml(card.question);
           const cleanAnswer = stripHtml(card.answer);
           const cleanHint = stripHtml(card.hint);
+          const effectiveMode: 'recognition' | 'feedback' =
+            targetRef.field === 'hint' || card.image_mode === 'feedback'
+              ? 'feedback'
+              : 'recognition';
 
           const materialHits = matchMaterialImagesForCard(materialImages, {
             query: targetRef.searchQuery,
@@ -112,6 +237,7 @@ export function useImageAutoResolver(params: {
             answer: cleanAnswer,
             hint: cleanHint,
             preferredPdfImageId: targetRef.pdfImageId,
+            usedImageIds: usedImageKeys,
           });
 
           const webImages = await searchMedicalImagesApi(
@@ -128,25 +254,46 @@ export function useImageAutoResolver(params: {
 
           if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
 
-          const mergedCandidates = mergeMaterialAndWebImages(materialHits, webImages, 6);
-          if (mergedCandidates.length > 0) {
+          const mergedCandidates = mergeMaterialAndWebImages(materialHits, webImages, 8);
+          const picked = await pickValidatedUniqueCandidate({
+            card,
+            candidates: mergedCandidates,
+            usedImageKeys,
+            imageMode: effectiveMode,
+            model: selectedModel,
+            signal: controller.signal,
+          });
+
+          if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
+
+          if (picked) {
             resolvedCount++;
-            const bestImage = mergedCandidates[0];
             setCards((prev) =>
               prev.map((c) =>
                 c.id === card.id
-                  ? applyResolvedWebImageToCard(
-                      c,
-                      targetRef.filename,
-                      bestImage,
-                      mergedCandidates
-                    )
+                  ? {
+                      ...applyResolvedWebImageToCard(
+                        c,
+                        targetRef.filename,
+                        picked.chosen,
+                        picked.alternatives,
+                        picked.visualLegend || undefined
+                      ),
+                      imageVerified: picked.imageVerified,
+                    }
                   : c
               )
             );
           } else {
+            // If no valid/compatible image passed validation (or only synthetic placeholders existed),
+            // strip the placeholder cleanly instead of forcing a conflicting image.
+            leftTextOnlyCount++;
             setCards((prev) =>
-              prev.map((c) => (c.id === card.id ? { ...c, isResolvingImage: false } : c))
+              prev.map((c) => {
+                if (c.id !== card.id) return c;
+                const cleaned = removeMissingMediaFromCard(c, availableNames);
+                return { ...cleaned, isResolvingImage: false };
+              })
             );
           }
         }
@@ -163,16 +310,26 @@ export function useImageAutoResolver(params: {
         if (activeRunIdRef.current === runId) {
           abortControllerRef.current = null;
           setIsAutoResolvingImages(false);
-          if (resolvedCount > 0) {
+          if (resolvedCount > 0 && leftTextOnlyCount > 0) {
             showStatus(
-              `${resolvedCount} imagem(ns) resolvida(s) com figuras dos materiais anexados e busca clínica na Web.`,
+              `${resolvedCount} imagem(ns) validadas por visão computacional (1 por card); ${leftTextOnlyCount} card(s) mantido(s) apenas em texto por falta de correspondência compatível.`,
               'success'
+            );
+          } else if (resolvedCount > 0) {
+            showStatus(
+              `${resolvedCount} imagem(ns) resolvida(s) e validadas com figuras únicas (materiais anexados + Web).`,
+              'success'
+            );
+          } else if (leftTextOnlyCount > 0) {
+            showStatus(
+              `${leftTextOnlyCount} card(s) mantido(s) sem imagem após auditoria multimodal para evitar figuras incompatíveis.`,
+              'info'
             );
           }
         }
       }
     },
-    [cancelAutoResolve, materialImages, setCards, showStatus]
+    [cancelAutoResolve, materialImages, selectedModel, setCards, showStatus]
   );
 
   const suggestAndAttachVisualCards = useCallback(
@@ -191,9 +348,12 @@ export function useImageAutoResolver(params: {
       suggestAbortRef.current = controller;
       setIsSuggestingVisuals(true);
 
+      // Seed uniqueness tracker with every image already attached across the entire deck
+      const usedImageKeys = extractUsedImageKeysFromCards(targetCards, materialImages);
+
       try {
         showStatus(
-          `Analisando ${Math.min(40, cardsWithoutImage.length)} card(s) sem imagem para sugerir figuras úteis (Materiais + Web)...`,
+          `Analisando ${Math.min(40, cardsWithoutImage.length)} card(s) sem imagem com validação multimodal (Materiais + Web)...`,
           'info'
         );
 
@@ -218,6 +378,7 @@ export function useImageAutoResolver(params: {
               hint: c.hint,
             })),
             pdfImagesCatalog,
+            model: selectedModel,
           }),
           timeoutMs: 125_000,
           signal: controller.signal,
@@ -266,6 +427,7 @@ export function useImageAutoResolver(params: {
               answer: cleanA,
               hint: cleanH,
               preferredPdfImageId: suggestion.pdfImageId,
+              usedImageIds: usedImageKeys,
             });
 
             const webHits = await searchMedicalImagesApi(
@@ -282,23 +444,35 @@ export function useImageAutoResolver(params: {
 
             if (controller.signal.aborted || suggestRunIdRef.current !== runId) return;
 
-            const merged = mergeMaterialAndWebImages(materialHits, webHits, 6);
-            if (merged.length === 0) continue;
+            const merged = mergeMaterialAndWebImages(materialHits, webHits, 8);
+            const picked = await pickValidatedUniqueCandidate({
+              card,
+              candidates: merged,
+              usedImageKeys,
+              imageMode: suggestion.mode,
+              model: selectedModel,
+              signal: controller.signal,
+            });
 
-            const chosen = merged[0];
+            if (controller.signal.aborted || suggestRunIdRef.current !== runId) return;
+            if (!picked) continue;
+
             attachedCount++;
-            if (chosen.fromMaterial) matUsedCount++;
+            if (picked.chosen.fromMaterial) matUsedCount++;
 
             setCards((prev) =>
               prev.map((c) =>
                 c.id === card.id
-                  ? attachVisualSuggestionToCard(
-                      c,
-                      chosen,
-                      suggestion.legend,
-                      suggestion.mode,
-                      merged
-                    )
+                  ? {
+                      ...attachVisualSuggestionToCard(
+                        c,
+                        picked.chosen,
+                        picked.visualLegend || suggestion.legend,
+                        suggestion.mode,
+                        picked.alternatives
+                      ),
+                      imageVerified: picked.imageVerified,
+                    }
                   : c
               )
             );
@@ -312,12 +486,12 @@ export function useImageAutoResolver(params: {
         if (!controller.signal.aborted && suggestRunIdRef.current === runId) {
           if (attachedCount > 0) {
             showStatus(
-              `IA adicionou imagens em ${attachedCount} card(s) (${matUsedCount} dos seus materiais + ${attachedCount - matUsedCount} da Web). Revise e aprove abaixo.`,
+              `IA vinculou ${attachedCount} figura(s) única(s) e validadas (${matUsedCount} dos materiais + ${attachedCount - matUsedCount} da Web).`,
               'success'
             );
           } else {
             showStatus(
-              'Nenhuma imagem compatível com alta relevância foi encontrada para as sugestões da IA.',
+              'Nenhuma imagem compatível passou na validação multimodal para os cards analisados.',
               'info'
             );
           }
@@ -335,7 +509,7 @@ export function useImageAutoResolver(params: {
         }
       }
     },
-    [cancelSuggestVisuals, materialImages, setCards, showStatus]
+    [cancelSuggestVisuals, materialImages, selectedModel, setCards, showStatus]
   );
 
   return {

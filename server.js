@@ -769,6 +769,101 @@ function createRequestAbortSignal(req, res, maxMs) {
     }
   };
 }
+function isSafeExternalImageUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host === "::1" || host === "0.0.0.0" || host.endsWith(".local") || host.endsWith(".internal")) {
+      return false;
+    }
+    if (/^(127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return false;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function resolveImageForMultimodalValidation(imageSource, parentSignal) {
+  const src = (imageSource || "").trim();
+  if (!src) return { status: "broken", reason: "Fonte de imagem vazia." };
+  if (/^data:image\//i.test(src)) {
+    const match = src.match(/^data:(image\/[a-zA-Z0-9+.-]+)(?:;[^,]*)?;base64,(.+)$/i);
+    if (!match) {
+      return { status: "broken", reason: "Data URI de imagem inv\xE1lido." };
+    }
+    let mimeType = match[1].toLowerCase();
+    if (mimeType === "image/jpg") mimeType = "image/jpeg";
+    if (mimeType.includes("svg")) return { status: "svg" };
+    if (!/^image\/(?:jpeg|png|webp|gif)$/.test(mimeType)) {
+      return { status: "fetch_error", reason: `MIME n\xE3o suportado para vis\xE3o: ${mimeType}` };
+    }
+    const base64Body = match[2].replace(/\s+/g, "");
+    if (base64Body.length > 82e5) {
+      return { status: "fetch_error", reason: "Imagem base64 excede limite de 6MB." };
+    }
+    return { status: "ok", mimeType, data: base64Body };
+  }
+  if (!isSafeExternalImageUrl(src)) {
+    return { status: "broken", reason: "URL de imagem externa inv\xE1lida ou bloqueada." };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("Image fetch timeout")), 8500);
+  const onParentAbort = () => controller.abort(parentSignal.reason);
+  if (parentSignal.aborted) {
+    clearTimeout(timer);
+    return { status: "fetch_error", reason: "Requisi\xE7\xE3o abortada." };
+  }
+  parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  try {
+    const upstream = await fetch(src, {
+      headers: {
+        "User-Agent": "InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)",
+        Accept: "image/jpeg,image/png,image/webp,image/gif,image/*;q=0.8"
+      },
+      redirect: "follow",
+      signal: controller.signal
+    });
+    if (upstream.status === 404 || upstream.status === 410) {
+      return { status: "broken", reason: `URL retornou HTTP ${upstream.status}.` };
+    }
+    if (!upstream.ok) {
+      return { status: "fetch_error", reason: `Falha tempor\xE1ria ao baixar imagem (HTTP ${upstream.status}).` };
+    }
+    let contentType = (upstream.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (contentType === "image/jpg") contentType = "image/jpeg";
+    if (contentType.includes("svg")) return { status: "svg" };
+    if (!contentType.startsWith("image/")) {
+      if (contentType.includes("text/html") || contentType.includes("application/json")) {
+        return { status: "broken", reason: `URL retornou ${contentType} em vez de imagem.` };
+      }
+      if (/\.png(?:\?|$)/i.test(src)) contentType = "image/png";
+      else if (/\.webp(?:\?|$)/i.test(src)) contentType = "image/webp";
+      else if (/\.gif(?:\?|$)/i.test(src)) contentType = "image/gif";
+      else if (/\.jpe?g(?:\?|$)/i.test(src)) contentType = "image/jpeg";
+      else return { status: "broken", reason: "Conte\xFAdo retornado n\xE3o \xE9 imagem raster." };
+    }
+    if (!/^image\/(?:jpeg|png|webp|gif)$/.test(contentType)) {
+      return { status: "fetch_error", reason: `Formato de imagem n\xE3o suportado: ${contentType}` };
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    if (buf.length < 256) {
+      return { status: "broken", reason: "Arquivo de imagem vazio ou corrompido." };
+    }
+    if (buf.length > 6 * 1024 * 1024) {
+      return { status: "fetch_error", reason: "Imagem externa excede 6MB." };
+    }
+    return { status: "ok", mimeType: contentType, data: buf.toString("base64") };
+  } catch (err) {
+    return {
+      status: "fetch_error",
+      reason: err instanceof Error ? err.message : "Erro ao baixar imagem externa."
+    };
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener("abort", onParentAbort);
+  }
+}
 function resolveEffectiveDomainProfile(requestedProfile, deckKey, textHint = "") {
   const validProfiles = [
     "emergencia",
@@ -1562,6 +1657,139 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido no formato:
           error,
           "Erro ao analisar cards para sugest\xE3o proativa de imagens."
         )
+      });
+    } finally {
+      cleanup();
+    }
+  });
+  router.post("/validate-image", async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 35e3);
+    try {
+      const {
+        imageSource = "",
+        cardTopic = "",
+        cardQuestion = "",
+        cardAnswer = "",
+        cardHint = "",
+        imageMode = "feedback",
+        captionHint = "",
+        model: requestedModel
+      } = req.body || {};
+      if (!imageSource || typeof imageSource !== "string") {
+        return res.status(400).json({ error: "imageSource ausente." });
+      }
+      const resolvedMedia = await resolveImageForMultimodalValidation(imageSource, signal);
+      if (signal.aborted || res.writableEnded) return;
+      if (resolvedMedia.status === "broken") {
+        return res.json({
+          validated: true,
+          isCompatible: false,
+          detectedModality: "broken",
+          conflictReason: resolvedMedia.reason,
+          visualLegend: ""
+        });
+      }
+      if (resolvedMedia.status !== "ok") {
+        return res.json({
+          validated: false,
+          fallback: true,
+          isCompatible: true,
+          detectedModality: "unverified",
+          conflictReason: "",
+          visualLegend: ""
+        });
+      }
+      if (parseGeminiApiKeys().length === 0) {
+        return res.json({
+          validated: false,
+          fallback: true,
+          isCompatible: true,
+          detectedModality: "unverified",
+          conflictReason: "",
+          visualLegend: ""
+        });
+      }
+      const activeModel = resolveGeminiModel(requestedModel);
+      const safeMode = imageMode === "recognition" ? "recognition" : "feedback";
+      const prompt = `Voc\xEA \xE9 um preceptor m\xE9dico auditando visualmente uma imagem candidata a ser anexada a um flashcard do Internato.
+Analise EXCLUSIVAMENTE OS PIXELS REAIS DA IMAGEM ANEXADA (n\xE3o confie em suposi\xE7\xF5es do texto se os pixels mostrarem outra modalidade!).
+
+CONTEXTO DO FLASHCARD:
+- T\xF3pico: "${sanitizeCardTextForPrompt(cardTopic, 90)}"
+- Modo de exibi\xE7\xE3o: "${safeMode}" (${safeMode === "recognition" ? "imagem na FRENTE \u2014 proibido dar spoiler da resposta na legenda!" : "imagem no VERSO/coment\xE1rio"})
+- Pergunta: "${sanitizeCardTextForPrompt(cardQuestion, 240)}"
+- Resposta esperada: "${sanitizeCardTextForPrompt(cardAnswer, 130)}"
+- Coment\xE1rio: "${sanitizeCardTextForPrompt(cardHint, 180)}"
+${captionHint ? `- Legenda/nota extra\xEDda pr\xF3xima \xE0 figura: "${sanitizeCardTextForPrompt(captionHint, 140)}"` : ""}
+
+REGRAS DE INSPE\xC7\xC3O VISUAL:
+1. "detectedModality": nomeie a modalidade real vis\xEDvel nos pixels (ex.: "usg", "videolaparoscopia", "ecg", "radiografia", "tomografia", "ctg", "dermatoscopia", "histologia", "fluxograma", "foto_clinica", "esquema", "irrelevante_logo").
+2. "isCompatible":
+   - Retorne FALSE se houver conflito de modalidade entre o que o card solicita/descreve e o que aparece na imagem (ex.: card pede USG/ultrassonografia e a imagem \xE9 videolaparoscopia/cirurgia, ou card pede ECG e a imagem \xE9 anatomia/retrato/logo/capa de aula).
+   - Retorne FALSE se a imagem for ileg\xEDvel, logomarca, retrato de autor, texto puro gen\xE9rico sem valor cl\xEDnico ou claramente de outra doen\xE7a incompat\xEDvel.
+   - Retorne TRUE apenas se os pixels realmente representarem uma figura cl\xEDnica compat\xEDvel e \xFAtil para este card.
+3. "conflictReason": explica\xE7\xE3o objetiva curta caso isCompatible=false (ou "" se compat\xEDvel).
+4. "visualLegend": descreva fielmente em Portugu\xEAs do Brasil (entre 8 e 24 palavras, M\xCDNIMO 6 palavras, sem iniciar com "Legenda visual:") APENAS o que est\xE1 vis\xEDvel na imagem real. Se mode="recognition", descreva os achados visuais sem entregar o termo diagn\xF3stico da resposta esperada.`;
+      const result = await withGeminiKeyRotation(
+        (ai) => generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: resolvedMedia.mimeType,
+                    data: resolvedMedia.data
+                  }
+                },
+                { text: prompt }
+              ]
+            },
+            config: {
+              responseMimeType: "application/json",
+              maxOutputTokens: 1024,
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.LOW },
+              responseSchema: {
+                type: import_genai2.Type.OBJECT,
+                properties: {
+                  detectedModality: { type: import_genai2.Type.STRING },
+                  isCompatible: { type: import_genai2.Type.BOOLEAN },
+                  conflictReason: { type: import_genai2.Type.STRING },
+                  visualLegend: { type: import_genai2.Type.STRING }
+                },
+                required: ["detectedModality", "isCompatible", "visualLegend"]
+              }
+            }
+          },
+          { signal, timeoutMs: 22e3, enableModelFallback: true }
+        ),
+        signal
+      );
+      if (res.writableEnded) return;
+      const parsed = JSON.parse(extractJsonBlock(result.text || "{}"));
+      const detectedModality = String(parsed.detectedModality || "clinical_image").trim().slice(0, 60);
+      const isCompatible = parsed.isCompatible !== false;
+      const conflictReason = String(parsed.conflictReason || "").trim().slice(0, 220);
+      const visualLegend = String(parsed.visualLegend || "").replace(/^legenda\s+visual\s*:\s*/i, "").trim().slice(0, 220);
+      return res.json({
+        validated: true,
+        isCompatible,
+        detectedModality,
+        conflictReason,
+        visualLegend,
+        modelUsed: result.modelUsed
+      });
+    } catch (error) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        validated: false,
+        fallback: true,
+        isCompatible: true,
+        detectedModality: "unverified",
+        conflictReason: "",
+        visualLegend: "",
+        error: formatGeminiError(error, "Falha na valida\xE7\xE3o multimodal da imagem.")
       });
     } finally {
       cleanup();

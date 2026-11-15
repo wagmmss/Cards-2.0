@@ -169,6 +169,55 @@ export async function searchMedicalImagesApi(
   }
 }
 
+export interface ValidateCardImageResponse {
+  validated: boolean;
+  isCompatible: boolean;
+  detectedModality: string;
+  conflictReason: string;
+  visualLegend: string;
+  fallback?: boolean;
+  modelUsed?: string;
+}
+
+export async function validateCardImageApi(
+  params: {
+    imageSource: string;
+    cardTopic?: string;
+    cardQuestion?: string;
+    cardAnswer?: string;
+    cardHint?: string;
+    imageMode?: 'recognition' | 'feedback';
+    captionHint?: string;
+    model?: string;
+  },
+  signal?: AbortSignal
+): Promise<ValidateCardImageResponse> {
+  try {
+    return await fetchJsonWithTimeout<ValidateCardImageResponse>(
+      '/api/gemini/validate-image',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+        timeoutMs: 28_000,
+        signal,
+      }
+    );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err;
+    }
+    return {
+      validated: false,
+      fallback: true,
+      isCompatible: true,
+      detectedModality: 'unverified',
+      conflictReason: '',
+      visualLegend: '',
+    };
+  }
+}
+
 export function extractCardImagesWithMeta(
   html: string,
   cardId: number,

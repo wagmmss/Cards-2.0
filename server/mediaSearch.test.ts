@@ -10,10 +10,13 @@ import { sanitizeDeckKey } from '../src/utils/apiClient';
 import {
   buildPdfImagesCatalog,
   extractMarkdownTextImages,
+  extractUsedImageKeysFromCards,
+  hasLocalModalityConflict,
   matchMaterialImagesForCard,
   mergeMaterialAndWebImages,
 } from '../src/utils/materialImageMatcher';
 import {
+  applyResolvedWebImageToCard,
   attachVisualSuggestionToCard,
   extractUnresolvedLocalImages,
 } from '../src/utils/wozniakLinter';
@@ -242,6 +245,124 @@ test('extractUnresolvedLocalImages parses pdfimg: and buscar_imagem: placeholder
     []
   );
   assert.equal(attached.image_mode, 'feedback');
-  assert.ok(attached.hint.startsWith('<img src="data:image/jpeg;base64,XYZ" data-anki-file="iam_anterior.jpg"><br><b>Comentário:</b>'));
+  assert.ok(
+    attached.hint.startsWith(
+      '<img src="data:image/jpeg;base64,XYZ" data-anki-file="iam_anterior.jpg"><br><i>Legenda visual: Traçado de 12 derivações com supra de ST anterior.</i><br><br><b>Comentário:</b>'
+    )
+  );
 });
+
+test('matchMaterialImagesForCard rejects conflicting visual modalities (laparoscopy vs USG) and enforces usedImageIds uniqueness', () => {
+  const mixedPdfImages: PdfExtractedImage[] = [
+    {
+      id: 'pdfimg_dip_p2_lap',
+      pdfName: 'dip_febrasgo.pdf',
+      pageNumber: 2,
+      width: 640,
+      height: 400,
+      dataUrl: 'data:image/jpeg;base64,LAP_DATA',
+      pageTextSnippet:
+        'Doença inflamatória pélvica: ultrassonografia transvaginal com sinal da roda dentada e videolaparoscopia mostrando aderências pélvicas',
+      captionHint: 'Figura 1: Videolaparoscopia evidenciando aderências peri-hepáticas em cordas de violino',
+      suggestedFilename: 'dip_p2_lap.jpg',
+      kind: 'embedded',
+    },
+    {
+      id: 'pdfimg_dip_p2_usg',
+      pdfName: 'dip_febrasgo.pdf',
+      pageNumber: 2,
+      width: 640,
+      height: 400,
+      dataUrl: 'data:image/jpeg;base64,USG_DATA',
+      pageTextSnippet:
+        'Ultrassonografia transvaginal em corte transversal evidenciando sinal da roda dentada na salpingite aguda',
+      captionHint: 'Figura 2: USG transvaginal corte transversal com sinal da roda dentada',
+      suggestedFilename: 'dip_p2_usg.jpg',
+      kind: 'embedded',
+    },
+  ];
+
+  assert.equal(
+    hasLocalModalityConflict(
+      'Qual achado na USG transvaginal na salpingite?',
+      'Figura 1: Videolaparoscopia evidenciando aderências'
+    ),
+    true
+  );
+  assert.equal(
+    hasLocalModalityConflict(
+      'Qual achado na USG transvaginal na salpingite?',
+      'Figura 2: USG transvaginal corte transversal'
+    ),
+    false
+  );
+
+  // Even if LLM erroneously suggests preferredPdfImageId of laparoscopy for an USG card, it must NOT attach laparoscopy
+  const hitsForUsg = matchMaterialImagesForCard(mixedPdfImages, {
+    topic: 'Ginecologia - DIP',
+    question: 'Qual o achado típico na USG transvaginal?',
+    answer: 'Sinal da roda dentada.',
+    preferredPdfImageId: 'pdfimg_dip_p2_lap',
+  });
+  assert.equal(hitsForUsg.length, 1);
+  assert.equal(hitsForUsg[0].id, 'mat-pdfimg_dip_p2_usg');
+
+  // If USG image is already reserved/used on another card, usedImageIds prevents reusing it on a 2nd card
+  const existingDeck: CanonicalCard[] = [
+    {
+      id: 201,
+      type: 'basic',
+      topic: 'Ginecologia - DIP',
+      question: 'Qual achado na USG?<br><img src="data:image/jpeg;base64,USG_DATA">',
+      answer: 'Sinal da roda dentada.',
+      hint: '<i>Legenda visual: USG transvaginal em corte transversal.</i><br><br><b>Comentário:</b> Salpingite aguda.',
+    },
+  ];
+  const usedKeys = extractUsedImageKeysFromCards(existingDeck, mixedPdfImages);
+  const hitsCard2 = matchMaterialImagesForCard(mixedPdfImages, {
+    topic: 'Ginecologia - DIP',
+    question: 'Outro card pedindo USG pélvica na salpingite.',
+    answer: 'Espessamento tubário ao ultrassom.',
+    usedImageIds: usedKeys,
+  });
+  assert.equal(hitsCard2.some((h) => h.id === 'mat-pdfimg_dip_p2_usg'), false);
+});
+
+test('applyResolvedWebImageToCard enforces Legenda visual >= 6 words before Comentário in both modes', () => {
+  const cardFeedback: CanonicalCard = {
+    id: 301,
+    type: 'cloze',
+    image_mode: 'feedback',
+    topic: 'Cardiologia - Emergência',
+    question: 'No IAMCSST anterior, a artéria culpada mais provável é a {{c1::descendente anterior}}.',
+    answer: '',
+    hint: '<img src="buscar_imagem: supra ST V1-V4 ECG"><br><b>Comentário:</b> Derivação anterior reflete oclusão proximal.',
+  };
+
+  const mockImg = {
+    id: 'web-ecg',
+    title: 'Anterior STEMI',
+    thumbUrl: 'https://litfl.com/ecg/anterior.jpg',
+    fullUrl: 'https://litfl.com/ecg/anterior.jpg',
+    description: 'ECG anterior STEMI',
+    suggestedFilename: 'anterior_stemi.jpg',
+    defaultLegend: 'Curta.',
+    source: 'litfl.com',
+  };
+
+  const resolvedFeedback = applyResolvedWebImageToCard(
+    cardFeedback,
+    'anterior_stemi.jpg',
+    mockImg,
+    [mockImg],
+    'Traçado de 12 derivações evidenciando supradesnivelamento do segmento ST em V1 a V4.'
+  );
+  assert.equal(resolvedFeedback.image_mode, 'feedback');
+  assert.ok(
+    resolvedFeedback.hint.startsWith(
+      '<img src="https://litfl.com/ecg/anterior.jpg" data-anki-file="anterior_stemi.jpg"><br><i>Legenda visual: Traçado de 12 derivações evidenciando supradesnivelamento do segmento ST em V1 a V4.</i><br><br><b>Comentário:</b>'
+    )
+  );
+});
+
 

@@ -108,6 +108,7 @@ export default function App() {
     cancelSuggestVisuals,
   } = useImageAutoResolver({
     materialImages,
+    selectedModel,
     setCards,
     showStatus,
   });

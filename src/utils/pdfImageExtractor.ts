@@ -18,10 +18,15 @@ interface RawPdfImageObj {
   bitmap?: ImageBitmap;
 }
 
+interface CaptionMatch {
+  index: number;
+  text: string;
+}
+
 function getPageObjectWithTimeout(
   objs: { get: (name: string, cb?: (data: unknown) => void) => unknown; has?: (name: string) => boolean },
   name: string,
-  timeoutMs = 1500
+  timeoutMs = 2500
 ): Promise<RawPdfImageObj | null> {
   return new Promise((resolve) => {
     let settled = false;
@@ -67,10 +72,11 @@ function drawPdfImageToCanvas(
 
   const srcW = Number(imgObj.bitmap?.width || imgObj.width || 0);
   const srcH = Number(imgObj.bitmap?.height || imgObj.height || 0);
-  if (srcW < 140 || srcH < 95) return null;
+  // Filter out tiny UI icons/logos (< 120x80) while preserving smaller USG/ECG crops
+  if (srcW < 120 || srcH < 80) return null;
 
   const aspect = srcW / srcH;
-  if (aspect > 7.5 || aspect < 0.13) return null;
+  if (aspect > 8.5 || aspect < 0.12) return null;
 
   const scale = Math.min(1, maxDim / Math.max(srcW, srcH));
   const targetW = Math.max(1, Math.round(srcW * scale));
@@ -118,6 +124,21 @@ function drawPdfImageToCanvas(
         rgba[o + 2] = g;
         rgba[o + 3] = 255;
       }
+    } else if (data.length === Math.ceil(srcW / 8) * srcH) {
+      // 1-bit grayscale mask fallback
+      const rowBytes = Math.ceil(srcW / 8);
+      for (let y = 0; y < srcH; y++) {
+        for (let x = 0; x < srcW; x++) {
+          const byte = data[y * rowBytes + (x >> 3)];
+          const bit = (byte >> (7 - (x & 7))) & 1;
+          const v = bit ? 255 : 0;
+          const o = (y * srcW + x) * 4;
+          rgba[o] = v;
+          rgba[o + 1] = v;
+          rgba[o + 2] = v;
+          rgba[o + 3] = 255;
+        }
+      }
     } else {
       return null;
     }
@@ -129,9 +150,9 @@ function drawPdfImageToCanvas(
     return null;
   }
 
-  // Fast uniformity + perceptual hash check on 8x8 sample to drop solid banners & duplicate logos
-  const sampleW = 8;
-  const sampleH = 8;
+  // 12x12 sample distinguishes subtle clinical annotations (arrows/highlights) while catching uniform banners
+  const sampleW = 12;
+  const sampleH = 12;
   const sCanvas = document.createElement('canvas');
   sCanvas.width = sampleW;
   sCanvas.height = sampleH;
@@ -162,14 +183,81 @@ function drawPdfImageToCanvas(
   return { dataUrl, width: targetW, height: targetH, signature, isUniform };
 }
 
-function extractCaptionHint(pageText: string): string {
-  const figMatch = pageText.match(
-    /(?:Figura|Fig\.?|Imagem|Quadro|Tabela|Gráfico|ECG|Traçado)\s*\d*[:.\-–]?\s*[^.]{6,130}/i
-  );
-  if (figMatch?.[0]) {
-    return figMatch[0].replace(/\s+/g, ' ').trim();
+function collectPageCaptionMatches(pageText: string): CaptionMatch[] {
+  if (!pageText) return [];
+  const matches: CaptionMatch[] = [];
+  const seenOffsets: number[] = [];
+
+  const regex =
+    /(?:Figura|Fig\.?|Imagem|Foto|USG|Ultrassom|Ultrassonografia|Videolaparoscopia|Laparoscopia|ECG|Eletrocardiograma|Traçado|Radiografia|Tomografia|Quadro|Tabela|Gráfico)\s*\d*[:.\-–]?\s*[^.!?]{6,150}/gi;
+
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(pageText)) !== null) {
+    const idx = m.index;
+    // Skip duplicate overlapping matches within 45 chars of a captured caption start
+    if (seenOffsets.some((prev) => Math.abs(prev - idx) < 45)) continue;
+    seenOffsets.push(idx);
+    matches.push({
+      index: idx,
+      text: m[0].replace(/\s+/g, ' ').trim(),
+    });
   }
-  return pageText.slice(0, 120).trim();
+  return matches;
+}
+
+function extractContextForFigure(
+  pageText: string,
+  captionMatches: CaptionMatch[],
+  figureZeroIdx: number,
+  totalFiguresOnPage: number
+): { pageTextSnippet: string; captionHint: string } {
+  if (!pageText) {
+    return { pageTextSnippet: '', captionHint: '' };
+  }
+
+  const matched = captionMatches[figureZeroIdx];
+  if (matched) {
+    const start = Math.max(0, matched.index - 450);
+    const end = Math.min(pageText.length, matched.index + 550);
+    return {
+      pageTextSnippet: pageText.slice(start, end).trim(),
+      captionHint: matched.text,
+    };
+  }
+
+  // Proportional position window along the page so middle/end figures don't inherit only the top 340 chars
+  const totalCount = Math.max(1, totalFiguresOnPage);
+  const ratio = totalCount === 1 ? 0.25 : (figureZeroIdx + 0.5) / totalCount;
+  const center = Math.round(pageText.length * Math.min(0.92, Math.max(0.08, ratio)));
+  const start = Math.max(0, center - 500);
+  const end = Math.min(pageText.length, start + 1000);
+  const localSnippet = pageText.slice(start, end).trim();
+
+  // Look for a local caption phrase inside this proportional window
+  const localMatch = localSnippet.match(
+    /(?:Figura|Fig\.?|Imagem|Foto|USG|Ultrassom|Ultrassonografia|Videolaparoscopia|Laparoscopia|ECG|Traçado|Radiografia|Tomografia|Quadro|Tabela|Gráfico)\s*\d*[:.\-–]?\s*[^.!?]{6,140}/i
+  );
+
+  let captionHint = '';
+  if (localMatch?.[0]) {
+    captionHint = localMatch[0].replace(/\s+/g, ' ').trim();
+  } else {
+    const rawSlice = localSnippet.slice(0, 140).trim();
+    captionHint =
+      totalCount > 1 && rawSlice
+        ? `${rawSlice} (fig. ${figureZeroIdx + 1})`
+        : rawSlice;
+  }
+
+  return {
+    pageTextSnippet: localSnippet,
+    captionHint,
+  };
+}
+
+function extractCaptionHint(pageText: string, figZeroIdx = 0, totalFigs = 1): string {
+  const matches = collectPageCaptionMatches(pageText);
+  return extractContextForFigure(pageText, matches, figZeroIdx, totalFigs).captionHint;
 }
 
 /**
@@ -188,16 +276,17 @@ export async function extractImagesFromPdfBuffer(
 
   ensurePdfWorker();
 
-  const cleanBase = pdfName
-    .replace(/\.pdf$/i, '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_|_$/g, '')
-    .slice(0, 26) || 'material';
+  const cleanBase =
+    pdfName
+      .replace(/\.pdf$/i, '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_|_$/g, '')
+      .slice(0, 26) || 'material';
 
-  const rawExtracted: Array<PdfExtractedImage & { signature: string }> = [];
+  const rawExtracted: Array<PdfExtractedImage & { signature: string; byteLengthHint: number }> = [];
 
   try {
     const loadingTask = pdfjsLib.getDocument({
@@ -217,6 +306,7 @@ export async function extractImagesFromPdfBuffer(
         .replace(/\s+/g, ' ')
         .trim();
 
+      const captionMatches = collectPageCaptionMatches(pageText);
       const opList = await page.getOperatorList().catch(() => null);
       const imageObjNames = new Set<string>();
 
@@ -235,25 +325,39 @@ export async function extractImagesFromPdfBuffer(
         }
       }
 
-      // Render page lightly to populate page.objs when needed
+      // Render page lightly to populate page.objs and page.commonObjs before reading XObjects
       let pageExtractedCount = 0;
       if (imageObjNames.size > 0) {
-        // Quick low-res render triggers pdf.js to decode all image XObjects into page.objs cleanly
-        const vpLow = page.getViewport({ scale: 0.45 });
+        const vpLow = page.getViewport({ scale: 0.65 });
         const hiddenCanvas = document.createElement('canvas');
         hiddenCanvas.width = Math.max(1, Math.round(vpLow.width));
         hiddenCanvas.height = Math.max(1, Math.round(vpLow.height));
         const hiddenCtx = hiddenCanvas.getContext('2d');
         if (hiddenCtx) {
-          await page.render({ canvasContext: hiddenCtx, canvas: hiddenCanvas, viewport: vpLow }).promise.catch(() => undefined);
+          await page
+            .render({ canvasContext: hiddenCtx, canvas: hiddenCanvas, viewport: vpLow })
+            .promise.catch(() => undefined);
         }
 
+        const totalObjs = imageObjNames.size;
         let figIdx = 0;
         for (const objName of imageObjNames) {
-          const imgObj = await getPageObjectWithTimeout(page.objs, objName, 1200);
+          let imgObj = await getPageObjectWithTimeout(page.objs, objName, 2500);
+          if (!imgObj && page.commonObjs) {
+            imgObj = await getPageObjectWithTimeout(page.commonObjs, objName, 2500);
+          }
           if (!imgObj) continue;
+
           const encoded = drawPdfImageToCanvas(imgObj, 1050);
           if (!encoded) continue;
+
+          const { pageTextSnippet, captionHint } = extractContextForFigure(
+            pageText,
+            captionMatches,
+            figIdx,
+            totalObjs
+          );
+
           figIdx++;
           pageExtractedCount++;
           rawExtracted.push({
@@ -263,18 +367,19 @@ export async function extractImagesFromPdfBuffer(
             width: encoded.width,
             height: encoded.height,
             dataUrl: encoded.dataUrl,
-            pageTextSnippet: pageText.slice(0, 340),
-            captionHint: extractCaptionHint(pageText),
+            pageTextSnippet,
+            captionHint,
             suggestedFilename: `${cleanBase}_p${pageNum}_fig${figIdx}.jpg`,
             kind: 'embedded',
             signature: encoded.signature,
+            byteLengthHint: encoded.dataUrl.length,
           });
         }
       }
 
       // Fallback for slides/exams where diagnostic trace (ECG, flowchart) is vector-drawn without XObjects
       const hasClinicalFigureKeyword =
-        /\b(figura|fig\.|ecg|eletrocardiograma|traçado|rx|radiografia|tomografia|ultrassom|ctg|cardiotocografia|algoritmo|fluxograma|partograma)\b/i.test(
+        /\b(figura|fig\.|ecg|eletrocardiograma|traçado|rx|radiografia|tomografia|ultrassom|ultrassonografia|usg|videolaparoscopia|laparoscopia|ctg|cardiotocografia|algoritmo|fluxograma|partograma)\b/i.test(
           pageText
         );
       if (pageExtractedCount === 0 && hasClinicalFigureKeyword && pageText.length < 1800) {
@@ -287,19 +392,23 @@ export async function extractImagesFromPdfBuffer(
           if (pCtx) {
             pCtx.fillStyle = '#ffffff';
             pCtx.fillRect(0, 0, pCanvas.width, pCanvas.height);
-            await page.render({ canvasContext: pCtx, canvas: pCanvas, viewport: vp }).promise.catch(() => undefined);
+            await page
+              .render({ canvasContext: pCtx, canvas: pCanvas, viewport: vp })
+              .promise.catch(() => undefined);
+            const dataUrl = pCanvas.toDataURL('image/jpeg', 0.82);
             rawExtracted.push({
               id: `pdf_${cleanBase}_p${pageNum}_page`,
               pdfName,
               pageNumber: pageNum,
               width: pCanvas.width,
               height: pCanvas.height,
-              dataUrl: pCanvas.toDataURL('image/jpeg', 0.82),
-              pageTextSnippet: pageText.slice(0, 340),
-              captionHint: extractCaptionHint(pageText),
+              dataUrl,
+              pageTextSnippet: pageText.slice(0, 1000),
+              captionHint: extractCaptionHint(pageText, 0, 1),
               suggestedFilename: `${cleanBase}_p${pageNum}_slide.jpg`,
               kind: 'page_crop',
               signature: `page_${pageNum}_${pCanvas.width}x${pCanvas.height}`,
+              byteLengthHint: dataUrl.length,
             });
           }
         }
@@ -314,21 +423,51 @@ export async function extractImagesFromPdfBuffer(
     return [];
   }
 
-  // Filter out repeated watermarks/logos/footers occurring on > 2 pages with the exact same visual signature
-  const sigCounts = new Map<string, number>();
+  // Track across WHICH distinct pages each visual signature repeats to filter headers/watermarks (>= 3 pages)
+  const sigPages = new Map<string, Set<number>>();
   for (const item of rawExtracted) {
-    sigCounts.set(item.signature, (sigCounts.get(item.signature) || 0) + 1);
+    const pages = sigPages.get(item.signature) || new Set<number>();
+    pages.add(item.pageNumber);
+    sigPages.set(item.signature, pages);
   }
 
-  const seenOnce = new Set<string>();
+  // Deduplicate exact cross-page clones while preserving same-page clean vs. annotated variants
+  const seenCrossPage = new Set<string>();
+  const seenSamePageExact = new Set<string>();
+  const seenCaptionPerPage = new Map<string, number>();
   const finalImages: PdfExtractedImage[] = [];
+
   for (const item of rawExtracted) {
-    const freq = sigCounts.get(item.signature) || 1;
-    if (freq >= 3) continue; // Likely watermark / institution header logo
-    if (seenOnce.has(item.signature)) continue;
-    seenOnce.add(item.signature);
-    const { signature: _omitSig, ...cleanItem } = item;
-    finalImages.push(cleanItem);
+    const pageCount = sigPages.get(item.signature)?.size || 1;
+    if (pageCount >= 3) continue; // Repeated institution logo / watermark across 3+ pages
+
+    // Same-page figures can be clean vs. arrow-annotated variants: keep distinct byte sizes/captions on same page,
+    // while still dropping byte-identical XObject clones
+    const samePageExactKey = `${item.pageNumber}:${item.signature}:${Math.round(item.byteLengthHint / 512)}`;
+    if (seenSamePageExact.has(samePageExactKey)) continue;
+    seenSamePageExact.add(samePageExactKey);
+
+    if (pageCount > 1 && seenCrossPage.has(item.signature)) {
+      continue;
+    }
+    seenCrossPage.add(item.signature);
+
+    // Ensure two variants on the same page have distinguishable captionHint labels
+    const rawCaption = (item.captionHint || '').trim();
+    const captionKey = `${item.pageNumber}:${rawCaption.toLowerCase()}`;
+    const seenCapCount = (seenCaptionPerPage.get(captionKey) || 0) + 1;
+    seenCaptionPerPage.set(captionKey, seenCapCount);
+
+    const differentiatedCaption =
+      rawCaption && seenCapCount > 1
+        ? `${rawCaption} (variante ${seenCapCount} · pág. ${item.pageNumber})`
+        : rawCaption;
+
+    const { signature: _omitSig, byteLengthHint: _omitLen, ...cleanItem } = item;
+    finalImages.push({
+      ...cleanItem,
+      captionHint: differentiatedCaption,
+    });
     if (finalImages.length >= maxTotalImages) break;
   }
 

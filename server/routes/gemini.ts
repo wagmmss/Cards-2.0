@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import type { Part } from '@google/genai';
-import { ThinkingLevel } from '@google/genai';
+import { ThinkingLevel, Type } from '@google/genai';
 import type { DomainProfile } from '../../src/types/deck';
 import { formatProfilePromptBlock, inferDomainProfile } from '../../src/utils/domainProfiles';
 import {
@@ -46,6 +46,128 @@ function createRequestAbortSignal(req: Request, res: Response, maxMs: number): {
       req.off('aborted', onClose);
     },
   };
+}
+
+function isSafeExternalImageUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal')
+    ) {
+      return false;
+    }
+    if (/^(127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return false;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type FetchedImageResult =
+  | { status: 'ok'; mimeType: string; data: string }
+  | { status: 'svg' }
+  | { status: 'broken'; reason: string }
+  | { status: 'fetch_error'; reason: string };
+
+async function resolveImageForMultimodalValidation(
+  imageSource: string,
+  parentSignal: AbortSignal
+): Promise<FetchedImageResult> {
+  const src = (imageSource || '').trim();
+  if (!src) return { status: 'broken', reason: 'Fonte de imagem vazia.' };
+
+  if (/^data:image\//i.test(src)) {
+    const match = src.match(/^data:(image\/[a-zA-Z0-9+.-]+)(?:;[^,]*)?;base64,(.+)$/i);
+    if (!match) {
+      return { status: 'broken', reason: 'Data URI de imagem inválido.' };
+    }
+    let mimeType = match[1].toLowerCase();
+    if (mimeType === 'image/jpg') mimeType = 'image/jpeg';
+    if (mimeType.includes('svg')) return { status: 'svg' };
+    if (!/^image\/(?:jpeg|png|webp|gif)$/.test(mimeType)) {
+      return { status: 'fetch_error', reason: `MIME não suportado para visão: ${mimeType}` };
+    }
+    const base64Body = match[2].replace(/\s+/g, '');
+    if (base64Body.length > 8_200_000) {
+      return { status: 'fetch_error', reason: 'Imagem base64 excede limite de 6MB.' };
+    }
+    return { status: 'ok', mimeType, data: base64Body };
+  }
+
+  if (!isSafeExternalImageUrl(src)) {
+    return { status: 'broken', reason: 'URL de imagem externa inválida ou bloqueada.' };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('Image fetch timeout')), 8500);
+  const onParentAbort = () => controller.abort(parentSignal.reason);
+  if (parentSignal.aborted) {
+    clearTimeout(timer);
+    return { status: 'fetch_error', reason: 'Requisição abortada.' };
+  }
+  parentSignal.addEventListener('abort', onParentAbort, { once: true });
+
+  try {
+    const upstream = await fetch(src, {
+      headers: {
+        'User-Agent':
+          'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
+        Accept: 'image/jpeg,image/png,image/webp,image/gif,image/*;q=0.8',
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+
+    if (upstream.status === 404 || upstream.status === 410) {
+      return { status: 'broken', reason: `URL retornou HTTP ${upstream.status}.` };
+    }
+    if (!upstream.ok) {
+      return { status: 'fetch_error', reason: `Falha temporária ao baixar imagem (HTTP ${upstream.status}).` };
+    }
+
+    let contentType = (upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (contentType === 'image/jpg') contentType = 'image/jpeg';
+    if (contentType.includes('svg')) return { status: 'svg' };
+
+    if (!contentType.startsWith('image/')) {
+      if (contentType.includes('text/html') || contentType.includes('application/json')) {
+        return { status: 'broken', reason: `URL retornou ${contentType} em vez de imagem.` };
+      }
+      if (/\.png(?:\?|$)/i.test(src)) contentType = 'image/png';
+      else if (/\.webp(?:\?|$)/i.test(src)) contentType = 'image/webp';
+      else if (/\.gif(?:\?|$)/i.test(src)) contentType = 'image/gif';
+      else if (/\.jpe?g(?:\?|$)/i.test(src)) contentType = 'image/jpeg';
+      else return { status: 'broken', reason: 'Conteúdo retornado não é imagem raster.' };
+    }
+
+    if (!/^image\/(?:jpeg|png|webp|gif)$/.test(contentType)) {
+      return { status: 'fetch_error', reason: `Formato de imagem não suportado: ${contentType}` };
+    }
+
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    if (buf.length < 256) {
+      return { status: 'broken', reason: 'Arquivo de imagem vazio ou corrompido.' };
+    }
+    if (buf.length > 6 * 1024 * 1024) {
+      return { status: 'fetch_error', reason: 'Imagem externa excede 6MB.' };
+    }
+    return { status: 'ok', mimeType: contentType, data: buf.toString('base64') };
+  } catch (err: unknown) {
+    return {
+      status: 'fetch_error',
+      reason: err instanceof Error ? err.message : 'Erro ao baixar imagem externa.',
+    };
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener('abort', onParentAbort);
+  }
 }
 
 function resolveEffectiveDomainProfile(
@@ -1015,6 +1137,161 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
           error,
           'Erro ao analisar cards para sugestão proativa de imagens.'
         ),
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  // Validação Multimodal com Gemini Flash — Inspeciona pixels reais da imagem (PDF ou Web)
+  router.post('/validate-image', async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 35_000);
+    try {
+      const {
+        imageSource = '',
+        cardTopic = '',
+        cardQuestion = '',
+        cardAnswer = '',
+        cardHint = '',
+        imageMode = 'feedback',
+        captionHint = '',
+        model: requestedModel,
+      } = req.body || {};
+
+      if (!imageSource || typeof imageSource !== 'string') {
+        return res.status(400).json({ error: 'imageSource ausente.' });
+      }
+
+      const resolvedMedia = await resolveImageForMultimodalValidation(imageSource, signal);
+      if (signal.aborted || res.writableEnded) return;
+
+      if (resolvedMedia.status === 'broken') {
+        return res.json({
+          validated: true,
+          isCompatible: false,
+          detectedModality: 'broken',
+          conflictReason: resolvedMedia.reason,
+          visualLegend: '',
+        });
+      }
+
+      if (resolvedMedia.status !== 'ok') {
+        return res.json({
+          validated: false,
+          fallback: true,
+          isCompatible: true,
+          detectedModality: 'unverified',
+          conflictReason: '',
+          visualLegend: '',
+        });
+      }
+
+      if (parseGeminiApiKeys().length === 0) {
+        return res.json({
+          validated: false,
+          fallback: true,
+          isCompatible: true,
+          detectedModality: 'unverified',
+          conflictReason: '',
+          visualLegend: '',
+        });
+      }
+
+      const activeModel = resolveGeminiModel(requestedModel);
+      const safeMode = imageMode === 'recognition' ? 'recognition' : 'feedback';
+
+      const prompt = `Você é um preceptor médico auditando visualmente uma imagem candidata a ser anexada a um flashcard do Internato.
+Analise EXCLUSIVAMENTE OS PIXELS REAIS DA IMAGEM ANEXADA (não confie em suposições do texto se os pixels mostrarem outra modalidade!).
+
+CONTEXTO DO FLASHCARD:
+- Tópico: "${sanitizeCardTextForPrompt(cardTopic, 90)}"
+- Modo de exibição: "${safeMode}" (${safeMode === 'recognition' ? 'imagem na FRENTE — proibido dar spoiler da resposta na legenda!' : 'imagem no VERSO/comentário'})
+- Pergunta: "${sanitizeCardTextForPrompt(cardQuestion, 240)}"
+- Resposta esperada: "${sanitizeCardTextForPrompt(cardAnswer, 130)}"
+- Comentário: "${sanitizeCardTextForPrompt(cardHint, 180)}"
+${captionHint ? `- Legenda/nota extraída próxima à figura: "${sanitizeCardTextForPrompt(captionHint, 140)}"` : ''}
+
+REGRAS DE INSPEÇÃO VISUAL:
+1. "detectedModality": nomeie a modalidade real visível nos pixels (ex.: "usg", "videolaparoscopia", "ecg", "radiografia", "tomografia", "ctg", "dermatoscopia", "histologia", "fluxograma", "foto_clinica", "esquema", "irrelevante_logo").
+2. "isCompatible":
+   - Retorne FALSE se houver conflito de modalidade entre o que o card solicita/descreve e o que aparece na imagem (ex.: card pede USG/ultrassonografia e a imagem é videolaparoscopia/cirurgia, ou card pede ECG e a imagem é anatomia/retrato/logo/capa de aula).
+   - Retorne FALSE se a imagem for ilegível, logomarca, retrato de autor, texto puro genérico sem valor clínico ou claramente de outra doença incompatível.
+   - Retorne TRUE apenas se os pixels realmente representarem uma figura clínica compatível e útil para este card.
+3. "conflictReason": explicação objetiva curta caso isCompatible=false (ou "" se compatível).
+4. "visualLegend": descreva fielmente em Português do Brasil (entre 8 e 24 palavras, MÍNIMO 6 palavras, sem iniciar com "Legenda visual:") APENAS o que está visível na imagem real. Se mode="recognition", descreva os achados visuais sem entregar o termo diagnóstico da resposta esperada.`;
+
+      const result = await withGeminiKeyRotation(
+        (ai) =>
+          generateContentWithRetry(
+            ai,
+            {
+              model: activeModel,
+              contents: {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: resolvedMedia.mimeType,
+                      data: resolvedMedia.data,
+                    },
+                  },
+                  { text: prompt },
+                ],
+              },
+              config: {
+                responseMimeType: 'application/json',
+                maxOutputTokens: 1024,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    detectedModality: { type: Type.STRING },
+                    isCompatible: { type: Type.BOOLEAN },
+                    conflictReason: { type: Type.STRING },
+                    visualLegend: { type: Type.STRING },
+                  },
+                  required: ['detectedModality', 'isCompatible', 'visualLegend'],
+                },
+              },
+            },
+            { signal, timeoutMs: 22_000, enableModelFallback: true }
+          ),
+        signal
+      );
+
+      if (res.writableEnded) return;
+      const parsed = JSON.parse(extractJsonBlock(result.text || '{}')) as {
+        detectedModality?: unknown;
+        isCompatible?: unknown;
+        conflictReason?: unknown;
+        visualLegend?: unknown;
+      };
+
+      const detectedModality = String(parsed.detectedModality || 'clinical_image').trim().slice(0, 60);
+      const isCompatible = parsed.isCompatible !== false;
+      const conflictReason = String(parsed.conflictReason || '').trim().slice(0, 220);
+      const visualLegend = String(parsed.visualLegend || '')
+        .replace(/^legenda\s+visual\s*:\s*/i, '')
+        .trim()
+        .slice(0, 220);
+
+      return res.json({
+        validated: true,
+        isCompatible,
+        detectedModality,
+        conflictReason,
+        visualLegend,
+        modelUsed: result.modelUsed,
+      });
+    } catch (error: unknown) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        validated: false,
+        fallback: true,
+        isCompatible: true,
+        detectedModality: 'unverified',
+        conflictReason: '',
+        visualLegend: '',
+        error: formatGeminiError(error, 'Falha na validação multimodal da imagem.'),
       });
     } finally {
       cleanup();
