@@ -5,6 +5,7 @@ import {
   DeckCurationStats,
   DomainProfile,
   ExtractedDeckMetadata,
+  GeminiModelOption,
   UploadedPdfFile,
 } from '../types/deck';
 import { buildGenericClinicalMap } from '../data/demoDecks';
@@ -31,6 +32,7 @@ export function useBatchDeckGenerator(params: {
   deckKey: string;
   setDeckKey: React.Dispatch<React.SetStateAction<string>>;
   selectedProfile: 'auto' | DomainProfile;
+  selectedModel?: GeminiModelOption;
   useGoogleSearch: boolean;
   extractedMeta: ExtractedDeckMetadata;
   clinicalMap: ClinicalMapResponse | null;
@@ -47,6 +49,7 @@ export function useBatchDeckGenerator(params: {
     deckKey,
     setDeckKey,
     selectedProfile,
+    selectedModel = 'gemini-4-hydrogen',
     useGoogleSearch,
     extractedMeta,
     clinicalMap,
@@ -254,6 +257,7 @@ export function useBatchDeckGenerator(params: {
           pdfs: serializePdfsForApi(preparedPdfs),
           existingJsonSummary: existingSummary,
           useGoogleSearch,
+          model: selectedModel,
         }),
         timeoutMs: 165_000,
         signal: controller.signal,
@@ -329,6 +333,7 @@ export function useBatchDeckGenerator(params: {
             profile: clinicalMap.profile || selectedProfile,
             focusQuery: (focusQuery || '').trim(),
             existingUpdates: clinicalMap.guidelineUpdates || [],
+            model: selectedModel,
           }),
           timeoutMs: 110_000,
         });
@@ -497,6 +502,7 @@ export function useBatchDeckGenerator(params: {
                   totalBatches,
                   nextNewIdStart: batchNewIdStart,
                   deckOutline,
+                  model: selectedModel,
                 }),
                 timeoutMs: 185_000,
                 signal: controller.signal,
@@ -567,6 +573,7 @@ export function useBatchDeckGenerator(params: {
                   rebuiltCards: allRebuiltNotes,
                   pdfImagesCatalog,
                   nextNewIdStart: gapNewIdStart,
+                  model: selectedModel,
                 }),
                 timeoutMs: 145_000,
                 signal: controller.signal,
@@ -609,6 +616,7 @@ export function useBatchDeckGenerator(params: {
               pdfImagesCatalog,
               clinicalMap: activeMap,
               existingMetadata: extractedMeta,
+              model: selectedModel,
             }),
             timeoutMs: 185_000,
             signal: controller.signal,
@@ -729,6 +737,7 @@ export function useBatchDeckGenerator(params: {
             ...f.card,
             warnings: f.lint.warnings.map((w) => w.message),
           })),
+          model: selectedModel,
         }),
         timeoutMs: 145_000,
         signal: controller.signal,

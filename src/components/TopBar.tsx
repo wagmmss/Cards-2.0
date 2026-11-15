@@ -1,10 +1,13 @@
 import React from 'react';
 import { Download, PackageCheck } from 'lucide-react';
+import type { GeminiModelOption } from '../types/deck';
 import { sanitizeDeckKey } from '../utils/apiClient';
 
 interface TopBarProps {
   deckKey: string;
   cardCount: number;
+  selectedModel?: GeminiModelOption;
+  onSelectModel?: (model: GeminiModelOption) => void;
   onDownloadJson: () => void;
   onExportApkg: () => void;
   isExportingApkg?: boolean;
@@ -13,6 +16,8 @@ interface TopBarProps {
 export const TopBar: React.FC<TopBarProps> = ({
   deckKey,
   cardCount,
+  selectedModel = 'gemini-4-hydrogen',
+  onSelectModel,
   onDownloadJson,
   onExportApkg,
   isExportingApkg = false,
@@ -60,6 +65,39 @@ export const TopBar: React.FC<TopBarProps> = ({
         </nav>
 
         <div className="flex items-center gap-2 shrink-0">
+          {onSelectModel && (
+            <div
+              role="group"
+              aria-label="Modelo Gemini"
+              className="hidden sm:inline-flex items-center p-0.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-medium"
+            >
+              <button
+                type="button"
+                onClick={() => onSelectModel('gemini-4-hydrogen')}
+                title="Gemini 4 Hydrogen (maior profundidade clínica)"
+                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                  selectedModel === 'gemini-4-hydrogen'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                }`}
+              >
+                Hydrogen
+              </button>
+              <button
+                type="button"
+                onClick={() => onSelectModel('gemini-3.8-flash')}
+                title="Gemini 3.8 Flash (mais rápido e econômico em cota)"
+                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                  selectedModel === 'gemini-3.8-flash'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                }`}
+              >
+                Flash
+              </button>
+            </div>
+          )}
+
           <button
             type="button"
             onClick={onDownloadJson}

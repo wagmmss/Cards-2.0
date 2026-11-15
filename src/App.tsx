@@ -15,6 +15,7 @@ import {
   DeckCurationStats,
   DomainProfile,
   ExtractedDeckMetadata,
+  GeminiModelOption,
   PriorityLevel,
   UploadedPdfFile,
 } from './types/deck';
@@ -58,6 +59,7 @@ export default function App() {
   );
   const [deckKey, setDeckKey] = useState<string>(() => initialSaved?.deckKey || '');
   const [selectedProfile, setSelectedProfile] = useState<'auto' | DomainProfile>('auto');
+  const [selectedModel, setSelectedModel] = useState<GeminiModelOption>('gemini-4-hydrogen');
   const [useGoogleSearch, setUseGoogleSearch] = useState<boolean>(true);
 
   const [clinicalMap, setClinicalMap] = useState<ClinicalMapResponse | null>(
@@ -127,6 +129,7 @@ export default function App() {
     deckKey,
     setDeckKey,
     selectedProfile,
+    selectedModel,
     useGoogleSearch,
     extractedMeta,
     clinicalMap,
@@ -468,6 +471,8 @@ export default function App() {
       <TopBar
         deckKey={deckKey}
         cardCount={cards.length}
+        selectedModel={selectedModel}
+        onSelectModel={setSelectedModel}
         onDownloadJson={handleDownloadJson}
         onExportApkg={() => void handleExportApkg()}
         isExportingApkg={isExportingApkg}

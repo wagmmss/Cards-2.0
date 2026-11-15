@@ -381,6 +381,17 @@ async function withTimeoutAndAbort<T>(
 
 export const PRIMARY_GEMINI_MODEL = 'gemini-4-hydrogen';
 export const FALLBACK_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const ALLOWED_GEMINI_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.8-flash']);
+
+export function resolveGeminiModel(requestedModel: unknown): string {
+  if (typeof requestedModel === 'string') {
+    const clean = requestedModel.trim();
+    if (ALLOWED_GEMINI_MODELS.has(clean)) {
+      return clean;
+    }
+  }
+  return PRIMARY_GEMINI_MODEL;
+}
 
 export interface GenerateWithRetryOptions {
   signal?: AbortSignal;

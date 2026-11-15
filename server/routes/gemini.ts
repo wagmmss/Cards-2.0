@@ -15,6 +15,7 @@ import {
   parseOrRecoverNotesJsonWithMeta,
   PRIMARY_GEMINI_MODEL,
   resolveDocumentPartsForGemini,
+  resolveGeminiModel,
   sanitizeCardTextForPrompt,
   uploadSinglePdfToGeminiFiles,
   withGeminiKeyRotation,
@@ -159,7 +160,9 @@ export function createGeminiRouter(): express.Router {
         pdfs = [],
         existingJsonSummary = '',
         useGoogleSearch = true,
+        model: requestedModel,
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
 
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
@@ -201,7 +204,7 @@ Organize a resposta em tópicos objetivos por eixo, sempre citando a fonte e o a
               generateContentWithRetry(
                 ai,
                 {
-                  model: PRIMARY_GEMINI_MODEL,
+                  model: activeModel,
                   contents: searchPrompt,
                   config: {
                     maxOutputTokens: 16384,
@@ -283,7 +286,7 @@ Gere entre 10 e 16 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil
         return generateContentWithRetry(
           ai,
           {
-            model: PRIMARY_GEMINI_MODEL,
+            model: activeModel,
             contents: { parts },
             config: {
               systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -345,7 +348,9 @@ Gere entre 10 e 16 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil
         profile = 'auto',
         focusQuery = '',
         existingUpdates = [],
+        model: requestedModel,
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
 
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
@@ -375,7 +380,7 @@ Pesquise no Google Search diretrizes oficiais (MS/PCDT, FEBRASGO, SBC, SBP, AMB,
           generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: searchPrompt,
               config: {
                 maxOutputTokens: 12288,
@@ -411,7 +416,7 @@ Retorne EXCLUSIVAMENTE um JSON válido:
           generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: synthPrompt,
               config: {
                 responseMimeType: 'application/json',
@@ -464,7 +469,9 @@ Retorne EXCLUSIVAMENTE um JSON válido:
         totalBatches = 1,
         nextNewIdStart = null,
         deckOutline = null,
+        model: requestedModel,
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
 
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
@@ -510,7 +517,7 @@ Retorne EXCLUSIVAMENTE um JSON válido:
               .join('\n')
           : '';
 
-      let lastModelUsed = PRIMARY_GEMINI_MODEL;
+      let lastModelUsed = activeModel;
 
       const runDeckBatch = async (
         subsetCards: Array<Record<string, unknown>>,
@@ -600,7 +607,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
           return generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: { parts: [...parts, { text: prompt }] },
               config: {
                 systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -684,7 +691,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
         rebuiltCards = [],
         pdfImagesCatalog = [],
         nextNewIdStart = 171000200,
+        model: requestedModel,
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
 
       const checkedMapItems = Array.isArray(clinicalMap?.items)
         ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
@@ -752,7 +761,7 @@ Retorne EXCLUSIVAMENTE um JSON válido:
           generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: [{ text: prompt }],
               config: {
                 systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -787,7 +796,8 @@ Retorne EXCLUSIVAMENTE um JSON válido:
   router.post('/repair-cards', async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 180_000);
     try {
-      const { flaggedCards = [], deckKey = 'internato_deck' } = req.body || {};
+      const { flaggedCards = [], deckKey = 'internato_deck', model: requestedModel } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
 
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
@@ -832,7 +842,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
           generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: prompt,
               config: {
                 systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -876,7 +886,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
         deckKey = 'internato_deck',
         cards = [],
         pdfImagesCatalog = [],
+        model: requestedModel,
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
 
       const candidateCards = (Array.isArray(cards) ? cards : [])
         .filter((c: { question?: unknown; hint?: unknown }) => {
@@ -947,7 +959,7 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
           generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: prompt,
               config: {
                 responseMimeType: 'application/json',

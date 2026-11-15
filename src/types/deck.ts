@@ -4,6 +4,8 @@ export type DomainProfile =
   | 'ambulatorio'
   | 'cirurgico'
   | 'preventiva_normativo';
+
+export type GeminiModelOption = 'gemini-4-hydrogen' | 'gemini-3.8-flash';
 export type CardType = 'basic' | 'cloze';
 
 export interface ExamReference {

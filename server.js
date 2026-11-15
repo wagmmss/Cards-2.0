@@ -300,10 +300,16 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
   * **P2** = Decis\xE3o Diagn\xF3stica, Estadiamento, Escores e Reconhecimento Visual (exames reais em image_mode: "recognition", pontos de corte num\xE9ricos exatos, interpreta\xE7\xE3o de medidas/\xEDndices).
   * **P3** = Manejo Longitudinal / Seguimento / Preven\xE7\xE3o / Fluxo Operacional (tratamento de 1\xAA linha, popula\xE7\xF5es especiais, rastreamento, vacinas, reabilita\xE7\xE3o, prazos/fluxos documentais).
   * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Cl\xE1ssicas de Banca (mecanismos causais, pares confund\xEDveis, exce\xE7\xF5es normativas).
+- AVALIA\xC7\xC3O VISUAL PROATIVA EM TODOS OS CARDS (MATERIAIS ANEXADOS + WEB):
+  * N\xE3o se limite a manter ou trocar imagens que j\xE1 existiam no deck original. Para CADA card gerado ou reconstru\xEDdo, raciocine se um exame visual real (ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, esfrega\xE7o/l\xE2mina, foto semiol\xF3gica, fluxograma ou tabela cl\xEDnica) melhora significativamente a reten\xE7\xE3o e o racioc\xEDnio do estudante.
+  * Se existir uma figura compat\xEDvel no "CAT\xC1LOGO DE IMAGENS DOS MATERIAIS ANEXADOS" fornecido no prompt, insira <img src="pdfimg:ID_EXATO">.
+  * Se n\xE3o houver figura correspondente nos PDFs, mas o card ganhar valor com imagem cl\xEDnica real, insira <img src="buscar_imagem: termo cl\xEDnico espec\xEDfico em PT ou EN"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">, <img src="buscar_imagem: pneumotorax hipertensivo radiografia torax">).
+  * Coloque <img ...> na "question" ("image_mode": "recognition") quando o estudante precisa reconhecer o achado visual para responder; ou coloque no in\xEDcio do "hint" ("image_mode": "feedback", antes de <b>Coment\xE1rio:</b>) quando a imagem refor\xE7a a explica\xE7\xE3o, classifica\xE7\xE3o ou algoritmo sem entregar a resposta na frente.
+  * Em cards puramente normativos, de dose ou c\xE1lculo simples onde imagem n\xE3o acrescenta, N\xC3O force <img>.
 - FILTRO NEGATIVO ESTRITO: ZERO gen\xE9tica/biologia molecular de bancada sem impacto terap\xEAutico imediato, ZERO hist\xF3ria da medicina/datas e ZERO epidemiologia percentual solta que n\xE3o mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>).
 - PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X").
-- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
+- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
 function extractJsonBlock(text) {
   if (!text) return "{}";
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -486,6 +492,16 @@ async function withTimeoutAndAbort(promise, timeoutMs, signal, timeoutMessage = 
 }
 var PRIMARY_GEMINI_MODEL = "gemini-4-hydrogen";
 var FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite";
+var ALLOWED_GEMINI_MODELS = /* @__PURE__ */ new Set(["gemini-4-hydrogen", "gemini-3.8-flash"]);
+function resolveGeminiModel(requestedModel) {
+  if (typeof requestedModel === "string") {
+    const clean = requestedModel.trim();
+    if (ALLOWED_GEMINI_MODELS.has(clean)) {
+      return clean;
+    }
+  }
+  return PRIMARY_GEMINI_MODEL;
+}
 async function generateContentWithRetry(ai, params, options = {}) {
   const { signal, timeoutMs = 15e4, enableModelFallback = true } = options;
   const baseModel = params.model || PRIMARY_GEMINI_MODEL;
@@ -546,6 +562,7 @@ async function generateContentWithRetry(ai, params, options = {}) {
           let fullText = "";
           let finishReason;
           const groundingChunks = [];
+          const rawSearchQueries = [];
           for await (const chunk of stream) {
             if (signal?.aborted) {
               throw new DOMException("Opera\xE7\xE3o cancelada pelo usu\xE1rio.", "AbortError");
@@ -562,6 +579,14 @@ async function generateContentWithRetry(ai, params, options = {}) {
             if (Array.isArray(chunks) && chunks.length > 0) {
               groundingChunks.push(...chunks);
             }
+            const queries = cand?.groundingMetadata?.webSearchQueries;
+            if (Array.isArray(queries) && queries.length > 0) {
+              for (const q of queries) {
+                if (typeof q === "string" && q.trim()) {
+                  rawSearchQueries.push(q.trim());
+                }
+              }
+            }
           }
           const seen = /* @__PURE__ */ new Set();
           const groundingSources = [];
@@ -573,11 +598,13 @@ async function generateContentWithRetry(ai, params, options = {}) {
               groundingSources.push({ title, uri });
             }
           }
+          const searchQueries = Array.from(new Set(rawSearchQueries));
           return {
             text: fullText,
             finishReason,
             modelUsed: plan.model,
-            groundingSources
+            groundingSources,
+            searchQueries
           };
         })(),
         timeoutMs,
@@ -754,6 +781,36 @@ function resolveEffectiveDomainProfile(requestedProfile, deckKey, textHint = "")
   }
   return inferDomainProfile(deckKey, textHint);
 }
+function formatPdfImagesCatalogBlock(pdfImagesCatalog) {
+  if (!Array.isArray(pdfImagesCatalog) || pdfImagesCatalog.length === 0) {
+    return "";
+  }
+  const lines = pdfImagesCatalog.slice(0, 45).map((item) => {
+    const rec = item || {};
+    const id = sanitizeCardTextForPrompt(rec.id, 60);
+    if (!id) return null;
+    const pdfName = sanitizeCardTextForPrompt(rec.pdfName, 50) || "material.pdf";
+    const pageNum = Number(rec.pageNumber) || 1;
+    const caption = sanitizeCardTextForPrompt(rec.captionHint, 90);
+    const snippet = sanitizeCardTextForPrompt(rec.pageTextSnippet, 140);
+    const desc = [caption, snippet].filter(Boolean).join(" \u2014 ");
+    return `  * pdfimg:${id} | ${pdfName} (P\xE1g. ${pageNum})${desc ? ` | Contexto: ${desc}` : ""}`;
+  }).filter(Boolean);
+  if (lines.length === 0) return "";
+  return `
+CAT\xC1LOGO DE IMAGENS EXTRA\xCDDAS DOS MATERIAIS ANEXADOS (prefira <img src="pdfimg:ID_EXATO"> quando houver correspond\xEAncia cl\xEDnica; caso contr\xE1rio use <img src="buscar_imagem: termo cl\xEDnico">):
+${lines.join("\n")}
+`;
+}
+function formatVerifiedGuidelinesBlock(clinicalMap) {
+  const mapRec = clinicalMap || {};
+  const updates = Array.isArray(mapRec.guidelineUpdates) ? mapRec.guidelineUpdates.map((u) => sanitizeCardTextForPrompt(u, 280)).filter(Boolean).slice(0, 15) : [];
+  if (updates.length === 0) return "";
+  return `
+DIRETRIZES ATUALIZADAS VERIFICADAS (FONTE DE VERDADE CL\xCDNICA \u2014 aplique estas doses, esquemas e prazos nos cards):
+${updates.map((u) => `- ${u}`).join("\n")}
+`;
+}
 function createGeminiRouter() {
   const router = import_express.default.Router();
   router.post("/upload-file", async (req, res) => {
@@ -802,8 +859,10 @@ function createGeminiRouter() {
         profile = "auto",
         pdfs = [],
         existingJsonSummary = "",
-        useGoogleSearch = true
+        useGoogleSearch = true,
+        model: requestedModel
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
@@ -816,18 +875,74 @@ function createGeminiRouter() {
         existingJsonSummary
       );
       const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
-      const prompt = `Analise os documentos PDF anexados (se houver) e o tema m\xE9dico indicado pela Deck Key "${deckKey}".
-${existingJsonSummary ? `Resumo do deck atual enviado pelo usu\xE1rio:
+      let groundedDossierText = "";
+      let groundedSources = [];
+      let groundedSearchQueries = [];
+      let googleSearchUsed = false;
+      if (useGoogleSearch) {
+        const searchPrompt = `Realize m\xFAltiplas consultas no Google Search para levantar um dossi\xEA cl\xEDnico COMPLETO e ATUALIZADO (2023\u20132026) sobre o tema "${deckKey}" (perfil de dom\xEDnio: ${effectiveProfile}).
+${existingJsonSummary ? `Contexto resumido dos cards j\xE1 existentes no baralho:
 ${existingJsonSummary}
 ` : ""}
-${useGoogleSearch ? "Utilize o Google Search para verificar diretrizes atualizadas do Minist\xE9rio da Sa\xFAde (MS), Sociedades M\xE9dicas Brasileiras (FEBRASGO, SBC, SBP, SBGG, CBC, CFM, etc.), consensos internacionais recentes e refer\xEAncias de exames/normas aplic\xE1veis a este tema." : ""}
+PESQUISE OBRIGATORIAMENTE OS 6 EIXOS ABAIXO (use v\xE1rias buscas espec\xEDficas por fonte brasileira e internacional \u2014 Minist\xE9rio da Sa\xFAde / PCDT, FEBRASGO, SBC, SBP, SBGG, AMB, CFM, CDC, WHO):
+1. Diagn\xF3stico, crit\xE9rios classificat\xF3rios, estadiamento e pontos de corte laboratoriais/imagem atualizados.
+2. Tratamento de 1\xAA linha (drogas, doses exatas, via, intervalo e dura\xE7\xE3o) e crit\xE9rios claros de interna\xE7\xE3o vs. manejo ambulatorial.
+3. Regimes alternativos e popula\xE7\xF5es especiais (gestantes, lactantes, alergia a beta-lact\xE2micos/f\xE1rmaco-chave, disfun\xE7\xE3o renal/hep\xE1tica, pediatria/idoso).
+4. Profilaxias (PEP/PrEP/antibioticoprofilaxia/imuniza\xE7\xE3o), rastreamento e manejo de parcerias sexuais ou contactantes (janelas e prazos).
+5. Sinais de alarme, complica\xE7\xF5es graves, falha terap\xEAutica, tempo-depend\xEAncia e crit\xE9rios de retorno/seguimento.
+6. Normas \xE9ticas, legais e vigil\xE2ncia epidemiol\xF3gica (notifica\xE7\xE3o compuls\xF3ria imediata vs. semanal, prazos, sigilo, B.O./autoriza\xE7\xE3o judicial quando aplic\xE1vel).
 
+Organize a resposta em t\xF3picos objetivos por eixo, sempre citando a fonte e o ano da diretriz encontrada, doses completas e mudan\xE7as recentes de protocolo.`;
+        try {
+          const searchResult = await withGeminiKeyRotation(
+            (ai) => generateContentWithRetry(
+              ai,
+              {
+                model: activeModel,
+                contents: searchPrompt,
+                config: {
+                  maxOutputTokens: 16384,
+                  thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.MEDIUM },
+                  tools: [{ googleSearch: {} }]
+                }
+              },
+              { signal, timeoutMs: 85e3, enableModelFallback: true }
+            ),
+            signal
+          );
+          groundedDossierText = (searchResult.text || "").trim();
+          groundedSources = searchResult.groundingSources || [];
+          groundedSearchQueries = searchResult.searchQueries || [];
+          googleSearchUsed = groundedSources.length > 0 || groundedSearchQueries.length > 0 || groundedDossierText.length > 120;
+        } catch (searchErr) {
+          if (signal.aborted || !isRetryableGeminiError(searchErr)) {
+            throw searchErr;
+          }
+          console.warn(
+            "[clinical-map] Stage 1 googleSearch failed with retryable error, proceeding to Stage 2:",
+            extractErrorDetails(searchErr)
+          );
+        }
+      }
+      const dossierBlock = groundedDossierText ? `
+DOSSI\xCA CL\xCDNICO OBTIDO VIA GOOGLE SEARCH GROUNDING (USE ESTES DADOS E FONTES COMO BASE):
+${groundedDossierText.slice(0, 14e3)}
+` : "";
+      const prompt = `Analise os documentos PDF anexados (se houver), o dossi\xEA de diretrizes pesquisado e o tema m\xE9dico indicado pela Deck Key "${deckKey}".
+${existingJsonSummary ? `Resumo do deck atual enviado pelo usu\xE1rio:
+${existingJsonSummary}
+` : ""}${dossierBlock}
 ${profilePromptBlock}
 
 Gere um Mapa Cl\xEDnico estruturado segundo a Doutrina Internato-First (P1 a P4) ADAPTADA ESTRITAMENTE AO PERFIL DE DOM\xCDNIO "${effectiveProfile}" acima para guiar a cria\xE7\xE3o/recria\xE7\xE3o do deck.
 - N\xE3o force cen\xE1rio de "Sala Vermelha" nem vi\xE9s obst\xE9trico/de emerg\xEAncia se o tema pertencer a outro perfil!
 - Inclua em P2 conceitos de Reconhecimento Visual de exames/imagens reais da internet APENAS quando exames complementares visuais fizerem sentido para o tema (ex.: ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, l\xE2minas). Para temas normativos/\xE9tica/legais sem exame de imagem t\xEDpico, foque P2 em documenta\xE7\xE3o, prazos e interpreta\xE7\xE3o de medidas/indicadores.
 - Aplique o Filtro Negativo: exclua gen\xE9tica de bancada, hist\xF3ria da medicina e epidemiologia percentual que n\xE3o mude conduta.
+
+REQUISITO DE PROFUNDIDADE PARA "guidelineUpdates":
+- Retorne entre **7 e 12 pontos cl\xEDnicos detalhados, densos e acion\xE1veis** (NUNCA retorne apenas 2 ou 3 resumos gen\xE9ricos!).
+- Cubra m\xFAltiplos eixos do tema: diagn\xF3stico/pontos de corte, 1\xAA linha com doses e dura\xE7\xE3o exatas, crit\xE9rios de interna\xE7\xE3o/gravidade, regimes alternativos (gestante/alergia/disfun\xE7\xE3o org\xE2nica), profilaxias/parcerias/vacinas, complica\xE7\xF5es/seguimento e normas \xE9tico-legais/notifica\xE7\xE3o quando pertinente.
+- Formate cada item iniciando com "[Eixo \xB7 Fonte/Ano]: ..." (ex.: "[1\xAA Linha \xB7 PCDT IST/MS 2025]: ...").
 
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON) no seguinte formato exato:
 {
@@ -836,7 +951,12 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON
   "deckKey": "${deckKey}",
   "profile": "${effectiveProfile}",
   "guidelineUpdates": [
-    "Resumo objetivo de atualiza\xE7\xE3o de diretriz MS / Sociedade Brasileira / Norma CFM / Consenso com pontos de corte e condutas"
+    "[Diagn\xF3stico \xB7 Fonte/Ano]: Crit\xE9rio objetivo, escore ou ponto de corte que muda conduta...",
+    "[1\xAA Linha \xB7 Fonte/Ano]: Esquema completo com droga, dose, via, intervalo e dura\xE7\xE3o...",
+    "[Alternativa/Gestante \xB7 Fonte/Ano]: Op\xE7\xE3o segura ou ajuste na alergia/gesta\xE7\xE3o/disfun\xE7\xE3o...",
+    "[Profilaxia/Parcerias \xB7 Fonte/Ano]: Janela temporal, vacina/imunoglobulina ou tratamento de contactantes...",
+    "[Interna\xE7\xE3o/Alarme \xB7 Fonte/Ano]: Crit\xE9rios objetivos de interna\xE7\xE3o, falha terap\xEAutica ou gravidade...",
+    "[Vigil\xE2ncia/Norma \xB7 Fonte/Ano]: Notifica\xE7\xE3o compuls\xF3ria, prazo, sigilo ou fluxo legal aplic\xE1vel..."
   ],
   "items": [
     {
@@ -850,59 +970,30 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON
     }
   ]
 }
-Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
-      let result;
-      try {
-        result = await withGeminiKeyRotation(async (ai, keyFp) => {
-          const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
-          parts.push({ text: prompt });
-          return generateContentWithRetry(
-            ai,
-            {
-              model: PRIMARY_GEMINI_MODEL,
-              contents: { parts },
-              config: {
-                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-                maxOutputTokens: 32768,
-                thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH },
-                ...useGoogleSearch ? { tools: [{ googleSearch: {} }] } : { responseMimeType: "application/json" }
-              }
-            },
-            { signal, timeoutMs: 12e4, enableModelFallback: true }
-          );
-        }, signal);
-      } catch (primaryErr) {
-        if (!signal.aborted && useGoogleSearch && isRetryableGeminiError(primaryErr)) {
-          console.warn(
-            "[clinical-map] Retrying without googleSearch + ThinkingLevel.MEDIUM after primary failure:",
-            extractErrorDetails(primaryErr)
-          );
-          result = await withGeminiKeyRotation(async (ai, keyFp) => {
-            const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
-            parts.push({ text: prompt });
-            return generateContentWithRetry(
-              ai,
-              {
-                model: PRIMARY_GEMINI_MODEL,
-                contents: { parts },
-                config: {
-                  systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-                  maxOutputTokens: 32768,
-                  responseMimeType: "application/json",
-                  thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.MEDIUM }
-                }
-              },
-              { signal, timeoutMs: 9e4, enableModelFallback: true }
-            );
-          }, signal);
-        } else {
-          throw primaryErr;
-        }
-      }
+Gere entre 10 e 16 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
+      const result = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              maxOutputTokens: 32768,
+              responseMimeType: "application/json",
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.HIGH }
+            }
+          },
+          { signal, timeoutMs: 12e4, enableModelFallback: true }
+        );
+      }, signal);
       if (res.writableEnded) return;
       const rawText = result.text || "{}";
       const cleanedJson = extractJsonBlock(rawText);
       const parsed = JSON.parse(cleanedJson);
+      const mergedSources = groundedSources.length > 0 ? groundedSources : result.groundingSources.length > 0 ? result.groundingSources : parsed.groundingSources || [];
       return res.json({
         ...parsed,
         deckKey: parsed.deckKey || deckKey,
@@ -912,7 +1003,9 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfi
           existingJsonSummary
         ),
         modelUsed: result.modelUsed,
-        groundingSources: result.groundingSources.length > 0 ? result.groundingSources : parsed.groundingSources || []
+        groundingSources: mergedSources,
+        searchQueries: groundedSearchQueries.length > 0 ? groundedSearchQueries : result.searchQueries || [],
+        googleSearchUsed
       });
     } catch (error) {
       if (res.writableEnded) return;
@@ -924,20 +1017,119 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfi
       cleanup();
     }
   });
+  router.post("/deepen-guidelines", async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 12e4);
+    try {
+      const {
+        deckKey = "tema_clinico_internato",
+        themeTitle = "",
+        profile = "auto",
+        focusQuery = "",
+        existingUpdates = [],
+        model: requestedModel
+      } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
+        });
+      }
+      const effectiveProfile = resolveEffectiveDomainProfile(profile, deckKey, themeTitle);
+      const cleanExisting = Array.isArray(existingUpdates) ? existingUpdates.map((u) => sanitizeCardTextForPrompt(u, 220)).filter(Boolean).slice(0, 20) : [];
+      const cleanFocus = sanitizeCardTextForPrompt(focusQuery, 180);
+      const searchPrompt = `Voc\xEA \xE9 um preceptor m\xE9dico brasileiro atualizando diretrizes para prova de Resid\xEAncia (USP/Unicamp) e Internato via Google Search.
+Tema: "${themeTitle || deckKey}" (perfil: ${effectiveProfile}).
+${cleanFocus ? `FOCO SOLICITADO PELO USU\xC1RIO: "${cleanFocus}".` : "FOCO: Expanda subt\xF3picos cr\xEDticos ainda N\xC3O detalhados abaixo (ex.: esquemas de 2\xAA linha, gestantes/alergias, doses pedi\xE1tricas/ajuste renal, crit\xE9rios de interna\xE7\xE3o/alta, vacinas/rastreamento, complica\xE7\xF5es e atualiza\xE7\xF5es recentes 2024\u20132026)."}
+
+PONTOS J\xC1 COBERTOS (N\xC3O REPITA ESTES):
+${cleanExisting.length > 0 ? cleanExisting.map((u) => `- ${u}`).join("\n") : "(nenhum ainda)"}
+
+Pesquise no Google Search diretrizes oficiais (MS/PCDT, FEBRASGO, SBC, SBP, AMB, CFM, CDC, WHO) e traga de 5 a 8 NOVOS achados cl\xEDnicos objetivos com fonte, ano, doses exatas, pontos de corte e condutas espec\xEDficas.`;
+      const searchResult = await withGeminiKeyRotation(
+        (ai) => generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: searchPrompt,
+            config: {
+              maxOutputTokens: 12288,
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.MEDIUM },
+              tools: [{ googleSearch: {} }]
+            }
+          },
+          { signal, timeoutMs: 75e3, enableModelFallback: true }
+        ),
+        signal
+      );
+      if (signal.aborted || res.writableEnded) return;
+      const synthPrompt = `Extraia do dossi\xEA pesquisado abaixo entre 5 e 8 NOVOS pontos cl\xEDnicos concisos e de alto rendimento para o tema "${themeTitle || deckKey}", sem repetir nenhum dos pontos j\xE1 cobertos.
+Cada string deve seguir o padr\xE3o "[Eixo \xB7 Fonte/Ano]: recomenda\xE7\xE3o exata com doses, cortes ou prazos".
+
+PONTOS J\xC1 COBERTOS:
+${cleanExisting.map((u) => `- ${u}`).join("\n")}
+
+DOSSI\xCA PESQUISADO:
+${(searchResult.text || "").slice(0, 12e3)}
+
+Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
+{
+  "newUpdates": [
+    "[Eixo \xB7 Fonte/Ano]: ..."
+  ]
+}`;
+      const synthResult = await withGeminiKeyRotation(
+        (ai) => generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: synthPrompt,
+            config: {
+              responseMimeType: "application/json",
+              maxOutputTokens: 4096,
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.LOW }
+            }
+          },
+          { signal, timeoutMs: 4e4, enableModelFallback: true }
+        ),
+        signal
+      );
+      if (res.writableEnded) return;
+      const parsed = JSON.parse(extractJsonBlock(synthResult.text || "{}"));
+      const newUpdates = Array.isArray(parsed?.newUpdates) ? parsed.newUpdates.map((u) => String(u || "").trim()).filter(Boolean) : [];
+      return res.json({
+        newUpdates,
+        groundingSources: searchResult.groundingSources || [],
+        searchQueries: searchResult.searchQueries || [],
+        modelUsed: searchResult.modelUsed
+      });
+    } catch (error) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, "Erro ao aprofundar pesquisa de diretrizes no Google.")
+      });
+    } finally {
+      cleanup();
+    }
+  });
   router.post("/generate-deck", async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 3e5);
     try {
       const {
         deckKey = "tema_clinico_internato",
         pdfs = [],
+        pdfImagesCatalog = [],
         clinicalMap = null,
         existingMetadata = null,
         batchCards = null,
         batchIndex = 0,
         totalBatches = 1,
         nextNewIdStart = null,
-        deckOutline = null
+        deckOutline = null,
+        model: requestedModel
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
@@ -960,7 +1152,7 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfi
       const outlineText = Array.isArray(deckOutline) && deckOutline.length > 0 ? deckOutline.slice(0, 140).map(
         (item) => `  * Lote ${item.batch ?? "?"} | ID:${item.id ?? "?"} \u2014 ${sanitizeCardTextForPrompt(item.summary, 95)}`
       ).join("\n") : "";
-      let lastModelUsed = PRIMARY_GEMINI_MODEL;
+      let lastModelUsed = activeModel;
       const runDeckBatch = async (subsetCards, subsetNewIdStart, depth = 0) => {
         if (signal.aborted) {
           throw new DOMException("Opera\xE7\xE3o cancelada pelo usu\xE1rio.", "AbortError");
@@ -980,6 +1172,8 @@ Gere entre 8 e 14 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfi
   * Mantenha com seu "id" FSRS original todos os conceitos cl\xEDnicos verdadeiramente distintos de P1\u2013P4.
   * PODA ATIVA DE DUPLICATAS: Se dois cards neste lote ou no \xCDNDICE GLOBAL DE TODOS OS LOTES testarem exatamente a MESMA conduta/alvo redundante (ex.: m\xFAltiplos cards fechando "{{c1::48 a 72 horas}}" para retorno, ou dois cards distintos cobrando a mesma prescri\xE7\xE3o de alta de autoinjetor de adrenalina), **EXCLUA o ID duplicado** neste lote ou diferencie explicitamente o alvo cl\xEDnico. Tamb\xE9m exclua cards reprovados pelo Filtro Negativo.` : `MODO DE GERA\xC7\xC3O INTEGRAL DO BARALHO (${subsetCards.length} cards originais fornecidos):
 - Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos cl\xEDnicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Cl\xEDnico P1\u2013P4.`;
+        const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
+        const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
         const prompt = `Reconstrua profundamente e lapide o baralho can\xF4nico para o tema "${deckKey}".
 
 ${profilePromptBlock}
@@ -990,7 +1184,7 @@ DADOS DO BARALHO ANTIGO (COMPLETO COM PERGUNTA, RESPOSTA E COMENT\xC1RIO ORIGINA
 - Total de cards no baralho original: ${existingIds.length}
 - Primeiro novo ID exclusivo reservado para este lote (se precisar desmembrar algum card deste lote): ${subsetNewIdStart}
 - Tags de M\xEDdia Originais: ${JSON.stringify(mediaTags)}
-${outlineText ? `- \xCDNDICE GLOBAL DE TODOS OS LOTES (use para n\xE3o duplicar outros lotes nem transformar um card deste lote no tema de outro lote):
+${pdfCatalogBlock}${guidelinesBlock}${outlineText ? `- \xCDNDICE GLOBAL DE TODOS OS LOTES (use para n\xE3o duplicar outros lotes nem transformar um card deste lote no tema de outro lote):
 ${outlineText}
 ` : ""}- Cards Originais DESTE LOTE para Reconstru\xE7\xE3o Profunda:
 ${rawCardsSummary}
@@ -1006,11 +1200,18 @@ CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
 3. Se "cloze":
    - "question": cont\xE9m ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposi\xE7\xE3o pendurada no final, SEM "::dica" e SEM partir express\xF5es ao meio (ex.: proibido "{{c1::3 crit\xE9rios maiores e 1}} menor"). Mantenha a \xE2ncora cl\xEDnica enxuta e natural: N\xC3O invente idade nem tempo cronol\xF3gico artificial no enunciado quando a regra num\xE9rica \xE9 geral.
    - "answer": "" (string vazia).
-4. Zero M\xEDdias \xD3rf\xE3s, Posicionamento Correto e Coer\xEAncia Factual: NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>. Se o card original tiver <img src="..."> no "hint" (especialmente tabelas, algoritmos ou esquemas de resposta), MANTENHA a tag <img src="..."> e sua <i>Legenda</i> no IN\xCDCIO do "hint" ("<img ...><br><i>Legenda</i><br><br><b>Coment\xE1rio:</b> ..."), NUNCA movendo tabelas/esquemas para "question" nem colocando "<b>Coment\xE1rio:</b>" antes da imagem. Garanta 100% de coer\xEAncia num\xE9rica entre pergunta e hint.
+4. Racioc\xEDnio Visual Proativo (Materiais + Web), Zero M\xEDdias \xD3rf\xE3s e Posicionamento Correto:
+   - NUNCA invente nomes de arquivos locais inexistentes em <img src="..."> ou <audio>.
+   - Se o card original j\xE1 tiver <img src="..."> v\xE1lido no "hint" (especialmente tabelas, algoritmos ou esquemas de resposta), MANTENHA a tag <img src="..."> e sua <i>Legenda</i> no IN\xCDCIO do "hint" ("<img ...><br><i>Legenda</i><br><br><b>Coment\xE1rio:</b> ...").
+   - PROATIVO: Mesmo que o card original N\xC3O tenha imagem, avalie se ele se beneficia clinicamente de um ECG, radiografia, TC, USG, CTG, foto semiol\xF3gica/dermatoscopia, l\xE2mina ou fluxograma:
+     * Se houver imagem correspondente no CAT\xC1LOGO DE IMAGENS DOS MATERIAIS ANEXADOS acima, insira <img src="pdfimg:ID_EXATO">!
+     * Se n\xE3o houver no cat\xE1logo dos PDFs, insira <img src="buscar_imagem: query cl\xEDnica precisa"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">)!
+     * Use na "question" ("image_mode": "recognition") quando o aluno precisa interpretar a imagem para responder, ou no in\xEDcio do "hint" ("image_mode": "feedback") quando ela serve para feedback visual/fluxograma. N\xE3o force imagens em cards puramente te\xF3ricos/normativos sem valor visual.
+   - Garanta 100% de coer\xEAncia num\xE9rica entre pergunta e hint.
 5. Duplo Salto Cognitivo Impl\xEDcito: NUNCA fa\xE7a pergunta composta ("Qual o diagn\xF3stico e a conduta?"). Apresente o caso cl\xEDnico e pergunte apenas 1 decis\xE3o at\xF4mica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre par\xEAnteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve ter "<b>Coment\xE1rio:</b> " logo antes da explica\xE7\xE3o textual (se houver <img ...><br><i>Legenda</i>, coloque no in\xEDcio ANTES de "<b>Coment\xE1rio:</b> "), com 1 a 2 frases (180 a 300 caracteres vis\xEDveis no coment\xE1rio textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.
+8. "hint": deve ter "<b>Coment\xE1rio:</b> " logo antes da explica\xE7\xE3o textual (se houver <i>Legenda</i> ou <img ...>, coloque no in\xEDcio ANTES de "<b>Coment\xE1rio:</b> "), com 1 a 2 frases (180 a 300 caracteres vis\xEDveis no coment\xE1rio textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.
 9. N\xC3O inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
@@ -1033,7 +1234,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
           return generateContentWithRetry(
             ai,
             {
-              model: PRIMARY_GEMINI_MODEL,
+              model: activeModel,
               contents: { parts: [...parts, { text: prompt }] },
               config: {
                 systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -1101,8 +1302,11 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
         deckKey = "tema_clinico_internato",
         clinicalMap = null,
         rebuiltCards = [],
-        nextNewIdStart = 171000200
+        pdfImagesCatalog = [],
+        nextNewIdStart = 171000200,
+        model: requestedModel
       } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
       const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
       const effectiveProfile = resolveEffectiveDomainProfile(
         clinicalMap?.profile,
@@ -1122,13 +1326,15 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
       const existingDigest = Array.isArray(rebuiltCards) ? rebuiltCards.slice(0, 160).map(
         (c) => `- ID:${c.id ?? "?"} | ${sanitizeCardTextForPrompt(c.topic, 80)} | Q: "${sanitizeCardTextForPrompt(c.question, 180)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 90)}"` : ""}`
       ).join("\n") : "";
+      const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
       const prompt = `Audite a cobertura cl\xEDnica do baralho reconstru\xEDdo "${deckKey}" comparando-o com o Mapa Cl\xEDnico P1\u2013P4 aprovado para o perfil "${effectiveProfile}".
 
 ${profilePromptBlock}
 
 MAPA CL\xCDNICO APROVADO:
 ${JSON.stringify(checkedMapItems, null, 2)}
-
+${guidelinesBlock}${pdfCatalogBlock}
 CARDS J\xC1 GERADOS NOS LOTES:
 ${existingDigest || "Nenhum card gerado."}
 
@@ -1136,10 +1342,10 @@ TAREFA CIR\xDARGICA:
 - Identifique APENAS os conceitos essenciais do Mapa Cl\xEDnico que ficaram SEM UM CARD PR\xD3PRIO DEDICADO (uma men\xE7\xE3o passageira dentro do coment\xE1rio/"hint" ou lista lateral de outro card N\xC3O conta como card dedicado!).
 - Para cada lacuna real encontrada, crie 1 card at\xF4mico seguindo rigorosamente Andy Matuschak & Michael Nielsen, atribuindo IDs sequenciais a partir de ${nextNewIdStart}:
   * "topic": formato "Tema - Subtema" sem spoiler por palavra ou radical INCLUSIVE no prefixo antes de " - ".
-  * Para lacunas marcadas no mapa com "image_mode": "recognition" quando n\xE3o existir arquivo de imagem no acervo original, formule pergunta cl\xEDnica objetiva pelo achado esperado sem simular ou inventar <img>.
+  * Racioc\xEDnio visual proativo: se a lacuna envolve exame/les\xE3o/tra\xE7ado/algoritmo que ganhe reten\xE7\xE3o com imagem, use <img src="pdfimg:ID_EXATO"> (se presente no cat\xE1logo acima) ou <img src="buscar_imagem: query cl\xEDnica espec\xEDfica"> na "question" ("image_mode": "recognition") ou no in\xEDcio do "hint" ("image_mode": "feedback"). NUNCA invente arquivos locais.
   * Se "basic": "question" <= 45\u201350 palavras (vinheta ou pergunta causal), "answer" com 1 a 12 palavras terminado em ponto final (.), sem ";".
   * Se "cloze": exatamente 1 lacuna {{c1::...}} (1 a 5 palavras) e "answer": "".
-  * "hint": comece com "<b>Coment\xE1rio:</b> ", tenha entre 180 e 300 caracteres vis\xEDveis (medidos AP\xD3S "<b>Coment\xE1rio:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema.
+  * "hint": comece com "<b>Coment\xE1rio:</b> " (precedido por <i>Legenda</i> ou <img ...><br> quando aplic\xE1vel), tenha entre 180 e 300 caracteres vis\xEDveis (medidos AP\xD3S "<b>Coment\xE1rio:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema.
 - Se TODOS os conceitos do Mapa Cl\xEDnico j\xE1 possu\xEDrem card pr\xF3prio dedicado acima, retorne "notes": [].
 - NUNCA duplique conceitos j\xE1 cobertos nos cards existentes acima.
 - N\xC3O inclua o campo "sources".
@@ -1153,7 +1359,7 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
         (ai) => generateContentWithRetry(
           ai,
           {
-            model: PRIMARY_GEMINI_MODEL,
+            model: activeModel,
             contents: [{ text: prompt }],
             config: {
               systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -1185,7 +1391,8 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
   router.post("/repair-cards", async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 18e4);
     try {
-      const { flaggedCards = [], deckKey = "internato_deck" } = req.body || {};
+      const { flaggedCards = [], deckKey = "internato_deck", model: requestedModel } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
           fallback: true,
@@ -1225,7 +1432,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no formato:
         (ai) => generateContentWithRetry(
           ai,
           {
-            model: PRIMARY_GEMINI_MODEL,
+            model: activeModel,
             contents: prompt,
             config: {
               systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
@@ -1249,6 +1456,112 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no formato:
       return res.status(200).json({
         fallback: true,
         error: formatGeminiError(error, "Erro ao auto-reparar cards com Gemini.")
+      });
+    } finally {
+      cleanup();
+    }
+  });
+  router.post("/suggest-visual-cards", async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 13e4);
+    try {
+      const {
+        deckKey = "internato_deck",
+        cards = [],
+        pdfImagesCatalog = [],
+        model: requestedModel
+      } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
+      const candidateCards = (Array.isArray(cards) ? cards : []).filter((c) => {
+        const combined = `${String(c?.question || "")} ${String(c?.hint || "")}`;
+        return !/<img\b/i.test(combined);
+      }).slice(0, 40);
+      if (candidateCards.length === 0) {
+        return res.json({ deckKey, suggestions: [] });
+      }
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
+        });
+      }
+      const cardsDigest = candidateCards.map(
+        (c) => `- cardId: ${Number(c.id)} | type: ${c.type === "cloze" ? "cloze" : "basic"} | topic: "${sanitizeCardTextForPrompt(c.topic, 80)}" | Q: "${sanitizeCardTextForPrompt(c.question, 220)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 110)}"` : ""} | Hint: "${sanitizeCardTextForPrompt(c.hint, 200)}"`
+      ).join("\n");
+      const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
+      const prompt = `Voc\xEA \xE9 um preceptor de Internato analisando flashcards m\xE9dicos SEM imagem do deck "${deckKey}".
+Raciocine criticamente sobre QUAIS cards realmente se beneficiariam de uma imagem cl\xEDnica para aumentar a reten\xE7\xE3o (ex.: tra\xE7ado de ECG/CTG, radiografia, TC, USG, dermatoscopia/les\xE3o cut\xE2nea, fundoscopia, esfrega\xE7o/l\xE2mina, exame f\xEDsico/sinal semiol\xF3gico, fluxograma diagn\xF3stico ou figura presente nos materiais anexados).
+
+REGRAS ESTRITAS:
+1. N\xC3O sugira imagem para cards puramente conceituais, defini\xE7\xF5es \xE9ticas/normativas, doses isoladas ou c\xE1lculos simples onde uma figura seria decorativa ou aleat\xF3ria.
+2. Escolha o "mode" ideal:
+   - "recognition": coloque a imagem na FRENTE (question) quando ver o exame/tra\xE7ado/les\xE3o ajuda no reconhecimento cl\xEDnico (apenas em cards "basic" cujo enunciado n\xE3o vire spoiler).
+   - "feedback": coloque a imagem no VERSO (hint) quando ela ilustra/confirma o achado, classifica\xE7\xE3o, algoritmo ou compara\xE7\xE3o anat\xF4mica ap\xF3s o estudante responder (ideal para "cloze" e condutas).
+3. Se uma figura do CAT\xC1LOGO DE MATERIAIS ANEXADOS abaixo corresponder bem ao conceito do card, preencha "pdfImageId" com o ID exato (ex.: "pdfimg_123_p4_1" \u2014 sem o prefixo "pdfimg:"). Mesmo quando usar "pdfImageId", preencha "searchQuery" como fallback m\xE9dico preciso.
+4. "searchQuery": termo curto, espec\xEDfico e cl\xEDnico em portugu\xEAs ou ingl\xEAs com diagn\xF3stico + modalidade (ex.: "bloqueio de ramo direito V1 ECG", "pneumotorax hipertensivo radiografia torax", "cardiotocografia desaceleracao tardia"). NUNCA gere termos gen\xE9ricos ("exame medico", "paciente", "sintoma").
+5. "legend": 1 frase cl\xEDnica objetiva (m\xE1x. 130 chars) descrevendo o achado visual SEM dar spoiler caso seja "recognition".
+${pdfCatalogBlock}
+CARDS SEM IMAGEM PARA AVALIAR:
+${cardsDigest}
+
+Retorne EXCLUSIVAMENTE um JSON v\xE1lido no formato:
+{
+  "suggestions": [
+    {
+      "cardId": 171000101,
+      "mode": "recognition",
+      "pdfImageId": "",
+      "searchQuery": "diagnostico + modalidade exame",
+      "legend": "Exame complementar evidenciando...",
+      "reason": "Justificativa curta do ganho pedag\xF3gico"
+    }
+  ]
+}`;
+      const response = await withGeminiKeyRotation(
+        (ai) => generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              maxOutputTokens: 16384,
+              thinkingConfig: { thinkingLevel: import_genai2.ThinkingLevel.MEDIUM }
+            }
+          },
+          { signal, timeoutMs: 11e4, enableModelFallback: true }
+        ),
+        signal
+      );
+      if (res.writableEnded) return;
+      const parsed = JSON.parse(extractJsonBlock(response.text || "{}"));
+      const validIds = new Set(candidateCards.map((c) => Number(c.id)));
+      const rawList = Array.isArray(parsed?.suggestions) ? parsed.suggestions : Array.isArray(parsed) ? parsed : [];
+      const suggestions = rawList.map((item) => {
+        const cardId = Number(item.cardId);
+        const searchQuery = String(item.searchQuery || "").trim();
+        if (!Number.isFinite(cardId) || !validIds.has(cardId) || !searchQuery) {
+          return null;
+        }
+        const rawPdfId = String(item.pdfImageId || "").replace(/^pdfimg:\s*/i, "").trim();
+        const mode = item.mode === "recognition" ? "recognition" : "feedback";
+        return {
+          cardId,
+          mode,
+          ...rawPdfId ? { pdfImageId: rawPdfId } : {},
+          searchQuery: searchQuery.slice(0, 120),
+          legend: String(item.legend || "").trim().slice(0, 180),
+          reason: String(item.reason || "").trim().slice(0, 160)
+        };
+      }).filter((s) => s !== null);
+      return res.json({ deckKey, suggestions, modelUsed: response.modelUsed });
+    } catch (error) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(
+          error,
+          "Erro ao analisar cards para sugest\xE3o proativa de imagens."
+        )
       });
     } finally {
       cleanup();
@@ -1902,7 +2215,7 @@ var PT_TO_EN_MEDICAL_TERMS = [
   [/\bfratura|luxa[cç][aã]o|osteomielite|colles|monteggia\b/gi, "bone fracture dislocation radiograph x-ray"],
   [/\bleucemia|esfrega[cç]o|anemia\s+falciforme|drepan[oó]cito|bastonete\s+de\s+auer\b/gi, "peripheral blood smear microscopy hematology"]
 ];
-var BLOCKED_IMAGE_URL_PATTERN = /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot)/i;
+var BLOCKED_IMAGE_URL_PATTERN = /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid)/i;
 var WIKIMEDIA_USER_AGENT = "Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)";
 var MODALITY_KEYWORDS = [
   {
@@ -1980,6 +2293,7 @@ function tokenizeNormalized(text) {
 function scoreImageRelevance(candidate, context) {
   let score = 0;
   const queryContextText = [
+    context.answer || "",
     context.query,
     context.topic || "",
     context.question || "",
@@ -1999,7 +2313,7 @@ function scoreImageRelevance(candidate, context) {
         score += 36;
         expectedModalityMatched = true;
       } else {
-        score -= 8;
+        score -= 10;
       }
     }
   }
@@ -2011,11 +2325,16 @@ function scoreImageRelevance(candidate, context) {
       }
     }
   }
+  const answerTokens = new Set(tokenizeNormalized(context.answer || ""));
   const enTokens = new Set(tokenizeNormalized((context.enQueries || []).join(" ")));
   const ptTokens = new Set(
     tokenizeNormalized(`${context.query} ${context.topic || ""}`)
   );
   const candTokens = new Set(tokenizeNormalized(candidateText));
+  let answerHits = 0;
+  for (const tok of answerTokens) {
+    if (candTokens.has(tok)) answerHits++;
+  }
   let enHits = 0;
   for (const tok of enTokens) {
     if (candTokens.has(tok)) enHits++;
@@ -2024,13 +2343,16 @@ function scoreImageRelevance(candidate, context) {
   for (const tok of ptTokens) {
     if (candTokens.has(tok)) ptHits++;
   }
-  score += Math.min(35, enHits * 9 + ptHits * 6);
+  score += Math.min(44, answerHits * 11 + enHits * 9 + ptHits * 6);
+  if (!expectedModalityMatched && answerHits + enHits + ptHits === 0) {
+    score -= 28;
+  }
   const srcLower = `${candidate.source} ${candidate.fullUrl}`.toLowerCase();
   if (/litfl|lifeinthefastlane/.test(srcLower)) score += 24;
   else if (/radiopaedia/.test(srcLower)) score += 24;
   else if (/dermnet/.test(srcLower)) score += 22;
   else if (/pmc\.ncbi|ncbi\.nlm\.nih|scielo|nejm|bmj|openi/.test(srcLower)) score += 18;
-  else if (/wikipedia/.test(srcLower)) score += 14;
+  else if (/wikipedia/.test(srcLower)) score += 12;
   else if (/wikimedia/.test(srcLower)) score += 10;
   else if (/google/.test(srcLower)) score += 8;
   if (candidate.isSvg || /\.svg(?:\?|$)/i.test(candidate.thumbUrl)) {
@@ -2039,10 +2361,10 @@ function scoreImageRelevance(candidate, context) {
   if (/\b(diagram|schematic|flowchart|cartoon|illustration|map|chart|graph)\b/i.test(candidateText)) {
     score -= 14;
   }
-  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape)\b/i.test(candidateText)) {
+  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape|biography|scientist|inventor|nobel|pill|tablet|capsule|bottle|packaging|stethoscope|syringe|stock[\s_-]?photo)\b/i.test(candidateText)) {
     score -= 80;
   }
-  if (/\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|ultrasound)\b/i.test(queryContextText) && /\b(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histology|microscop)\b/i.test(candidateText)) {
+  if (/\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|tomografia|ultrasound|ultrassom|ultrassonografia|e-?fast)\b/i.test(queryContextText) && /(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histolog|microscop|diatom|microfossil|brightfield)/i.test(candidateText)) {
     score -= 90;
   }
   return score;
@@ -2167,10 +2489,41 @@ async function searchWikipediaMedicalImages(enQueries, ptQuery, signal) {
       });
       if (!pResp.ok) continue;
       const pData = await pResp.json();
+      const expectedTokenSet = new Set(
+        tokenizeNormalized([...enQueries, ptQuery].join(" ")).filter(
+          (tok) => !["medical", "clinical", "exam", "image", "photo", "sign"].includes(tok)
+        )
+      );
       const fileTitles = /* @__PURE__ */ new Set();
       for (const page of Object.values(pData.query?.pages || {})) {
+        const leadUrl = page.thumbnail?.source || page.original?.source;
+        const leadWidth = page.thumbnail?.width || page.original?.width || 400;
+        const leadHeight = page.thumbnail?.height || page.original?.height || 300;
+        if (leadUrl && leadWidth >= 200 && leadHeight >= 130 && !isSpamOrLogoImageUrl(leadUrl, page.title || "")) {
+          const canonicalKey = normalizeImageCanonicalKey(leadUrl, page.title || "");
+          if (!seenKeys.has(canonicalKey)) {
+            seenKeys.add(canonicalKey);
+            const safeSlug = (page.title || query).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 44);
+            results.push({
+              id: `wp-${lang}-lead-${page.pageid || results.length}`,
+              title: (page.title || query).slice(0, 85),
+              thumbUrl: leadUrl,
+              fullUrl: page.original?.source || leadUrl,
+              description: `Imagem principal do artigo m\xE9dico "${page.title || query}" (${lang}.wikipedia.org).`,
+              suggestedFilename: `${safeSlug || "wikipedia_med"}.jpg`,
+              defaultLegend: `Imagem cl\xEDnica referente a ${page.title || query}.`,
+              source: `Wikipedia Medical (${lang.toUpperCase()})`,
+              isSvg: leadUrl.toLowerCase().endsWith(".svg")
+            });
+          }
+        }
         for (const img of page.images || []) {
-          if (img.title && !isSpamOrLogoImageUrl(img.title, img.title)) {
+          if (!img.title || isSpamOrLogoImageUrl(img.title, img.title)) continue;
+          const fileToks = tokenizeNormalized(img.title);
+          const sharesToken = expectedTokenSet.size === 0 || fileToks.some((t) => expectedTokenSet.has(t)) || MODALITY_KEYWORDS.some(
+            (m) => m.ptEnTrigger.test(`${enQueries.join(" ")} ${ptQuery}`) && m.candidateMatch.test(img.title || "")
+          );
+          if (sharesToken) {
             fileTitles.add(img.title);
           }
         }
@@ -2552,6 +2905,7 @@ async function searchMedicalImages(ai, ctx) {
         query: rawSearch,
         topic,
         question,
+        answer,
         enQueries
       })
     };
@@ -2560,7 +2914,10 @@ async function searchMedicalImages(ai, ctx) {
       dedupedMap.set(key, scored);
     }
   }
-  const ranked = Array.from(dedupedMap.values()).filter((c) => (c.relevanceScore ?? 0) > 0).sort((a, b) => {
+  const allScored = Array.from(dedupedMap.values());
+  const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
+  const minThreshold = maxScore >= 18 ? 12 : 1;
+  const ranked = allScored.filter((c) => (c.relevanceScore ?? 0) >= minThreshold).sort((a, b) => {
     const aSvg = Boolean(a.isSvg);
     const bSvg = Boolean(b.isSvg);
     if (aSvg !== bSvg) return aSvg ? 1 : -1;
