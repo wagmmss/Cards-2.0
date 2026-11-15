@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   ChevronLeft,
@@ -10,6 +10,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { CanonicalCard, MedicalImageResult } from '../types/deck';
+import { sanitizeDeckKey, searchMedicalImagesApi } from '../utils/apiClient';
 import {
   applyResolvedWebImageToCard,
   resolveLocalMediaFilename,
@@ -55,19 +56,24 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [isSearchingGallery, setIsSearchingGallery] = useState(false);
   const [galleryQuery, setGalleryQuery] = useState('');
+  const searchAbortRef = useRef<AbortController | null>(null);
 
   const safeIndex = cards.length > 0 ? Math.min(currentIndex, cards.length - 1) : 0;
   const currentCard = cards[safeIndex] || null;
-  const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
+  const cleanDeckKey = sanitizeDeckKey(deckKey || 'deck');
 
   useEffect(() => {
     if (!isOpen || !currentCard) return;
+    searchAbortRef.current?.abort();
+    setIsSearchingGallery(false);
     setIsBackShown(false);
     setIsEditing(false);
     setGalleryQuery(currentCard.topic.replace(/\s*-\s*/g, ' ').trim());
+    return () => {
+      searchAbortRef.current?.abort();
+    };
   }, [safeIndex, isOpen]);
 
-  // Keyboard shortcuts: Space flips card, Left/Right arrows navigate
   useEffect(() => {
     if (!isOpen || isEditing) return;
 
@@ -107,33 +113,34 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
 
   const handleSearchAlternativeImages = async (customQuery?: string) => {
     const q = (customQuery ?? galleryQuery).trim() || currentCard.topic;
+    const cardSnapshot = currentCard;
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+
     setIsSearchingGallery(true);
     try {
-      const res = await fetch('/api/media/search-medical-images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const webImgs = await searchMedicalImagesApi(
+        {
           query: q,
-          topic: currentCard.topic,
-          question: stripHtml(currentCard.question),
-          hint: stripHtml(currentCard.hint),
+          topic: cardSnapshot.topic,
+          question: stripHtml(cardSnapshot.question),
+          hint: stripHtml(cardSnapshot.hint),
           preferGoogleGrounding: true,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const webImgs: MedicalImageResult[] = Array.isArray(data.images) ? data.images : [];
-        if (webImgs.length > 0) {
-          onUpdateCard({
-            ...currentCard,
-            imageAlternatives: webImgs.slice(0, 6),
-          });
-        }
+        },
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
+      if (webImgs.length > 0) {
+        onUpdateCard({
+          ...cardSnapshot,
+          imageAlternatives: webImgs.slice(0, 6),
+        });
       }
-    } catch {
-      // Keep existing alternatives
     } finally {
-      setIsSearchingGallery(false);
+      if (!controller.signal.aborted) {
+        setIsSearchingGallery(false);
+      }
     }
   };
 
@@ -193,7 +200,6 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 overflow-y-auto"
     >
       <div className="w-full max-w-3xl bg-[#0F1623] border border-slate-700 rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
-        {/* Modal Top Header */}
         <div className="px-5 py-3.5 bg-[#0B0F17] border-b border-slate-800 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 text-xs text-slate-300 tabular-nums">
             <span className="font-bold text-slate-100">
@@ -206,7 +212,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             {currentCard.imageVerified && (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="text-emerald-400 font-medium">✓ Aprovado</span>
+                <span className="text-emerald-400 font-medium">Aprovado</span>
               </>
             )}
           </div>
@@ -220,6 +226,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={onClose}
+              aria-label="Fechar revisão rápida"
               className="p-1 text-slate-400 hover:text-slate-100 cursor-pointer"
             >
               <X className="w-4 h-4" />
@@ -227,7 +234,6 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           </div>
         </div>
 
-        {/* Main Card Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1">
           {isEditing ? (
             <div className="space-y-3">
@@ -270,7 +276,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
               )}
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
-                  Comentário & Legenda (Hint)
+                  Comentário &amp; Legenda (Hint)
                 </label>
                 <textarea
                   rows={3}
@@ -284,12 +290,10 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             </div>
           ) : (
             <div className="space-y-4">
-              {/* Topic Header */}
               <div className="text-xs font-semibold uppercase tracking-wider text-sky-400">
                 {currentCard.topic}
               </div>
 
-              {/* FRENTE / VERSO Question */}
               <div
                 className="text-base text-slate-100 font-medium leading-relaxed [&_img]:mt-3 [&_img]:max-h-64 [&_img]:w-auto [&_img]:mx-auto [&_img]:rounded-lg [&_img]:border [&_img]:border-slate-700"
                 dangerouslySetInnerHTML={{
@@ -297,7 +301,6 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                 }}
               />
 
-              {/* VERSO Reveal */}
               {isBackShown ? (
                 <div className="pt-4 border-t border-slate-800 space-y-3">
                   {currentCard.type === 'basic' && (
@@ -321,24 +324,23 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                     className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded-lg cursor-pointer transition-colors"
                   >
                     <Eye className="w-4 h-4" />
-                    <span>Mostrar Resposta (Barra de Espaço)</span>
+                    <span>Mostrar Resposta (Espaço)</span>
                   </button>
                 </div>
               )}
             </div>
           )}
 
-          {/* Galeria de Troca Rápida Online (4–6 Miniaturas Alternativas em 1 clique) */}
           {(hasImageInCard || alternatives.length > 0) && (
             <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-200">
-                  Galeria de Troca Rápida Online (1 clique para substituir imagem)
+                  Troca Rápida de Imagem (1 clique)
                 </span>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    handleSearchAlternativeImages(galleryQuery);
+                    void handleSearchAlternativeImages(galleryQuery);
                   }}
                   className="flex items-center gap-1.5"
                 >
@@ -346,20 +348,20 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                     type="text"
                     value={galleryQuery}
                     onChange={(e) => setGalleryQuery(e.target.value)}
-                    placeholder="Buscar no Google Imagens..."
+                    placeholder="Buscar imagem médica..."
                     className="px-2.5 py-1 text-xs bg-slate-900 border border-slate-700 rounded text-slate-100 w-48"
                   />
                   <button
                     type="submit"
                     disabled={isSearchingGallery}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-sky-400 hover:bg-sky-300 rounded cursor-pointer whitespace-nowrap shrink-0"
                   >
                     {isSearchingGallery ? (
                       <RefreshCw className="w-3 h-3 animate-spin" />
                     ) : (
                       <Search className="w-3 h-3" />
                     )}
-                    <span>Google/Web</span>
+                    <span>Buscar Web</span>
                   </button>
                 </form>
               </div>
@@ -386,26 +388,25 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           )}
         </div>
 
-        {/* Modal Footer Controls */}
         <div className="px-5 py-3.5 bg-[#0B0F17] border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
               type="button"
               disabled={safeIndex === 0}
               onClick={() => setCurrentIndex(Math.max(0, safeIndex - 1))}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Anterior (←)</span>
+              <span>Anterior</span>
             </button>
 
             <button
               type="button"
               disabled={safeIndex >= cards.length - 1}
               onClick={() => setCurrentIndex(Math.min(cards.length - 1, safeIndex + 1))}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
             >
-              <span>Próximo (→)</span>
+              <span>Próximo</span>
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -414,7 +415,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={() => setIsEditing((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
             >
               <Edit3 className="w-3.5 h-3.5" />
               <span>{isEditing ? 'Concluir Edição' : 'Editar Texto'}</span>
@@ -423,10 +424,10 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={handleApproveAndNext}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer whitespace-nowrap"
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>✓ Aprovar & Próximo</span>
+              <span>Aprovar &amp; Próximo</span>
             </button>
           </div>
         </div>

@@ -1,0 +1,593 @@
+import crypto from 'crypto';
+import {
+  createPartFromUri,
+  GenerateContentResponse,
+  GoogleGenAI,
+  Part,
+  ThinkingLevel,
+} from '@google/genai';
+
+export function getAiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    return null;
+  }
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      timeout: 180_000,
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+export const INTERNATO_SYSTEM_INSTRUCTION = `Você é o "Internato-First Card Architect (USP/Unicamp + FSRS)", um preceptor sênior do Internato da FMUSP e Unicamp e especialista em design de prompts de repetição espaçada segundo **Andy Matuschak ("How to write good prompts: using spaced repetition to create understanding" — https://andymatuschak.org/prompts/)** e **Michael Nielsen ("Augmenting Long-Term Memory" — https://augmentingcognition.com/ltm.html)**.
+
+SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSRS):
+
+1. AS 5 PROPRIEDADES DOS BONS PROMPTS DE ANDY MATUSCHAK (andymatuschak.org/prompts/):
+- **FOCUSED (Focado):** Cada prompt deve testar **um único detalhe ou alavanca decisória por vez**. NUNCA crie listas abertas ou conjuntos não-ordenados ("Quais são os critérios/causas/sintomas de X?", "Cite 3 causas...") nem respostas com múltiplos itens separados por ";". Se um conceito envolve uma lista/conjunto, isole o achado patognomônico/determinante ou transforme em prompts atômicos ancorados.
+- **PRECISE (Preciso):** O prompt deve ser inequívoco sobre o eixo exato cobrado (conduta de minuto zero, exame inicial de 1ª linha vs. padrão-ouro confirmatório, droga/dose de 1ª escolha, 2ª linha após falha, ou mecanismo causal). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?", "Como tratar?") que admitem múltiplas respostas verdadeiras.
+- **CONSISTENT (Consistente):** O prompt deve acionar exatamente o mesmo caminho neural de recuperação a cada revisão, evitando ambiguidade semântica.
+- **TRACTABLE (Tratável / Baixa Fricção Cognitiva):** O card deve poder ser respondido rapidamente (< 5–8 segundos) com alta confiabilidade. Em "basic", a resposta ("answer") deve ter de **1 a 12 palavras** (teto estrito de 15 palavras / 110 caracteres), terminada em ponto final (.), sem ";". Em "cloze", deve haver estritamente **1 única lacuna {{c1::...}}** de 1 a 5 palavras (máx 60 chars) e "answer": "".
+- **EFFORTFUL (Esforço Real de Recuperação & Anti-Pattern-Matching):** A recuperação deve exigir esforço genuíno da memória de longo prazo, NUNCA reconhecimento superficial da forma da frase:
+  - Enunciado ("question") enxuto (máx. 45 a 50 palavras) para evitar que o estudante decore o formato do parágrafo sem ler o raciocínio clínico.
+  - ZERO dicas acidentais, zero vazamento lexical/morfológico (radical) no campo "topic" (ex.: proibido "Manobras" no topic se a resposta começa com "Manobra de...", proibido "Pelvimetria" se a resposta é "plano zero"), zero spoilers entre parênteses e zero "::dica" dentro do cloze.
+
+2. COMPREENSÃO PROFUNDA & MEMÓRIA DE LONGO PRAZO DE MICHAEL NIELSEN (augmentingcognition.com/ltm.html):
+- **Proibição de Definições Inertes e Prompts Binários:** NUNCA crie perguntas passivas de dicionário ("O que é X?", "Defina X") nem prompts binários ("Sim/Não", "Verdadeiro/Falso").
+- **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Além de condutas em vinhetas clínicas, crie prompts que cobrem **o porquê fisiopatológico/mecanístico** ("Por que X ocorre?", "Como diferenciar A de B à beira-leito?", "Por que droga Y é contraindicada no contexto Z?"), construindo uma rede densa de compreensão em vez de decoreba isolada.
+- **Regra "More Than You Think" (Matuschak):** Quando um conceito P1/P2 for central para o Internato, ataque-o por múltiplos ângulos complementares (ex.: reconhecimento → conduta imediata → mecanismo/armadilha diferencial), cada um em seu próprio card focado.
+- **Prompts de Saliência Clínica (Salience Prompts):** Em cenários aplicados, apresente a situação concreta ([CENÁRIO + PERFIL/CONTEXTO] + [ACHADOS/SINAIS/DADOS]) para treinar o cérebro a reconhecer **quando** ativar aquele conhecimento na prática médica.
+
+3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
+- A quantidade final de cards deve refletir a cobertura clínica completa (P1 a P4) sem encher linguiça e **sem amputar conceitos essenciais**:
+  a) REFAZER EM VEZ DE DELETAR: Se um card antigo for uma lista aberta, pergunta vaga ou definição passiva sobre um conceito P1–P4 clinicamente útil (estadiamento, critério, esquema terapêutico, retorno, complicação, população especial ou diferencial), **NÃO o exclua**: reconstrua o conceito do zero segundo Matuschak & Nielsen preservando o "id" numérico original no card principal (para manter o histórico FSRS) e desmembrando em novos IDs (max_id + 1...) se houver mais de uma decisão atômica.
+  b) QUANDO PODAR (EXCLUIR IDs): Exclua um "id" original **APENAS** quando for: (i) duplicata semântica exata de outro card mantido, (ii) reprovado pelo Filtro Negativo (genética/biologia molecular de bancada sem impacto clínico, história/datas), ou (iii) preenchimento trivial sem alavanca clínica real.
+  c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais "por que/como") ou "cloze" (critérios numéricos, limiares, doses críticas e alvos em âncora clínica enxuta com 1 única lacuna {{c1::...}}). Em "cloze" de regra geral, NÃO force vinheta artificial com idade/tempo de uso quando isso não altera a conduta.
+- NÃO inclua o campo "sources" nos cards.
+
+4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4 ADAPTÁVEL POR PERFIL DE DOMÍNIO), IMAGENS FIDEDIGNAS E FORMATAÇÃO:
+- A matriz P1–P4 adapta-se dinamicamente ao **Perfil de Domínio** ativo do tema ("emergencia", "ambulatorio", "cirurgico", "preventiva_normativo"), conforme bloco de perfil fornecido em cada requisição:
+  * **P1** = Prioridade Máxima / Conduta Crítica do Perfil (emergência/minuto zero no perfil Emergência; indicação cirúrgica/choque/dano no Cirúrgico; indicação/contraindicação/critério diagnóstico no Ambulatorial; lei/sigilo/notificação/princípio ético-SUS no Preventiva/Normativo).
+  * **P2** = Decisão Diagnóstica, Estadiamento, Escores e Reconhecimento Visual (exames reais em image_mode: "recognition", pontos de corte numéricos exatos, interpretação de medidas/índices).
+  * **P3** = Manejo Longitudinal / Seguimento / Prevenção / Fluxo Operacional (tratamento de 1ª linha, populações especiais, rastreamento, vacinas, reabilitação, prazos/fluxos documentais).
+  * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Clássicas de Banca (mecanismos causais, pares confundíveis, exceções normativas).
+- FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato, ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
+- PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>).
+- PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X").
+- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.`;
+
+export function extractJsonBlock(text: string): string {
+  if (!text) return '{}';
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && fenced[1]) {
+    return fenced[1].trim();
+  }
+  const firstBrace = text.indexOf('{');
+  const firstBracket = text.indexOf('[');
+  if (firstBrace === -1 && firstBracket === -1) return text.trim();
+  if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
+    const lastBracket = text.lastIndexOf(']');
+    if (lastBracket > firstBracket) return text.slice(firstBracket, lastBracket + 1);
+  }
+  if (firstBrace !== -1) {
+    const lastBrace = text.lastIndexOf('}');
+    if (lastBrace > firstBrace) return text.slice(firstBrace, lastBrace + 1);
+  }
+  return text.trim();
+}
+
+export function sanitizeCardTextForPrompt(value: unknown, maxLen: number): string {
+  return String(value || '')
+    .replace(/src=["']data:image\/[^"']+["']/gi, 'src="[IMAGEM_EMBUTIDA]"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+export function buildFullCardsDigest(rawCards: Array<Record<string, unknown>>): string {
+  if (!Array.isArray(rawCards) || rawCards.length === 0) {
+    return 'Nenhum JSON anterior enviado.';
+  }
+  return rawCards
+    .map((c) => {
+      const id = c.id ?? '';
+      const type = c.type === 'cloze' ? 'cloze' : 'basic';
+      const priority = c.priority ? ` ${String(c.priority)}` : '';
+      const topic = sanitizeCardTextForPrompt(c.topic, 140);
+      const q = sanitizeCardTextForPrompt(c.question, 600);
+      const a = sanitizeCardTextForPrompt(c.answer, 250);
+      const h = sanitizeCardTextForPrompt(c.hint, 700);
+      return [
+        `- ID:${id} [${type}${priority}]`,
+        `  Topic: "${topic}"`,
+        `  Q: "${q}"`,
+        a ? `  A: "${a}"` : null,
+        h ? `  Hint: "${h}"` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .join('\n');
+}
+
+export function parseOrRecoverNotesJsonWithMeta(rawText: string): {
+  notes: Array<Record<string, unknown>>;
+  wasTruncated: boolean;
+} {
+  const cleanedJson = extractJsonBlock(rawText);
+  try {
+    const parsed = JSON.parse(cleanedJson);
+    if (Array.isArray(parsed)) return { notes: parsed, wasTruncated: false };
+    if (parsed && Array.isArray(parsed.notes)) {
+      return { notes: parsed.notes, wasTruncated: false };
+    }
+  } catch {
+    const recovered: Array<Record<string, unknown>> = [];
+    const objRegex = /\{[^{}]*"id"\s*:\s*\d+[^{}]*"question"\s*:\s*"[\s\S]*?"[^{}]*\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = objRegex.exec(rawText)) !== null) {
+      try {
+        const obj = JSON.parse(match[0]);
+        if (obj && typeof obj === 'object' && obj.question) {
+          recovered.push(obj);
+        }
+      } catch {
+        // skip malformed fragment
+      }
+    }
+    if (recovered.length > 0) return { notes: recovered, wasTruncated: true };
+    throw new Error('Resposta JSON truncada ou inválida do modelo.');
+  }
+  return { notes: [], wasTruncated: false };
+}
+
+export function extractErrorDetails(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const rec = current as { message?: unknown; code?: unknown; status?: unknown; cause?: unknown };
+    const codeStr = rec.code ? `[${String(rec.code)}]` : '';
+    const msgStr = typeof rec.message === 'string' ? rec.message.trim() : '';
+    const combined = [codeStr, msgStr].filter(Boolean).join(' ');
+    if (combined && !parts.includes(combined)) {
+      parts.push(combined);
+    }
+    current = rec.cause;
+  }
+  if (parts.length === 0 && error != null) {
+    parts.push(String(error));
+  }
+  return parts.join(' → ');
+}
+
+export function formatGeminiError(error: unknown, fallbackMessage: string): string {
+  const raw = extractErrorDetails(error) || fallbackMessage;
+  if (/AbortError|aborted|cancelado pelo usuário/i.test(raw)) {
+    return 'Operação cancelada pelo usuário.';
+  }
+  if (/402|prepayment credits are depleted|billing#prepay/i.test(raw)) {
+    return 'Créditos pré-pagos da chave Gemini esgotados (402). Troque a chave ou adicione créditos em AI Studio.';
+  }
+  if (/API_KEY_INVALID|PERMISSION_DENIED|403|401/i.test(raw)) {
+    return 'Chave GEMINI_API_KEY inválida ou sem permissão. Verifique a chave em Settings > Secrets.';
+  }
+  if (/503|UNAVAILABLE|high demand/i.test(raw)) {
+    return 'Servidor da API Gemini temporariamente sobrecarregado (503). Tente novamente em alguns segundos.';
+  }
+  if (/429|RESOURCE_EXHAUSTED|quota exceeded/i.test(raw)) {
+    const isDaily = /per day|PerDay|limit:\s*20/i.test(raw);
+    return isDaily
+      ? 'Cota diária da API Gemini esgotada (429). Aguarde a renovação da cota ou configure uma chave com faturamento.'
+      : 'Limite de requisições por minuto da API Gemini atingido (429). Aguarde alguns segundos e tente novamente.';
+  }
+  if (
+    /fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|socket hang up|other side closed|TimeoutError|timed out/i.test(
+      raw
+    )
+  ) {
+    return `Tempo limite ou falha de conexão com a API Gemini (${raw}). Tente novamente ou reduza a quantidade de PDFs simultâneos.`;
+  }
+  return raw || fallbackMessage;
+}
+
+export function isRetryableGeminiError(error: unknown): boolean {
+  const raw = extractErrorDetails(error);
+  if (/402|prepayment credits|PerDay|limit:\s*20|API_KEY_INVALID|PERMISSION_DENIED|AbortError|cancelado/i.test(raw)) {
+    return false;
+  }
+  return /fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|socket hang up|other side closed|network|terminated|503|502|504|500|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|429|RESOURCE_EXHAUSTED|TimeoutError|timed out/i.test(
+    raw
+  );
+}
+
+function isModelOverloadOrQuotaError(error: unknown): boolean {
+  const raw = extractErrorDetails(error);
+  return /429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|timed out|TimeoutError/i.test(
+    raw
+  );
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('Operação cancelada pelo usuário.', 'AbortError'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new DOMException('Operação cancelada pelo usuário.', 'AbortError'));
+    };
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function withTimeoutAndAbort<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  timeoutMessage = 'Tempo limite excedido na chamada à API Gemini.'
+): Promise<T> {
+  if (signal?.aborted) {
+    throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`TimeoutError: ${timeoutMessage}`));
+    }, timeoutMs);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new DOMException('Operação cancelada pelo usuário.', 'AbortError'));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (val) => {
+        cleanup();
+        resolve(val);
+      },
+      (err) => {
+        cleanup();
+        reject(err);
+      }
+    );
+  });
+}
+
+export const PRIMARY_GEMINI_MODEL = 'gemini-4-hydrogen';
+export const FALLBACK_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+
+export interface GenerateWithRetryOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  enableModelFallback?: boolean;
+}
+
+/**
+ * Executa geração em streaming com timeout explícito por tentativa, cancelamento por AbortSignal
+ * e fallback automático de modelo/thinkingLevel quando houver 429/503/sobrecarga.
+ */
+export async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  params: Parameters<GoogleGenAI['models']['generateContent']>[0],
+  options: GenerateWithRetryOptions = {}
+): Promise<{
+  text: string;
+  finishReason?: string;
+  modelUsed: string;
+  groundingSources: Array<{ title: string; uri: string }>;
+}> {
+  const { signal, timeoutMs = 150_000, enableModelFallback = true } = options;
+
+  const baseModel = params.model || PRIMARY_GEMINI_MODEL;
+  const baseThinking = params.config?.thinkingConfig?.thinkingLevel;
+
+  const attemptPlans: Array<{
+    model: string;
+    thinkingLevel?: ThinkingLevel;
+    delayBeforeMs: number;
+  }> = [
+    { model: baseModel, thinkingLevel: baseThinking, delayBeforeMs: 0 },
+    {
+      model: baseModel,
+      thinkingLevel:
+        baseThinking === ThinkingLevel.HIGH ? ThinkingLevel.MEDIUM : baseThinking,
+      delayBeforeMs: 1800,
+    },
+    ...(enableModelFallback
+      ? [
+          {
+            model: FALLBACK_GEMINI_MODEL,
+            thinkingLevel: ThinkingLevel.MEDIUM,
+            delayBeforeMs: 2500,
+          },
+          {
+            model: FALLBACK_GEMINI_MODEL,
+            thinkingLevel: ThinkingLevel.LOW,
+            delayBeforeMs: 3500,
+          },
+        ]
+      : [
+          {
+            model: baseModel,
+            thinkingLevel: ThinkingLevel.LOW,
+            delayBeforeMs: 4000,
+          },
+        ]),
+  ];
+
+  let lastError: unknown;
+
+  for (let i = 0; i < attemptPlans.length; i++) {
+    const plan = attemptPlans[i];
+    if (signal?.aborted) {
+      throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
+    }
+    if (plan.delayBeforeMs > 0) {
+      await sleepWithAbort(plan.delayBeforeMs, signal);
+    }
+
+    const attemptConfig = {
+      ...(params.config || {}),
+      abortSignal: signal,
+      ...(plan.thinkingLevel
+        ? {
+            thinkingConfig: {
+              ...(params.config?.thinkingConfig || {}),
+              thinkingLevel: plan.thinkingLevel,
+            },
+          }
+        : {}),
+    };
+
+    try {
+      const result = await withTimeoutAndAbort(
+        (async () => {
+          const stream = await ai.models.generateContentStream({
+            ...params,
+            model: plan.model,
+            config: attemptConfig,
+          });
+          let fullText = '';
+          let finishReason: string | undefined;
+          const groundingChunks: Array<{ web?: { uri?: string; title?: string } }> = [];
+
+          for await (const chunk of stream) {
+            if (signal?.aborted) {
+              throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
+            }
+            const c = chunk as GenerateContentResponse;
+            if (c.text) {
+              fullText += c.text;
+            }
+            const cand = c.candidates?.[0];
+            if (cand?.finishReason) {
+              finishReason = String(cand.finishReason);
+            }
+            const chunks = cand?.groundingMetadata?.groundingChunks;
+            if (Array.isArray(chunks) && chunks.length > 0) {
+              groundingChunks.push(...chunks);
+            }
+          }
+
+          const seen = new Set<string>();
+          const groundingSources: Array<{ title: string; uri: string }> = [];
+          for (const ch of groundingChunks) {
+            const uri = ch?.web?.uri;
+            const title = ch?.web?.title || uri || 'Diretriz / Fonte Médica';
+            if (uri && !seen.has(uri)) {
+              seen.add(uri);
+              groundingSources.push({ title, uri });
+            }
+          }
+
+          return {
+            text: fullText,
+            finishReason,
+            modelUsed: plan.model,
+            groundingSources,
+          };
+        })(),
+        timeoutMs,
+        signal,
+        `Timeout após ${Math.round(timeoutMs / 1000)}s no modelo ${plan.model}`
+      );
+
+      return result;
+    } catch (error: unknown) {
+      lastError = error;
+      console.error(
+        `[gemini] attempt ${i + 1}/${attemptPlans.length} (${plan.model}) failed:`,
+        extractErrorDetails(error)
+      );
+
+      if (signal?.aborted) {
+        throw error;
+      }
+
+      const canRetry =
+        isRetryableGeminiError(error) ||
+        (enableModelFallback && isModelOverloadOrQuotaError(error));
+
+      if (!canRetry || i === attemptPlans.length - 1) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+export interface UploadedFileCacheEntry {
+  uri: string;
+  mimeType: string;
+  name: string;
+  uploadedAt: number;
+}
+
+const GEMINI_FILE_CACHE_TTL_MS = 1000 * 60 * 60 * 24;
+const geminiUploadedFileCache = new Map<string, UploadedFileCacheEntry>();
+const geminiUploadInFlight = new Map<string, Promise<UploadedFileCacheEntry>>();
+
+export interface InputDocumentPayload {
+  name?: string;
+  mimeType?: string;
+  base64Data?: string;
+  fileUri?: string;
+  fileName?: string;
+  textContent?: string;
+  docRole?: string;
+}
+
+export async function uploadSinglePdfToGeminiFiles(
+  ai: GoogleGenAI,
+  doc: InputDocumentPayload,
+  signal?: AbortSignal
+): Promise<UploadedFileCacheEntry> {
+  const base64Data = String(doc.base64Data || '');
+  const mimeType = doc.mimeType || 'application/pdf';
+  const hash = crypto.createHash('sha256').update(base64Data).digest('hex');
+
+  const cached = geminiUploadedFileCache.get(hash);
+  if (cached && Date.now() - cached.uploadedAt < GEMINI_FILE_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  const existingPromise = geminiUploadInFlight.get(hash);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const uploadTask = (async (): Promise<UploadedFileCacheEntry> => {
+    const buffer = Buffer.from(base64Data, 'base64');
+    const blob = new Blob([buffer], { type: mimeType });
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (signal?.aborted) {
+        throw new DOMException('Upload cancelado pelo usuário.', 'AbortError');
+      }
+      try {
+        let uploaded = await withTimeoutAndAbort(
+          ai.files.upload({
+            file: blob,
+            config: {
+              mimeType,
+              displayName: doc.name || `documento_${hash.slice(0, 8)}.pdf`,
+            },
+          }),
+          60_000,
+          signal,
+          `Timeout ao enviar "${doc.name || 'PDF'}" para a Gemini Files API`
+        );
+
+        let polls = 0;
+        while (uploaded.state === 'PROCESSING' && uploaded.name && polls < 15) {
+          await sleepWithAbort(1000, signal);
+          uploaded = await ai.files.get({ name: uploaded.name });
+          polls++;
+        }
+
+        if (uploaded.state === 'FAILED' || !uploaded.uri) {
+          throw new Error(`Falha ao processar arquivo "${doc.name || 'PDF'}" na Gemini Files API.`);
+        }
+
+        const entry: UploadedFileCacheEntry = {
+          uri: uploaded.uri,
+          mimeType: uploaded.mimeType || mimeType,
+          name: uploaded.name || '',
+          uploadedAt: Date.now(),
+        };
+        geminiUploadedFileCache.set(hash, entry);
+        return entry;
+      } catch (err: unknown) {
+        lastErr = err;
+        console.error(
+          `[gemini-files-upload] attempt ${attempt}/3 failed for ${doc.name || 'PDF'}:`,
+          extractErrorDetails(err)
+        );
+        if (signal?.aborted) throw err;
+        if (attempt < 3 && isRetryableGeminiError(err)) {
+          await sleepWithAbort(attempt * 1500, signal);
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw lastErr;
+  })();
+
+  geminiUploadInFlight.set(hash, uploadTask);
+  try {
+    return await uploadTask;
+  } finally {
+    geminiUploadInFlight.delete(hash);
+  }
+}
+
+export async function resolveDocumentPartsForGemini(
+  ai: GoogleGenAI,
+  pdfs: InputDocumentPayload[],
+  signal?: AbortSignal
+): Promise<Part[]> {
+  const parts: Part[] = [];
+  if (!Array.isArray(pdfs)) return parts;
+
+  for (const pdf of pdfs) {
+    if (signal?.aborted) {
+      throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
+    }
+    if (pdf?.textContent && typeof pdf.textContent === 'string') {
+      parts.push({
+        text: `DOCUMENTO ANEXADO (${pdf.name || 'Texto/Questões'}):\n${pdf.textContent.slice(0, 60000)}`,
+      });
+    } else if (pdf?.fileUri && typeof pdf.fileUri === 'string') {
+      parts.push(createPartFromUri(pdf.fileUri, pdf.mimeType || 'application/pdf'));
+    } else if (pdf?.base64Data && typeof pdf.base64Data === 'string') {
+      const mimeType = pdf.mimeType || 'application/pdf';
+      try {
+        const uploaded = await uploadSinglePdfToGeminiFiles(ai, pdf, signal);
+        parts.push(createPartFromUri(uploaded.uri, uploaded.mimeType));
+      } catch (uploadErr) {
+        if (signal?.aborted) throw uploadErr;
+        if (pdf.base64Data.length < 13_500_000) {
+          console.warn(
+            `[gemini] Falling back to inlineData for ${pdf.name || 'PDF'}:`,
+            extractErrorDetails(uploadErr)
+          );
+          parts.push({
+            inlineData: {
+              mimeType,
+              data: pdf.base64Data,
+            },
+          });
+        } else {
+          throw uploadErr;
+        }
+      }
+    }
+  }
+
+  return parts;
+}

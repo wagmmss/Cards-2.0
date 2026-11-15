@@ -1,0 +1,684 @@
+import crypto from 'crypto';
+import initSqlJs from 'sql.js';
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+export function crc32Buffer(buf: Buffer): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export function buildZipArchive(entries: Array<{ name: string; data: Buffer }>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, 'utf8');
+    const dataBuf = entry.data;
+    const crc = crc32Buffer(dataBuf);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0x5421, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(dataBuf.length, 18);
+    localHeader.writeUInt32LE(dataBuf.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+
+    localParts.push(localHeader, nameBuf, dataBuf);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0x5421, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(dataBuf.length, 20);
+    centralHeader.writeUInt32LE(dataBuf.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+
+    centralParts.push(centralHeader, nameBuf);
+    offset += 30 + nameBuf.length + dataBuf.length;
+  }
+
+  const centralDirSize = centralParts.reduce((acc, b) => acc + b.length, 0);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDirSize, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, ...centralParts, eocd]);
+}
+
+export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buffer | null> {
+  if (!sourceUrl) return null;
+  if (sourceUrl.startsWith('data:')) {
+    const commaIdx = sourceUrl.indexOf(',');
+    if (commaIdx === -1) return null;
+    const header = sourceUrl.slice(0, commaIdx);
+    const payload = sourceUrl.slice(commaIdx + 1);
+    if (header.includes(';base64')) {
+      return Buffer.from(payload, 'base64');
+    }
+    return Buffer.from(decodeURIComponent(payload), 'utf8');
+  }
+  if (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')) {
+    try {
+      const resp = await fetch(sourceUrl, {
+        headers: {
+          'User-Agent':
+            'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) return null;
+      const arrBuf = await resp.arrayBuffer();
+      return Buffer.from(arrBuf);
+    } catch {
+      return null;
+    }
+  }
+  if (/^[A-Za-z0-9+/=\s]+$/.test(sourceUrl) && sourceUrl.length > 64) {
+    try {
+      return Buffer.from(sourceUrl.replace(/\s+/g, ''), 'base64');
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function resolveDeckMediaFiles(
+  mediaManifest: Array<{
+    filename?: string;
+    localFilename?: string;
+    sourceUrl?: string;
+    cardId?: number;
+  }>,
+  mediaAssets: Record<string, string> = {}
+): Promise<{
+  resolvedMedia: Array<{ filename: string; data: Buffer }>;
+  missingMedia: Array<{ filename: string; cardId?: number; reason: string }>;
+}> {
+  const normalizedAssetMap = new Map<string, string>();
+  for (const [key, val] of Object.entries(mediaAssets || {})) {
+    if (key && typeof val === 'string' && val) {
+      const cleanKey = key.trim().toLowerCase();
+      normalizedAssetMap.set(cleanKey, val);
+      const base = cleanKey.split(/[\\/]/).pop();
+      if (base) normalizedAssetMap.set(base, val);
+    }
+  }
+
+  const seenFilenames = new Set<string>();
+  const resolvedMedia: Array<{ filename: string; data: Buffer }> = [];
+  const missingMedia: Array<{ filename: string; cardId?: number; reason: string }> = [];
+
+  if (Array.isArray(mediaManifest)) {
+    const items = mediaManifest.filter((item) => {
+      const filename = String(item?.filename || item?.localFilename || '').trim();
+      if (!filename || seenFilenames.has(filename)) return false;
+      seenFilenames.add(filename);
+      return true;
+    });
+
+    // Resolve external media in parallel with bounded concurrency (4)
+    const CONCURRENCY = 4;
+    let cursor = 0;
+    const results: Array<{
+      filename: string;
+      cardId?: number;
+      sourceUrl: string;
+      buf: Buffer | null;
+    }> = new Array(items.length);
+
+    const worker = async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        const item = items[idx];
+        const filename = String(item?.filename || item?.localFilename || '').trim();
+        const sourceUrl = String(item?.sourceUrl || '').trim();
+        const lowerName = filename.toLowerCase();
+        const uploadedDataUri =
+          normalizedAssetMap.get(lowerName) ||
+          normalizedAssetMap.get(sourceUrl.toLowerCase());
+
+        let buf: Buffer | null = null;
+        if (uploadedDataUri) {
+          buf = await resolveMediaSourceToBuffer(uploadedDataUri);
+        }
+        if (!buf && sourceUrl) {
+          buf = await resolveMediaSourceToBuffer(sourceUrl);
+        }
+        results[idx] = { filename, cardId: item?.cardId, sourceUrl, buf };
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, Math.max(1, items.length)) }, () => worker())
+    );
+
+    for (const r of results) {
+      if (!r) continue;
+      if (r.buf && r.buf.length > 0) {
+        resolvedMedia.push({ filename: r.filename, data: r.buf });
+      } else {
+        missingMedia.push({
+          filename: r.filename,
+          cardId: r.cardId,
+          reason: /^(?:https?:\/\/)/i.test(r.sourceUrl)
+            ? `Falha ao baixar URL externa (${r.sourceUrl.slice(0, 80)})`
+            : 'Arquivo local não encontrado nos assets carregados',
+        });
+      }
+    }
+  }
+
+  for (const [rawName, dataUri] of Object.entries(mediaAssets || {})) {
+    const cleanName = rawName.trim().split(/[\\/]/).pop() || '';
+    if (!cleanName || seenFilenames.has(cleanName)) continue;
+    const buf = await resolveMediaSourceToBuffer(dataUri);
+    if (buf && buf.length > 0) {
+      seenFilenames.add(cleanName);
+      resolvedMedia.push({ filename: cleanName, data: buf });
+    }
+  }
+
+  return { resolvedMedia, missingMedia };
+}
+
+const CLOZE_MODEL_ID = 1738331521911;
+const CLOZE_MODEL_NAME = 'Med_Cloze_Inverted_v2';
+const BASIC_MODEL_ID = 1738331521912;
+const BASIC_MODEL_NAME = 'Med_Basic_Inverted_v2';
+const GUID_SALT = 'criador-de-cards';
+
+const ANKI_CLINICAL_CSS = `.card {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 18.5px;
+  line-height: 1.58;
+  text-align: left;
+  color: #1e293b;
+  background-color: #f8fafc;
+  padding: 24px;
+}
+.med-card { max-width: 740px; margin: 0 auto; }
+.topic-box {
+  display: inline-block; background-color: #f1f5f9; color: #0369a1;
+  padding: 4px 10px; border-radius: 4px; font-size: 13.5px;
+  font-weight: 700; margin-bottom: 12px; border: 1px solid #cbd5e1;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+b, strong { color: #0284c7; font-weight: 700; }
+.cloze { font-weight: 700; color: #0284c7; border-bottom: 2px solid #38bdf8; padding: 0 2px; }
+.front-content { font-size: 19.5px; color: #0f172a; line-height: 1.58; }
+.back-content { font-size: 18.5px; color: #0f172a; line-height: 1.58; margin-top: 10px; }
+.main-answer { font-size: 20px; font-weight: 700; color: #0f172a; margin-bottom: 12px; }
+.extra-box {
+  margin-top: 16px; padding: 14px 18px; background: #f1f5f9;
+  border-radius: 8px; border-left: 4px solid #0284c7;
+  font-size: 16px; color: #334155; line-height: 1.52;
+}
+hr, hr#answer, hr.med-divider { border: 0; height: 1px; background: #cbd5e1; margin: 20px 0; }
+img {
+  max-width: 100%; max-height: 65vh; height: auto; border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12); margin: 14px auto 0;
+  background: #ffffff; padding: 4px; display: block; object-fit: contain;
+}
+table.med-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
+table.med-table th, table.med-table td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
+table.med-table th { background-color: #e0f2fe; color: #0369a1; font-weight: 700; }
+.nightMode.card, .night_mode.card, body.nightMode, body.night_mode { background-color: #18181b !important; color: #f4f4f5 !important; }
+.nightMode .topic-box, .night_mode .topic-box { background-color: #27272a !important; color: #7dd3fc !important; border-color: #3f3f46 !important; }
+.nightMode .front-content, .nightMode .back-content, .night_mode .front-content, .night_mode .back-content, .nightMode .cloze-text, .night_mode .cloze-text { color: #f4f4f5 !important; }
+.nightMode .main-answer, .night_mode .main-answer { color: #f4f4f5 !important; }
+.nightMode b, .nightMode strong, .night_mode b, .night_mode strong { color: #38bdf8 !important; }
+.nightMode .cloze, .night_mode .cloze { color: #38bdf8 !important; border-bottom: 2px solid #0ea5e9 !important; }
+.nightMode .extra-box, .night_mode .extra-box { background: #27272a !important; border-left: 4px solid #38bdf8 !important; color: #e4e4e7 !important; }
+.nightMode hr, .night_mode hr, .nightMode hr#answer, .night_mode hr#answer, .nightMode hr.med-divider, .night_mode hr.med-divider { background: #3f3f46 !important; }
+.nightMode img, .night_mode img { background: #ffffff !important; border: 1px solid #3f3f46; }
+.nightMode table.med-table th, .night_mode table.med-table th { background-color: #0c4a6e !important; color: #e0f2fe !important; border-color: #3f3f46 !important; }
+.nightMode table.med-table td, .night_mode table.med-table td { border-color: #3f3f46 !important; color: #f4f4f5 !important; }
+@media (max-width: 600px) {
+  .card { padding: 14px; font-size: 16.5px; }
+  .med-card { max-width: 100%; }
+  .front-content { font-size: 17.5px; }
+  .back-content { font-size: 16.5px; }
+  .main-answer { font-size: 18px; }
+  .extra-box { padding: 10px 14px; font-size: 15px; }
+  img { max-height: 55vh; margin-top: 10px; }
+}`;
+
+const BASE91_TABLE =
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~';
+
+export function genankiGuidFor(deckId: number, deckKey: string, noteId: number): string {
+  const key = `${deckKey}:id:${noteId}`;
+  const hashStr = `${GUID_SALT}__${deckId}__${key}`;
+  const digest = crypto.createHash('sha256').update(hashStr, 'utf8').digest();
+  let hashInt = 0n;
+  for (let i = 0; i < 8; i++) {
+    hashInt = (hashInt << 8n) | BigInt(digest[i]);
+  }
+  const base = BigInt(BASE91_TABLE.length);
+  let rv = '';
+  while (hashInt > 0n) {
+    rv = BASE91_TABLE[Number(hashInt % base)] + rv;
+    hashInt = hashInt / base;
+  }
+  return rv || `id${noteId}`;
+}
+
+function ankiFieldChecksum(sfld: string): number {
+  const hex = crypto.createHash('sha1').update(sfld || '', 'utf8').digest('hex').slice(0, 8);
+  return parseInt(hex, 16) >>> 0;
+}
+
+export function computeDeckIdFromKey(deckKey: string): number {
+  const digest = crypto.createHash('sha256').update(deckKey || 'deck', 'utf8').digest();
+  const val = digest.readUInt32BE(0);
+  return 1730000000000 + (val % 900000000);
+}
+
+let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
+function getSqlJs() {
+  if (!sqlJsPromise) {
+    sqlJsPromise = initSqlJs();
+  }
+  return sqlJsPromise;
+}
+
+export async function buildAnkiApkgBuffer(params: {
+  deckKey: string;
+  deckName: string;
+  deckId?: number;
+  notes: Array<{
+    id: number;
+    type: 'basic' | 'cloze';
+    topic: string;
+    question: string;
+    answer: string;
+    hint: string;
+    tags?: string[];
+  }>;
+  resolvedMedia: Array<{ filename: string; data: Buffer }>;
+  guidRegistry?: Record<string, string>;
+}): Promise<{ apkgBuffer: Buffer; updatedRegistry: Record<string, string> }> {
+  const SQL = await getSqlJs();
+  const db = new SQL.Database();
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const cleanDeckKey =
+    (params.deckKey || 'internato_deck')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/g, '_') || 'internato_deck';
+  const deckId =
+    typeof params.deckId === 'number' && params.deckId > 1
+      ? params.deckId
+      : computeDeckIdFromKey(cleanDeckKey);
+  const deckName = (params.deckName || cleanDeckKey.replace(/_/g, ' ')).trim();
+  const updatedRegistry: Record<string, string> = { ...(params.guidRegistry || {}) };
+
+  db.run(`
+    CREATE TABLE col (
+      id integer primary key,
+      crt integer not null,
+      mod integer not null,
+      scm integer not null,
+      ver integer not null,
+      dty integer not null,
+      usn integer not null,
+      ls integer not null,
+      conf text not null,
+      models text not null,
+      decks text not null,
+      dconf text not null,
+      tags text not null
+    );
+    CREATE TABLE notes (
+      id integer primary key,
+      guid text not null,
+      mid integer not null,
+      mod integer not null,
+      usn integer not null,
+      tags text not null,
+      flds text not null,
+      sfld integer not null,
+      csum integer not null,
+      flags integer not null,
+      data text not null
+    );
+    CREATE TABLE cards (
+      id integer primary key,
+      nid integer not null,
+      did integer not null,
+      ord integer not null,
+      mod integer not null,
+      usn integer not null,
+      type integer not null,
+      queue integer not null,
+      due integer not null,
+      ivl integer not null,
+      factor integer not null,
+      reps integer not null,
+      lapses integer not null,
+      left integer not null,
+      odue integer not null,
+      odid integer not null,
+      flags integer not null,
+      data text not null
+    );
+    CREATE TABLE revlog (
+      id integer primary key,
+      cid integer not null,
+      usn integer not null,
+      ease integer not null,
+      ivl integer not null,
+      lastIvl integer not null,
+      factor integer not null,
+      time integer not null,
+      type integer not null
+    );
+    CREATE TABLE graves (
+      usn integer not null,
+      oid integer not null,
+      type integer not null
+    );
+    CREATE INDEX ix_notes_usn on notes (usn);
+    CREATE INDEX ix_cards_nid on cards (nid);
+    CREATE INDEX ix_cards_sched on cards (did, queue, due);
+    CREATE INDEX ix_cards_usn on cards (usn);
+    CREATE INDEX ix_revlog_usn on revlog (usn);
+    CREATE INDEX ix_revlog_cid on revlog (cid);
+  `);
+
+  const fieldDefs = ['Question', 'Topic', 'Answer', 'Hint'].map((name, ord) => ({
+    name,
+    ord,
+    sticky: false,
+    rtl: false,
+    font: 'Arial',
+    size: 20,
+    media: [],
+  }));
+
+  const modelsObj = {
+    [String(CLOZE_MODEL_ID)]: {
+      id: CLOZE_MODEL_ID,
+      name: CLOZE_MODEL_NAME,
+      type: 1,
+      mod: nowSec,
+      usn: -1,
+      sortf: 0,
+      did: deckId,
+      tmpls: [
+        {
+          name: 'Cloze',
+          ord: 0,
+          qfmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="cloze-text">{{cloze:Question}}</div></div>',
+          afmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="cloze-text">{{cloze:Question}}</div>{{#Hint}}<hr id="answer" class="med-divider"><div class="extra-box">{{Hint}}</div>{{/Hint}}</div><script>(document.querySelector(".cloze") || document.getElementById("answer"))?.scrollIntoView({behavior: "smooth", block: "center"});</script>',
+          bqfmt: '',
+          bafmt: '',
+          did: null,
+          bfont: '',
+          bsize: 0,
+        },
+      ],
+      flds: fieldDefs,
+      css: ANKI_CLINICAL_CSS,
+      latexPre: '',
+      latexPost: '',
+      latexsvg: false,
+      req: [[0, 'all', [0]]],
+      tags: [],
+      vers: [],
+    },
+    [String(BASIC_MODEL_ID)]: {
+      id: BASIC_MODEL_ID,
+      name: BASIC_MODEL_NAME,
+      type: 0,
+      mod: nowSec,
+      usn: -1,
+      sortf: 0,
+      did: deckId,
+      tmpls: [
+        {
+          name: 'Basic',
+          ord: 0,
+          qfmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="front-content">{{Question}}</div></div>',
+          afmt: '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="front-content">{{Question}}</div><hr id="answer" class="med-divider"><div class="back-content"><div class="main-answer"><b>{{Answer}}</b></div>{{#Hint}}<div class="extra-box">{{Hint}}</div>{{/Hint}}</div></div><script>document.getElementById("answer")?.scrollIntoView({behavior: "smooth", block: "nearest"});</script>',
+          bqfmt: '',
+          bafmt: '',
+          did: null,
+          bfont: '',
+          bsize: 0,
+        },
+      ],
+      flds: fieldDefs,
+      css: ANKI_CLINICAL_CSS,
+      latexPre: '',
+      latexPost: '',
+      latexsvg: false,
+      req: [[0, 'all', [0]]],
+      tags: [],
+      vers: [],
+    },
+  };
+
+  const decksObj = {
+    '1': {
+      id: 1,
+      mod: nowSec,
+      name: 'Default',
+      usn: -1,
+      lrnToday: [0, 0],
+      revToday: [0, 0],
+      newToday: [0, 0],
+      timeToday: [0, 0],
+      collapsed: false,
+      browserCollapsed: false,
+      desc: '',
+      dyn: 0,
+      conf: 1,
+      extendNew: 10,
+      extendRev: 50,
+    },
+    [String(deckId)]: {
+      id: deckId,
+      mod: nowSec,
+      name: deckName,
+      usn: -1,
+      lrnToday: [0, 0],
+      revToday: [0, 0],
+      newToday: [0, 0],
+      timeToday: [0, 0],
+      collapsed: false,
+      browserCollapsed: false,
+      desc: `Baralho Canônico Internato-First (${cleanDeckKey})`,
+      dyn: 0,
+      conf: 1,
+      extendNew: 10,
+      extendRev: 50,
+    },
+  };
+
+  const confObj = {
+    nextPos: 1,
+    estTimes: true,
+    activeDecks: [deckId],
+    sortType: 'noteFld',
+    timeLim: 0,
+    sortBackwards: false,
+    addToCur: true,
+    curDeck: deckId,
+    newBury: true,
+    newSpread: 0,
+    dueCounts: true,
+    curModel: String(BASIC_MODEL_ID),
+    collapseTime: 1200,
+  };
+
+  const dconfObj = {
+    '1': {
+      id: 1,
+      mod: 0,
+      name: 'Default',
+      usn: 0,
+      maxTaken: 60,
+      autoplay: true,
+      timer: 0,
+      replayq: true,
+      new: { bury: true, delays: [1, 10], initialFactor: 2500, ints: [1, 4, 7], order: 1, perDay: 20 },
+      rev: { bury: true, ease4: 1.3, fuzz: 0.05, ivlFct: 1, maxIvl: 36500, perDay: 200, hardFactor: 1.2 },
+      lapse: { delays: [10], leechAction: 0, leechFails: 8, minInt: 1, mult: 0 },
+      dyn: false,
+    },
+  };
+
+  db.run(`INSERT INTO col VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    1,
+    nowSec,
+    nowSec * 1000,
+    nowSec * 1000,
+    11,
+    0,
+    0,
+    0,
+    JSON.stringify(confObj),
+    JSON.stringify(modelsObj),
+    JSON.stringify(decksObj),
+    JSON.stringify(dconfObj),
+    '{}',
+  ]);
+
+  const insertNoteStmt = db.prepare(
+    `INSERT OR REPLACE INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const insertCardStmt = db.prepare(
+    `INSERT OR REPLACE INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const usedCardIds = new Set<number>();
+
+  params.notes.forEach((note, index) => {
+    const nid = Number(note.id) > 0 ? Number(note.id) : 171000101 + index;
+    const regKey = `${cleanDeckKey}:id:${nid}`;
+    const guid = updatedRegistry[regKey] || genankiGuidFor(deckId, cleanDeckKey, nid);
+    updatedRegistry[regKey] = guid;
+
+    const isCloze = note.type === 'cloze';
+    const mid = isCloze ? CLOZE_MODEL_ID : BASIC_MODEL_ID;
+    const qField = String(note.question || '');
+    const tField = String(note.topic || '');
+    const aField = isCloze ? '' : String(note.answer || '');
+    const hField = String(note.hint || '');
+
+    const flds = [qField, tField, aField, hField].join('\x1f');
+    const sfld = qField.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const csum = ankiFieldChecksum(sfld);
+
+    const noteTags = Array.from(
+      new Set([
+        cleanDeckKey,
+        ...(Array.isArray(note.tags)
+          ? note.tags.map((t) => String(t).trim()).filter((t) => t && !/\s/.test(t))
+          : []),
+      ])
+    );
+    const tagsStr = ` ${noteTags.join(' ')} `;
+
+    insertNoteStmt.run([nid, guid, mid, nowSec, -1, tagsStr, flds, sfld, csum, 0, '']);
+
+    let cid = nid < 100000000000 ? nid * 10 + 1 : nid + index + 1;
+    while (usedCardIds.has(cid)) {
+      cid++;
+    }
+    usedCardIds.add(cid);
+
+    insertCardStmt.run([
+      cid,
+      nid,
+      deckId,
+      0,
+      nowSec,
+      -1,
+      0,
+      0,
+      index + 1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      '',
+    ]);
+  });
+
+  insertNoteStmt.free();
+  insertCardStmt.free();
+
+  const sqliteBytes = Buffer.from(db.export());
+  db.close();
+
+  const zipEntries: Array<{ name: string; data: Buffer }> = [
+    { name: 'collection.anki21', data: sqliteBytes },
+    { name: 'collection.anki2', data: sqliteBytes },
+  ];
+
+  const mediaJsonMap: Record<string, string> = {};
+  params.resolvedMedia.forEach((mediaItem, idx) => {
+    const numKey = String(idx);
+    mediaJsonMap[numKey] = mediaItem.filename;
+    zipEntries.push({
+      name: numKey,
+      data: mediaItem.data,
+    });
+  });
+
+  zipEntries.push({
+    name: 'media',
+    data: Buffer.from(JSON.stringify(mediaJsonMap), 'utf8'),
+  });
+
+  return {
+    apkgBuffer: buildZipArchive(zipEntries),
+    updatedRegistry,
+  };
+}
