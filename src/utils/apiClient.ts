@@ -204,7 +204,7 @@ export async function validateCardImageApi(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
-        timeoutMs: 40_000,
+        timeoutMs: 52_000,
         signal,
       }
     );

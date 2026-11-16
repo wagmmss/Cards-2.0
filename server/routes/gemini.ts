@@ -1658,7 +1658,7 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
 
   // Validação Multimodal com Gemini Flash — Inspeciona pixels reais da imagem (PDF ou Web)
   router.post('/validate-image', async (req, res) => {
-    const { signal, cleanup } = createRequestAbortSignal(req, res, 42_000);
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 55_000);
     let mediaReachableRaster = false;
     try {
       const {
