@@ -195,7 +195,10 @@ export type WarningCode =
   | 'ORPHAN_VISUAL_REFERENCE'
   | 'TABLE_MALFORMED'
   | 'MATUSCHAK_UNFOCUSED_SET'
-  | 'NIELSEN_PASSIVE_OR_BINARY';
+  | 'NIELSEN_PASSIVE_OR_BINARY'
+  | 'CLOZE_DEFINITIONAL_PASSIVE'
+  | 'THEORETICAL_WHY_QUESTION'
+  | 'POSSIBLE_R1_NICHE';
 
 export interface LinterWarning {
   code: WarningCode;
@@ -221,6 +224,21 @@ export interface CardLintResult {
   isValid: boolean;
   warnings: LinterWarning[];
   metrics: CardLintMetrics;
+}
+
+export interface InternatoSelfAuditReport {
+  deckKey: string;
+  passed: boolean;
+  totalCards: number;
+  basicCount: number;
+  clozeCount: number;
+  practicalScenarioCount: number;
+  errorCount: number;
+  warningCount: number;
+  internatoWarnings: Array<{ cardId: number; code: string; message: string }>;
+  blockedImagesFound: Array<{ cardId: number; src: string }>;
+  multiAudioCardIds: number[];
+  imagesUsed: Array<{ cardId: number; src: string; placement: 'question' | 'hint' }>;
 }
 
 export interface UploadedPdfFile {

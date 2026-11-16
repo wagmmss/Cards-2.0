@@ -19,6 +19,7 @@ import {
   removeMissingMediaFromCard,
   resolveLocalMediaFilename,
   resolveOrCreateNoteGuid,
+  runInternatoSelfAudit,
   sanitizeMedicalHtml,
   stripHtml,
   surgicalRepairCardLocal,
@@ -1681,6 +1682,84 @@ test('detects ORPHAN_VISUAL_REFERENCE, TABLE_MALFORMED, silent cloze-as-basic no
     lintCard(vagueManejo).warnings.some((w) => w.code === 'VAGUE_TEMPORAL_WINDOW'),
     true
   );
+});
+
+test('runInternatoSelfAudit flags Internato-First warnings, blocks discarded legacy images in reconcileDeckIdsAndMedia, and passes clean decks', () => {
+  const origWithSlide = [
+    {
+      id: 171010001,
+      type: 'cloze',
+      topic: 'Colecistite aguda - Critérios',
+      question: 'O estágio grave é definido por {{c1::disfunção orgânica}}.',
+      answer: '',
+      hint: '<img src="slide_texto_tokyo.png"><br><i>Slide com texto explicativo sobre critérios de Tokyo.</i><br><br><b>Comentário:</b> A <b>disfunção orgânica</b> define o grau III e indica drenagem de resgate.',
+    },
+  ];
+  const meta = extractDeckMetadata(JSON.stringify(origWithSlide));
+  const reconciled = reconcileDeckIdsAndMedia(
+    [
+      {
+        id: 171010001,
+        type: 'cloze',
+        topic: 'Colecistite aguda - Critérios',
+        question: 'Na colecistite aguda, a classificação de gravidade máxima é definida como {{c1::disfunção orgânica}}.',
+        answer: '',
+        hint: '<b>Comentário:</b> A <b>disfunção orgânica</b> define o grau III, diferente do grau I sem sepse.',
+      },
+    ],
+    meta,
+    'abdome_agudo_inflamatorio',
+    { blockedImageFilenames: ['slide_texto_tokyo.png'] }
+  );
+  assert.equal((reconciled[0].hint || '').includes('slide_texto_tokyo.png'), false);
+
+  const lowValueCards: CanonicalCard[] = [
+    {
+      id: 171010002,
+      type: 'cloze',
+      topic: 'Vias biliares - Síndromes',
+      question: 'Dor em HCD, icterícia e febre compõe a Tríade de {{c1::Charcot}}.',
+      answer: '',
+      hint: '<b>Comentário:</b> A <b>Tríade de Charcot</b> traduz colangite aguda, diferente da Pêntade de Reynolds.',
+    },
+    {
+      id: 171010003,
+      type: 'basic',
+      topic: 'Apendicite aguda - Idosos',
+      question: 'Por que pacientes idosos têm maior taxa de perfuração apendicular?',
+      answer: 'Apresentação clínica frustra e isquemia precoce.',
+      hint: '<b>Comentário:</b> A <b>imunossenescência</b> mascara sinais peritoneais, diferente dos jovens.',
+    },
+    {
+      id: 171010004,
+      type: 'basic',
+      topic: 'Vias biliares - Cirurgia',
+      question: '<b>Centro Cirúrgico:</b> Qual a conduta definitiva na Síndrome de Mirizzi tipo IV?',
+      answer: 'Hepaticojejunostomia em Y de Roux.',
+      hint: '<b>Comentário:</b> A <b>erosão extensa</b> contraindica sutura primária, diferente do tipo I.',
+    },
+  ];
+
+  const badAudit = runInternatoSelfAudit(lowValueCards, [], 'abdome_agudo_inflamatorio');
+  assert.equal(badAudit.passed, false);
+  assert.equal(badAudit.internatoWarnings.some((w) => w.code === 'CLOZE_DEFINITIONAL_PASSIVE'), true);
+  assert.equal(badAudit.internatoWarnings.some((w) => w.code === 'THEORETICAL_WHY_QUESTION'), true);
+  assert.equal(badAudit.internatoWarnings.some((w) => w.code === 'POSSIBLE_R1_NICHE'), true);
+
+  const cleanDeck: CanonicalCard[] = [
+    {
+      id: 171010005,
+      type: 'basic',
+      topic: 'Colangite grave - Controle de foco',
+      question: '<b>Sala Vermelha:</b> Paciente com colangite grave e choque séptico. Após volume e antibiótico na 1ª hora, qual a conduta imediata de controle do foco?',
+      answer: 'Descompressão endoscópica de urgência via CPRE.',
+      hint: '<b>Comentário:</b> Na <b>colangite grave (Pêntade de Reynolds / Tokyo III)</b>, a <b>CPRE com papilotomia</b> drena a via biliar sob pressão na emergência; a <b>colecistectomia de urgência é contraindicada</b> na fase aguda.',
+    },
+  ];
+  const goodAudit = runInternatoSelfAudit(cleanDeck, [], 'abdome_agudo_inflamatorio');
+  assert.equal(goodAudit.passed, true);
+  assert.equal(goodAudit.practicalScenarioCount, 1);
+  assert.equal(goodAudit.internatoWarnings.length, 0);
 });
 
 

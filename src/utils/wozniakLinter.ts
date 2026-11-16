@@ -5,6 +5,7 @@ import {
   ClinicalMapResponse,
   DeckCurationStats,
   ExtractedDeckMetadata,
+  InternatoSelfAuditReport,
   LinterWarning,
   MediaBundleItem,
   MedicalImageResult,
@@ -2160,6 +2161,50 @@ export function lintCard(
         message: 'Em cards cloze, o campo "answer" deve ser estritamente vazio ("").',
       });
     }
+    if (
+      /\b(?:[eé]\s+definid[ao]\s+(?:como|pela|por)|corresponde\s+[àa]o?\s+est[áa]gio|comp[õo]e\s+a\s+(?:tr[íi]ade|p[êe]ntade)|s[ãa]o\s+os\s+dois\s+par[âa]metros|classifica-se\s+como)\b/i.test(
+        stripHtml(questionText)
+      )
+    ) {
+      warnings.push({
+        code: 'CLOZE_DEFINITIONAL_PASSIVE',
+        field: 'question',
+        severity: 'warning',
+        message:
+          'Cloze definicional passivo detectado: avalie converter em caso clínico (basic) de pronto-socorro/enfermaria ou podar se redundante.',
+      });
+    }
+  }
+
+  // 6b. Doutrina Internato-First: perguntas teóricas puras e nicho R1+
+  const plainQuestionText = stripHtml(questionText);
+  const plainAnswerText = stripHtml(answerText);
+  if (
+    cardType === 'basic' &&
+    /^\s*Por\s+que\b/i.test(plainQuestionText) &&
+    !/\b(?:conduta|tratamento|exame|esquema|dose|prescri[çc][ãa]o|cirurgia)\b/i.test(plainQuestionText)
+  ) {
+    warnings.push({
+      code: 'THEORETICAL_WHY_QUESTION',
+      field: 'question',
+      severity: 'warning',
+      message:
+        'Pergunta teórica "Por que..." sem decisão clínica prática: avalie podar ou converter em conduta de plantão.',
+    });
+  }
+
+  if (
+    /\b(?:hepaticojejunostomia|dreno\s+de\s+kehr|ileotiflectomia|ileocecectomia|diverticulectomia|linfadenectomia|csendes|colectomia\s+direita\s+oncol[óo]gica)\b/i.test(
+      `${plainQuestionText} ${plainAnswerText}`
+    )
+  ) {
+    warnings.push({
+      code: 'POSSIBLE_R1_NICHE',
+      field: 'question',
+      severity: 'warning',
+      message:
+        'Possível conteúdo de técnica operatória/subespecialidade R1+: avalie podar pela Doutrina Internato-First.',
+    });
   }
 
   // 7. Compound question check
@@ -2658,6 +2703,7 @@ export function reconcileDeckIdsAndMedia(
   deckKey: string,
   options?: {
     availableMediaNames?: Iterable<string>;
+    blockedImageFilenames?: Iterable<string>;
     preserveLocalAudio?: boolean;
     allowImageRemoval?: boolean;
   }
@@ -2666,6 +2712,13 @@ export function reconcileDeckIdsAndMedia(
     ? new Set(
         Array.from(options.availableMediaNames)
           .map((n) => String(n || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    : undefined;
+  const blockedImageSet = options?.blockedImageFilenames
+    ? new Set(
+        Array.from(options.blockedImageFilenames)
+          .map((n) => String(n || '').trim().split(/[\\/]/).pop()?.toLowerCase() || '')
           .filter(Boolean)
       )
     : undefined;
@@ -2766,8 +2819,8 @@ export function reconcileDeckIdsAndMedia(
           } else if (!hasNewImage && !allowImageRemoval) {
             const imgSrcMatch = mediaTag.match(/\bsrc=["']([^"']+)["']/i);
             const imgBase = (imgSrcMatch?.[1] || '').trim().split(/[\\/]/).pop()?.toLowerCase() || '';
-            // Não reinserir imagem antiga se ela já pertence a outro card no deck reconstruído
-            if (imgBase && usedImageFilenames.has(imgBase)) {
+            // Não reinserir imagem bloqueada/descartada ou que já pertence a outro card
+            if (imgBase && (blockedImageSet?.has(imgBase) || usedImageFilenames.has(imgBase))) {
               continue;
             }
             if (imgBase) usedImageFilenames.add(imgBase);
@@ -4088,5 +4141,103 @@ export function lintDeck(
     allIssues,
     duplicateImages,
     cardResults,
+  };
+}
+
+/**
+ * Executa a 2ª passada de autoauditoria Internato-First sobre um deck refatorado:
+ * consolida erros/avisos do `lintDeck`, alertas de baixo valor/R1/clozes passivos,
+ * cobertura de cenários clínicos práticos, limite de 1 áudio por card e checagem
+ * de imagens bloqueadas/descartadas após `reconcileDeckIdsAndMedia`.
+ */
+export function runInternatoSelfAudit(
+  cards: CanonicalCard[],
+  availableMediaNames?: Iterable<string>,
+  deckKey: string = 'internato_deck',
+  options?: {
+    blockedImageFilenames?: Iterable<string>;
+  }
+): InternatoSelfAuditReport {
+  const audit = lintDeck(cards, availableMediaNames, deckKey);
+  const blockedSet = new Set(
+    Array.from(options?.blockedImageFilenames || [])
+      .map((n) => String(n || '').trim().split(/[\\/]/).pop()?.toLowerCase() || '')
+      .filter(Boolean)
+  );
+
+  const internatoCodes = new Set([
+    'CLOZE_DEFINITIONAL_PASSIVE',
+    'THEORETICAL_WHY_QUESTION',
+    'POSSIBLE_R1_NICHE',
+  ]);
+  const internatoWarnings = audit.warnings
+    .filter((w) => internatoCodes.has(w.code) && typeof w.cardId === 'number')
+    .map((w) => ({
+      cardId: w.cardId as number,
+      code: w.code,
+      message: w.message,
+    }));
+
+  let basicCount = 0;
+  let clozeCount = 0;
+  let practicalScenarioCount = 0;
+  const blockedImagesFound: Array<{ cardId: number; src: string }> = [];
+  const multiAudioCardIds: number[] = [];
+  const imagesUsed: Array<{ cardId: number; src: string; placement: 'question' | 'hint' }> = [];
+
+  for (const c of cards) {
+    if (c.type === 'cloze') clozeCount++;
+    else basicCount++;
+
+    const q = c.question || '';
+    const h = c.hint || '';
+    if (
+      /\b(?:Pronto-Socorro|Sala\s+Vermelha|UTI|Enfermaria|Ambulat[óo]rio|Maternidade|Centro\s+Cir[úu]rgico|Plant[ãa]o|UBS)\b/i.test(
+        q
+      )
+    ) {
+      practicalScenarioCount++;
+    }
+
+    const qImgs = Array.from(q.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)).map((m) => m[1]);
+    const hImgs = Array.from(h.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)).map((m) => m[1]);
+    for (const src of qImgs) {
+      imagesUsed.push({ cardId: c.id, src, placement: 'question' });
+      const base = src.trim().split(/[\\/]/).pop()?.toLowerCase() || '';
+      if (base && blockedSet.has(base)) blockedImagesFound.push({ cardId: c.id, src });
+    }
+    for (const src of hImgs) {
+      imagesUsed.push({ cardId: c.id, src, placement: 'hint' });
+      const base = src.trim().split(/[\\/]/).pop()?.toLowerCase() || '';
+      if (base && blockedSet.has(base)) blockedImagesFound.push({ cardId: c.id, src });
+    }
+
+    const audioCount =
+      (q.match(/<audio\b|\[sound:/gi) || []).length + (h.match(/<audio\b|\[sound:/gi) || []).length;
+    if (audioCount > 1) {
+      multiAudioCardIds.push(c.id);
+    }
+  }
+
+  const passed =
+    audit.errorCount === 0 &&
+    audit.warningCount === 0 &&
+    audit.canExport &&
+    blockedImagesFound.length === 0 &&
+    multiAudioCardIds.length === 0;
+
+  return {
+    deckKey,
+    passed,
+    totalCards: cards.length,
+    basicCount,
+    clozeCount,
+    practicalScenarioCount,
+    errorCount: audit.errorCount,
+    warningCount: audit.warningCount,
+    internatoWarnings,
+    blockedImagesFound,
+    multiAudioCardIds,
+    imagesUsed,
   };
 }
