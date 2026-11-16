@@ -152,6 +152,52 @@ export const CardItem: React.FC<CardItemProps> = ({
     .replace(/(?:<br\s*\/?>\s*)+$/i, '')
     .trim();
 
+  const handleToggleImagePlacement = (
+    targetCard: CanonicalCard,
+    imgMeta: ParsedCardImage,
+    currentlyInQuestion: boolean
+  ) => {
+    const imgTag = imgMeta.hasExplicitAnkiFile
+      ? `<img src="${imgMeta.src}" data-anki-file="${imgMeta.localFilename}">`
+      : `<img src="${imgMeta.src}">`;
+
+    const stripTargetImg = (html: string): string =>
+      (html || '')
+        .replace(/<img\b[^>]*>/gi, (match) => {
+          if (
+            (imgMeta.src && match.includes(imgMeta.src)) ||
+            (imgMeta.localFilename && match.includes(imgMeta.localFilename))
+          ) {
+            return '';
+          }
+          return match;
+        })
+        .replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '')
+        .trim();
+
+    if (currentlyInQuestion) {
+      const nextQuestion = stripTargetImg(targetCard.question);
+      const cleanHint = stripTargetImg(targetCard.hint);
+      const nextHint = cleanHint ? `${imgTag}<br>${cleanHint}` : imgTag;
+      onUpdateCard({
+        ...targetCard,
+        question: nextQuestion,
+        hint: nextHint,
+        image_mode: 'feedback',
+      });
+    } else {
+      const nextHint = stripTargetImg(targetCard.hint);
+      const cleanQuestion = stripTargetImg(targetCard.question);
+      const nextQuestion = cleanQuestion ? `${cleanQuestion}<br>${imgTag}` : imgTag;
+      onUpdateCard({
+        ...targetCard,
+        question: nextQuestion,
+        hint: nextHint,
+        image_mode: 'recognition',
+      });
+    }
+  };
+
   return (
     <article className="p-4 sm:p-5 bg-[#0F1623] space-y-3">
       {/* Metadata & Counters Row */}
@@ -336,17 +382,42 @@ export const CardItem: React.FC<CardItemProps> = ({
       {/* Other Linter Warnings List */}
       {!lint.isValid && (
         <div className="px-3 py-2 rounded-md bg-amber-950/40 border border-amber-800/70 space-y-1">
-          {lint.warnings.map((w, wIdx) => (
-            <div
-              key={`${w.code}-${wIdx}`}
-              className="flex items-center gap-1.5 text-xs text-amber-200"
-            >
-              <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
-              <span>
-                <strong className="font-mono text-amber-300">[{w.field}]</strong> {w.message}
-              </span>
-            </div>
-          ))}
+          {lint.warnings.map((w, wIdx) => {
+            const isError = w.severity === 'error';
+            return (
+              <div
+                key={`${w.code}-${wIdx}`}
+                className={`flex items-start gap-1.5 text-xs ${
+                  isError ? 'text-red-200' : 'text-amber-200'
+                }`}
+              >
+                <AlertTriangle
+                  className={`w-3 h-3 shrink-0 mt-0.5 ${
+                    isError ? 'text-red-400' : 'text-amber-400'
+                  }`}
+                />
+                <span>
+                  <strong
+                    className={`font-mono ${
+                      isError ? 'text-red-300' : 'text-amber-300'
+                    }`}
+                  >
+                    [{w.field}]
+                  </strong>{' '}
+                  <span
+                    className={`inline-block px-1 py-0 mr-1 rounded text-[10px] font-mono ${
+                      isError
+                        ? 'bg-red-950/80 text-red-300 border border-red-800/70'
+                        : 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                    }`}
+                  >
+                    {isError ? 'Bloqueio Estrutural' : 'Sugestão Pedagógica'}
+                  </span>
+                  {w.message}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -464,6 +535,7 @@ export const CardItem: React.FC<CardItemProps> = ({
             onToggleImageVerified={onToggleImageVerified}
             onQuickSwapFromStrip={onQuickSwapFromStrip}
             onRefreshQuickGallery={onRefreshQuickGallery}
+            onToggleImagePlacement={handleToggleImagePlacement}
           />
 
           {card.type === 'basic' && (

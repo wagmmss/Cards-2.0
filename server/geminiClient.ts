@@ -339,8 +339,11 @@ export function parseOrRecoverClinicalMapJson(
     if (recoveredItems.length > 0) {
       const themeMatch = rawText.match(/"themeTitle"\s*:\s*"([^"]+)"/);
       const specMatch = rawText.match(/"specialty"\s*:\s*"([^"]+)"/);
+      const deckKeyMatch = rawText.match(/"deckKey"\s*:\s*"([^"]+)"/);
       const profileMatch = rawText.match(/"profile"\s*:\s*"([^"]+)"/);
-      const updatesBlockMatch = rawText.match(/"guidelineUpdates"\s*:\s*\[([\s\S]*?)\]/);
+      const updatesBlockMatch = rawText.match(
+        /"guidelineUpdates"\s*:\s*\[((?:\s*"(?:[^"\\]|\\.)*"\s*,?)*)/
+      );
       const guidelineUpdates: string[] = [];
       if (updatesBlockMatch?.[1]) {
         const strMatches = updatesBlockMatch[1].matchAll(/"((?:[^"\\]|\\.)*)"/g);
@@ -355,7 +358,7 @@ export function parseOrRecoverClinicalMapJson(
       return {
         themeTitle: themeMatch?.[1] || fallbackDeckKey.replace(/_/g, ' '),
         specialty: specMatch?.[1] || 'Clínica',
-        deckKey: fallbackDeckKey,
+        deckKey: deckKeyMatch?.[1] || fallbackDeckKey,
         ...(profileMatch?.[1] ? { profile: profileMatch[1] } : {}),
         guidelineUpdates,
         items: recoveredItems,
@@ -427,7 +430,7 @@ export function isRetryableGeminiError(error: unknown): boolean {
   );
 }
 
-function isModelOverloadOrQuotaError(error: unknown): boolean {
+export function isModelOverloadOrQuotaError(error: unknown): boolean {
   const raw = extractErrorDetails(error);
   return /429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|high demand|DEADLINE_EXCEEDED|timed out|TimeoutError|404|NOT_FOUND|is not found|not supported/i.test(
     raw

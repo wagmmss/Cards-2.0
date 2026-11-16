@@ -223,6 +223,11 @@ interface CardMediaPanelProps {
     alternatives: MedicalImageResult[]
   ) => void;
   onRefreshQuickGallery: (card: CanonicalCard) => void;
+  onToggleImagePlacement?: (
+    card: CanonicalCard,
+    imgMeta: ParsedCardImage,
+    currentlyInQuestion: boolean
+  ) => void;
 }
 
 function resolvePreviewImageSrc(
@@ -274,6 +279,7 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
   onToggleImageVerified,
   onQuickSwapFromStrip,
   onRefreshQuickGallery,
+  onToggleImagePlacement,
 }) => {
   if (allCardImgs.length === 0) return null;
 
@@ -338,6 +344,21 @@ export const CardMediaPanel: React.FC<CardMediaPanelProps> = ({
               >
                 {isInQuestion ? 'FRENTE (Recognition)' : 'VERSO (Feedback)'}
               </span>
+
+              {onToggleImagePlacement && (
+                <button
+                  type="button"
+                  onClick={() => onToggleImagePlacement(card, imgMeta, isInQuestion)}
+                  title={
+                    isInQuestion
+                      ? 'Mover imagem da Frente (question) para o Verso (hint) para evitar spoiler visual'
+                      : 'Mover imagem do Verso (hint) para a Frente (question) para treino de reconhecimento visual'
+                  }
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-700 bg-slate-900 hover:bg-slate-800 text-[10px] font-medium text-slate-300 hover:text-white cursor-pointer transition-colors"
+                >
+                  <span>{isInQuestion ? 'Mover p/ Verso' : 'Mover p/ Frente'}</span>
+                </button>
+              )}
 
               {isRepeatedImage && (
                 <span

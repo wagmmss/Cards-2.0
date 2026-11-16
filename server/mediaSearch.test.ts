@@ -658,4 +658,33 @@ test('scoreImageRelevance penalizes laterality and ST polarity contradictions by
   assert.equal(supraMatch - infraContra, 75);
 });
 
+test('Bishop score / labor induction queries do not drift into cardiotocography and Kardiotokograf hardware photo is blocked', () => {
+  const bishopQueries = buildEnglishMedicalSearchQueries(
+    'Índice de Bishop amadurecimento cervical',
+    'Obstetrícia - Indução do Parto',
+    'Colo desfavorável com Bishop < 6 indica misoprostol.'
+  );
+  assert.ok(
+    bishopQueries.some((q) => /Bishop score cervical ripening obstetrics/i.test(q)),
+    `Expected Bishop score query in ${JSON.stringify(bishopQueries)}`
+  );
+  assert.equal(
+    bishopQueries.some((q) => /cardiotocography|tachysystole/i.test(q)),
+    false,
+    `Bishop/induction query must not force cardiotocography: ${JSON.stringify(bishopQueries)}`
+  );
 
+  const ctgQueries = buildEnglishMedicalSearchQueries(
+    'Taquissistolia uterina e DIP II na cardiotocografia',
+    'Obstetrícia - Vitalidade Fetal',
+    ''
+  );
+  assert.ok(
+    ctgQueries.some((q) => /cardiotocography fetal heart rate late deceleration CTG/i.test(q))
+  );
+
+  assert.equal(
+    isSpamOrLogoImageUrl('https://upload.wikimedia.org/wikipedia/commons/5/5b/Kardiotokograf.jpeg'),
+    true
+  );
+});

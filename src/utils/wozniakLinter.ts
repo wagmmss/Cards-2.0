@@ -496,6 +496,8 @@ export function resolveLocalMediaFilename(
       const u = new URL(src);
       const rawLast = decodeURIComponent(u.pathname.split('/').pop() || '')
         .replace(/^\d+px-/i, '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
         .toLowerCase()
         .replace(/[^a-z0-9_.-]+/g, '_')
         .replace(/^_+|_+$/g, '');

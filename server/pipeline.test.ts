@@ -640,3 +640,51 @@ test('Deleted legacy component DeckToolbar.tsx does not exist on disk', () => {
   const legacyPath = path.resolve(process.cwd(), 'src/components/deck/DeckToolbar.tsx');
   assert.equal(fs.existsSync(legacyPath), false);
 });
+
+test('parseOrRecoverClinicalMapJson recovers valid items from truncated /clinical-map JSON and resolveLocalMediaFilename normalizes NFD on external URLs', async () => {
+  const { parseOrRecoverClinicalMapJson, isModelOverloadOrQuotaError } = await import('./geminiClient');
+  const { resolveLocalMediaFilename } = await import('../src/utils/wozniakLinter');
+
+  const truncatedJson = `{"themeTitle":"Assistência ao Parto e Partograma","specialty":"Obstetrícia","deckKey":"assistencia_parto","profile":"emergencia","guidelineUpdates":["[OMS 2024]: Linha de alerta 1cm/h."],"items":[{"id":"p1-1","priority":"P1","subtopic":"Fase Ativa","concept":"Dilatação >= 5 cm com contrações regulares","guidelineNote":"FEBRASGO","targetCardType":"basic","checked":true},{"id":"p2-1","priority":"P2","subtopic":"Parada Secundária","concept":"Dilatação mantida por 2h`;
+
+  const recovered = parseOrRecoverClinicalMapJson(truncatedJson, 'fallback_deck');
+  const guidelineUpdates = recovered.guidelineUpdates as string[];
+  const items = recovered.items as Array<Record<string, unknown>>;
+
+  assert.equal(recovered.themeTitle, 'Assistência ao Parto e Partograma');
+  assert.equal(recovered.deckKey, 'assistencia_parto');
+  assert.equal(guidelineUpdates.length, 1);
+  assert.equal(guidelineUpdates[0], '[OMS 2024]: Linha de alerta 1cm/h.');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, 'p1-1');
+
+  // 404 / NOT_FOUND / not supported triggers fallback model
+  assert.equal(
+    isModelOverloadOrQuotaError(new Error('404 NOT_FOUND: models/gemini-4-hydrogen is not found for API version v1beta')),
+    true
+  );
+
+  // External URL with diacritics -> clean ASCII filename via NFD
+  assert.equal(
+    resolveLocalMediaFilename(
+      '<img src="https://example.org/Diretriz_Pré-Eclâmpsia_Grave.jpg">',
+      'https://example.org/Diretriz_Pré-Eclâmpsia_Grave.jpg',
+      10,
+      0,
+      'obstetricia'
+    ),
+    'diretriz_pre-eclampsia_grave.jpg'
+  );
+  // Existing local filename with accents -> preserved byte-for-byte for wagmms/Cards compatibility
+  assert.equal(
+    resolveLocalMediaFilename(
+      '<img src="Ficha_Resumo_-_Pré-Natal_p8_fig1.png">',
+      'Ficha_Resumo_-_Pré-Natal_p8_fig1.png',
+      10,
+      0,
+      'obstetricia'
+    ),
+    'Ficha_Resumo_-_Pré-Natal_p8_fig1.png'
+  );
+});
+

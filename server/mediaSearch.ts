@@ -90,7 +90,7 @@ export const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
 ];
 
 const BLOCKED_IMAGE_URL_PATTERN =
-  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800)/i;
+  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800|kardiotokograf)/i;
 
 const WIKIMEDIA_USER_AGENT =
   'Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)';
@@ -521,6 +521,8 @@ function buildSuggestedMediaFilename(
             ? '.svg'
             : '.jpg';
   const cleanStem = (rawBaseName || fallbackSlug)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/\.[a-z0-9]{2,5}$/i, '')
     .replace(/[^a-z0-9]+/g, '_')

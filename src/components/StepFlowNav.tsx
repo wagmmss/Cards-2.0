@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check } from 'lucide-react';
+import { FileText, Map, ShieldCheck, Download, CheckCircle2 } from 'lucide-react';
 
 export interface StepFlowNavProps {
   hasInput: boolean;
@@ -10,17 +10,14 @@ export interface StepFlowNavProps {
   onSelectStep: (step: 1 | 2 | 3 | 4) => void;
 }
 
-const STEPS: Array<{
-  id: 1 | 2 | 3 | 4;
-  anchor: string;
+interface StepConfig {
+  step: 1 | 2 | 3 | 4;
   title: string;
   subtitle: string;
-}> = [
-  { id: 1, anchor: '#painel-entrada', title: '1. Importar Deck / PDF', subtitle: 'Tema e anexos' },
-  { id: 2, anchor: '#mapa-clinico', title: '2. Mapa Clínico P1–P4', subtitle: 'Diretrizes e checklist' },
-  { id: 3, anchor: '#linter-wozniak', title: '3. Revisão & Mídias', subtitle: 'Linter e imagens reais' },
-  { id: 4, anchor: '#exportar-apkg', title: '4. Exportar .apkg', subtitle: 'Anki + FSRS' },
-];
+  anchor: string;
+  done: boolean;
+  icon: React.ComponentType<{ className?: string }>;
+}
 
 export const StepFlowNav: React.FC<StepFlowNavProps> = ({
   hasInput,
@@ -30,45 +27,102 @@ export const StepFlowNav: React.FC<StepFlowNavProps> = ({
   activeStep,
   onSelectStep,
 }) => {
-  const completedMap: Record<1 | 2 | 3 | 4, boolean> = {
-    1: hasInput,
-    2: hasMap,
-    3: hasCards,
-    4: isReadyToExport,
+  const steps: StepConfig[] = [
+    {
+      step: 1,
+      title: '1. Fonte & Diretrizes',
+      subtitle: hasInput ? 'Material carregado' : 'PDFs, notas ou tema',
+      anchor: 'fonte-dados',
+      done: hasInput,
+      icon: FileText,
+    },
+    {
+      step: 2,
+      title: '2. Mapa Clínico P1–P4',
+      subtitle: hasMap ? 'Tópicos mapeados' : 'Diagnóstico → Conduta',
+      anchor: 'mapa-clinico',
+      done: hasMap,
+      icon: Map,
+    },
+    {
+      step: 3,
+      title: '3. Curadoria & Linter',
+      subtitle: hasCards ? 'Auditoria Wozniak ativa' : 'Revisão rápida & mídia',
+      anchor: 'linter-wozniak',
+      done: hasCards,
+      icon: ShieldCheck,
+    },
+    {
+      step: 4,
+      title: '4. Exportar Anki FSRS',
+      subtitle: isReadyToExport ? 'Pronto para exportar' : 'Pacote .apkg / .zip',
+      anchor: 'exportar-apkg',
+      done: isReadyToExport,
+      icon: Download,
+    },
+  ];
+
+  const handleClick = (item: StepConfig) => {
+    onSelectStep(item.step);
+    const el = document.getElementById(item.anchor);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   };
 
   return (
     <nav
-      aria-label="Etapas do Fluxo"
-      className="bg-[#0F1623] border border-slate-800 rounded-xl p-1.5 grid grid-cols-2 lg:grid-cols-4 gap-1.5"
+      aria-label="Fluxo de Arquitetura de Cards"
+      className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 bg-white border border-slate-200/90 rounded-xl p-2.5 shadow-xs"
     >
-      {STEPS.map((step) => {
-        const isDone = completedMap[step.id];
-        const isActive = activeStep === step.id;
+      {steps.map((item) => {
+        const Icon = item.icon;
+        const isActive = activeStep === item.step;
         return (
-          <a
-            key={step.id}
-            href={step.anchor}
-            onClick={() => onSelectStep(step.id)}
-            className={`group flex items-center justify-between gap-2 px-3 py-2 rounded-lg border transition-colors ${
+          <button
+            key={item.step}
+            type="button"
+            onClick={() => handleClick(item)}
+            className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-left transition-all cursor-pointer border ${
               isActive
-                ? 'bg-[#111827] border-sky-500/60 text-slate-100'
-                : 'bg-transparent border-transparent hover:bg-[#111827]/70 hover:border-slate-800 text-slate-300'
+                ? 'bg-sky-50/90 border-sky-300 text-sky-950 shadow-2xs'
+                : item.done
+                  ? 'bg-slate-50/70 border-slate-200/80 text-slate-800 hover:bg-slate-100/70'
+                  : 'bg-white border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-700'
             }`}
           >
-            <div className="min-w-0">
-              <div className="text-xs font-semibold truncate">{step.title}</div>
-              <div className="text-[11px] text-slate-400 truncate">{step.subtitle}</div>
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                isActive
+                  ? 'bg-sky-600 text-white'
+                  : item.done
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-slate-100 text-slate-500'
+              }`}
+            >
+              {item.done && !isActive ? (
+                <CheckCircle2 className="w-4 h-4" />
+              ) : (
+                <Icon className="w-4 h-4" />
+              )}
             </div>
-            {isDone && (
-              <span
-                aria-label="Etapa preenchida"
-                className="w-4 h-4 rounded-full bg-emerald-500/15 text-emerald-400 flex items-center justify-center shrink-0"
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold tracking-tight truncate">
+                {item.title}
+              </div>
+              <div
+                className={`text-[11px] truncate ${
+                  isActive
+                    ? 'text-sky-700 font-medium'
+                    : item.done
+                      ? 'text-emerald-700'
+                      : 'text-slate-400'
+                }`}
               >
-                <Check className="w-3 h-3" />
-              </span>
-            )}
-          </a>
+                {item.subtitle}
+              </div>
+            </div>
+          </button>
         );
       })}
     </nav>

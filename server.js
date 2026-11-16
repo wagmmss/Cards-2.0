@@ -426,8 +426,11 @@ function parseOrRecoverClinicalMapJson(rawText, fallbackDeckKey) {
     if (recoveredItems.length > 0) {
       const themeMatch = rawText.match(/"themeTitle"\s*:\s*"([^"]+)"/);
       const specMatch = rawText.match(/"specialty"\s*:\s*"([^"]+)"/);
+      const deckKeyMatch = rawText.match(/"deckKey"\s*:\s*"([^"]+)"/);
       const profileMatch = rawText.match(/"profile"\s*:\s*"([^"]+)"/);
-      const updatesBlockMatch = rawText.match(/"guidelineUpdates"\s*:\s*\[([\s\S]*?)\]/);
+      const updatesBlockMatch = rawText.match(
+        /"guidelineUpdates"\s*:\s*\[((?:\s*"(?:[^"\\]|\\.)*"\s*,?)*)/
+      );
       const guidelineUpdates = [];
       if (updatesBlockMatch?.[1]) {
         const strMatches = updatesBlockMatch[1].matchAll(/"((?:[^"\\]|\\.)*)"/g);
@@ -441,7 +444,7 @@ function parseOrRecoverClinicalMapJson(rawText, fallbackDeckKey) {
       return {
         themeTitle: themeMatch?.[1] || fallbackDeckKey.replace(/_/g, " "),
         specialty: specMatch?.[1] || "Cl\xEDnica",
-        deckKey: fallbackDeckKey,
+        deckKey: deckKeyMatch?.[1] || fallbackDeckKey,
         ...profileMatch?.[1] ? { profile: profileMatch[1] } : {},
         guidelineUpdates,
         items: recoveredItems,
@@ -3027,7 +3030,7 @@ var PT_TO_EN_MEDICAL_TERMS = [
   [/\bfratura|luxa[cç][aã]o|osteomielite|colles|monteggia\b/gi, "bone fracture dislocation radiograph x-ray"],
   [/\bleucemia|esfrega[cç]o|anemia\s+falciforme|drepan[oó]cito|bastonete\s+de\s+auer\b/gi, "peripheral blood smear microscopy hematology"]
 ];
-var BLOCKED_IMAGE_URL_PATTERN = /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800)/i;
+var BLOCKED_IMAGE_URL_PATTERN = /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800|kardiotokograf)/i;
 var WIKIMEDIA_USER_AGENT = "Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)";
 var MODALITY_KEYWORDS = [
   {
@@ -3336,7 +3339,7 @@ function buildSuggestedMediaFilename(rawBaseName, targetUrl, mime = "", fallback
   const extMatch = urlPath.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i);
   const mimeLower = (mime || "").toLowerCase();
   const resolvedExt = extMatch ? `.${extMatch[1].toLowerCase() === "jpeg" ? "jpg" : extMatch[1].toLowerCase()}` : mimeLower.includes("png") ? ".png" : mimeLower.includes("webp") ? ".webp" : mimeLower.includes("gif") ? ".gif" : mimeLower.includes("svg") ? ".svg" : ".jpg";
-  const cleanStem = (rawBaseName || fallbackSlug).toLowerCase().replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50);
+  const cleanStem = (rawBaseName || fallbackSlug).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50);
   return `${cleanStem || fallbackSlug}${resolvedExt}`;
 }
 async function searchWikipediaMedicalImages(enQueries, ptQuery, signal) {
