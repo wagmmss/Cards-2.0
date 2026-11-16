@@ -160,11 +160,13 @@ SUAS DIRETRIZES INEGOCIÁVEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + FSR
   * Se não houver figura correspondente nos PDFs, mas o card ganhar valor com imagem clínica real, insira <img src="buscar_imagem: termo clínico específico em PT ou EN"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">, <img src="buscar_imagem: pneumotorax hipertensivo radiografia torax">).
   * Coloque <img ...> na "question" ("image_mode": "recognition") quando o estudante precisa reconhecer o achado visual para responder; ou coloque no início do "hint" ("image_mode": "feedback", antes de <b>Comentário:</b>) quando a imagem reforça a explicação, classificação ou algoritmo sem entregar a resposta na frente.
   * Em cards puramente normativos, de dose ou cálculo simples onde imagem não acrescenta, NÃO force <img>.
-  * Para escores ou classificações estruturadas em tabela (ex.: Índice de Bishop, Apgar, Wells, CURB-65) sem figura correspondente nos PDFs, prefira renderizar uma tabela HTML compacta <table class="med-table"> no "hint" em vez de forçar busca de imagem externa.
+  * Para escores, critérios diagnósticos ou correlações topográficas estruturadas (ex.: Índice de Bishop, Apgar, Wells, CURB-65, Sgarbossa, Paredes/Coronárias no IAM) sem figura correspondente nos PDFs, renderize proativamente uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> no "hint" APÓS o texto de <b>Comentário:</b> (máx. 4 colunas, células curtas; a tabela NÃO entra na contagem de 180–300 chars do comentário).
+  * Toda <img> anexada exige legenda descritiva em <i>...</i> com ≥ 6 palavras descrevendo o achado visível real (PROIBIDO legenda genérica/tautológica ou que dê spoiler da resposta em cards recognition).
+- PRECISÃO TERMINOLÓGICA ESTRITA: valide cada termo bioquímico, anatômico e eletrocardiográfico com rigor absoluto (ex.: potássio = "calemia" / hipercalemia, NUNCA confundir com "litemia" de lítio; parear corretamente parede cardíaca × derivações × artéria culpada).
 - FILTRO NEGATIVO ESTRITO: ZERO genética/biologia molecular de bancada sem impacto terapêutico imediato, ZERO história da medicina/datas e ZERO epidemiologia percentual solta que não mude conduta.
-- PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>).
+- PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (→, ≥, ≤, ±, α, β, µg, mEq/L) e HTML (<sub>, <sup>, <b>, <table class="med-table">).
 - PROIBIDO categorias antigas da FDA na gestação ("Categoria B/C/D/X").
-- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.`;
+- "hint": sempre iniciando com "<b>Comentário:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres visíveis medidos APÓS o prefixo "<b>Comentário:</b> " excluindo <table>, teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.`;
 
 export function extractJsonBlock(text: string): string {
   if (!text) return '{}';
@@ -204,6 +206,40 @@ export function buildFullCardsDigest(rawCards: Array<Record<string, unknown>>): 
       const type = c.type === 'cloze' ? 'cloze' : 'basic';
       const priority = c.priority ? ` ${String(c.priority)}` : '';
       const topic = sanitizeCardTextForPrompt(c.topic, 140);
+      const verdict =
+        c.auditVerdict === 'rebuild' || c.auditVerdict === 'split'
+          ? String(c.auditVerdict)
+          : '';
+
+      if (verdict) {
+        const targetConcept = sanitizeCardTextForPrompt(c.auditTargetConcept, 200);
+        const auditReason = sanitizeCardTextForPrompt(c.auditReason, 220);
+        const suggestedType =
+          c.auditSuggestedType === 'cloze' || c.auditSuggestedType === 'basic'
+            ? String(c.auditSuggestedType)
+            : type;
+        const imgTags = `${String(c.question || '')} ${String(c.hint || '')}`.match(
+          /<img\b[^>]*>/gi
+        );
+        const preservedMedia = imgTags
+          ? imgTags
+              .filter((tag) => !/(?:buscar_imagem|pdfimg):/i.test(tag))
+              .map((tag) => sanitizeCardTextForPrompt(tag, 180))
+              .slice(0, 2)
+              .join(' ')
+          : '';
+        return [
+          `- ID:${id} [${type}${priority}] [AUDITORIA: ${verdict} → REFAZER DO ZERO — NÃO PARAFRASEAR TEXTO ANTIGO]`,
+          `  Topic: "${topic}"`,
+          targetConcept ? `  Conceito-Alvo: "${targetConcept}"` : null,
+          auditReason ? `  Motivo da Reconstrução: "${auditReason}"` : null,
+          `  Tipo Recomendado: "${suggestedType}"`,
+          preservedMedia ? `  Mídia Existente Válida (reutilizar somente se compatível): ${preservedMedia}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n');
+      }
+
       const q = sanitizeCardTextForPrompt(c.question, 600);
       const a = sanitizeCardTextForPrompt(c.answer, 250);
       const h = sanitizeCardTextForPrompt(c.hint, 700);
@@ -500,7 +536,26 @@ async function withTimeoutAndAbort<T>(
 
 export const PRIMARY_GEMINI_MODEL = 'gemini-4-hydrogen';
 export const FALLBACK_GEMINI_MODEL = 'gemini-3.1-flash-lite';
-const ALLOWED_GEMINI_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.8-flash']);
+const ALLOWED_GEMINI_MODELS = new Set([
+  'gemini-4-hydrogen',
+  'gemini-3.8-flash',
+  'gemini-3.1-flash-lite',
+]);
+
+const geminiModelCooldownUntil = new Map<string, number>();
+
+function parseGeminiRetryDelayMs(error: unknown): number {
+  const raw = extractErrorDetails(error);
+  const match = raw.match(/Please\s+retry\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s)/i);
+  if (match && match[1]) {
+    const val = Number(match[1]);
+    if (Number.isFinite(val) && val > 0) {
+      const ms = match[2].toLowerCase() === 'ms' ? val : val * 1000;
+      return Math.min(25_000, Math.max(2_500, Math.ceil(ms) + 400));
+    }
+  }
+  return 18_000;
+}
 
 export function resolveGeminiModel(requestedModel: unknown): string {
   if (typeof requestedModel === 'string') {
@@ -573,14 +628,36 @@ export async function generateContentWithRetry(
   ];
 
   let lastError: unknown;
+  let lastFailedModel: string | null = null;
+  let lastSuggestedDelayMs = 0;
 
   for (let i = 0; i < attemptPlans.length; i++) {
     const plan = attemptPlans[i];
     if (signal?.aborted) {
       throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
     }
-    if (plan.delayBeforeMs > 0) {
-      await sleepWithAbort(plan.delayBeforeMs, signal);
+
+    const now = Date.now();
+    const modelCoolingUntil = geminiModelCooldownUntil.get(plan.model) || 0;
+    const hasUncooledAlternatePlan = attemptPlans
+      .slice(i + 1)
+      .some((p) => p.model !== plan.model && (geminiModelCooldownUntil.get(p.model) || 0) <= now);
+
+    // If this model is already in a recent 429 cooldown and an uncooled fallback model exists, skip straight to fallback
+    if (modelCoolingUntil > now && hasUncooledAlternatePlan) {
+      continue;
+    }
+
+    // Never wait 2.5s when switching immediately from a failed baseModel to FALLBACK_GEMINI_MODEL on 429/timeout
+    const isFreshFallbackSwitch = lastFailedModel !== null && plan.model !== lastFailedModel;
+    const delayMs = isFreshFallbackSwitch
+      ? 250
+      : lastSuggestedDelayMs > 0 && plan.model === lastFailedModel
+        ? Math.min(10_000, Math.max(plan.delayBeforeMs, Math.min(lastSuggestedDelayMs, 8_000)))
+        : plan.delayBeforeMs;
+
+    if (delayMs > 0) {
+      await sleepWithAbort(delayMs, signal);
     }
 
     const attemptConfig = {
@@ -661,16 +738,28 @@ export async function generateContentWithRetry(
         `Timeout após ${Math.round(timeoutMs / 1000)}s no modelo ${plan.model}`
       );
 
+      geminiModelCooldownUntil.delete(plan.model);
       return result;
     } catch (error: unknown) {
       lastError = error;
+      lastFailedModel = plan.model;
+      const errDetails = extractErrorDetails(error);
       console.error(
         `[gemini] attempt ${i + 1}/${attemptPlans.length} (${plan.model}) failed:`,
-        extractErrorDetails(error)
+        errDetails
       );
 
       if (signal?.aborted) {
         throw error;
+      }
+
+      const isQuotaError = /429|RESOURCE_EXHAUSTED|quota exceeded/i.test(errDetails);
+      if (isQuotaError) {
+        const retryMs = parseGeminiRetryDelayMs(error);
+        lastSuggestedDelayMs = retryMs;
+        geminiModelCooldownUntil.set(plan.model, Date.now() + retryMs);
+      } else {
+        lastSuggestedDelayMs = 0;
       }
 
       const canRetry =
@@ -679,6 +768,20 @@ export async function generateContentWithRetry(
 
       if (!canRetry || i === attemptPlans.length - 1) {
         throw error;
+      }
+
+      // On 429 or TimeoutError, jump past any remaining retry on the exact same model when an alternate fallback model exists
+      if (
+        enableModelFallback &&
+        (isQuotaError || /TimeoutError|timed out|DEADLINE_EXCEEDED/i.test(errDetails))
+      ) {
+        while (
+          i + 1 < attemptPlans.length &&
+          attemptPlans[i + 1].model === plan.model &&
+          attemptPlans.slice(i + 2).some((p) => p.model !== plan.model)
+        ) {
+          i++;
+        }
       }
     }
   }

@@ -18,6 +18,10 @@ import {
   lintDeck,
   resolveOrCreateNoteGuid,
 } from '../utils/wozniakLinter';
+import type {
+  ExportFormatType,
+  PendingExportConfirmation,
+} from '../components/ExportConfirmationModal';
 
 const ANKI_CONNECT_CLINICAL_CSS = `.card {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -140,114 +144,98 @@ export function useDeckExporter(params: {
   const [isExportingBundle, setIsExportingBundle] = useState(false);
   const [isExportingApkg, setIsExportingApkg] = useState(false);
   const [isSyncingAnkiConnect, setIsSyncingAnkiConnect] = useState(false);
+  const [pendingExportConfirm, setPendingExportConfirm] =
+    useState<PendingExportConfirmation | null>(null);
 
-  const confirmExportIfVisualAuditFails = useCallback(
-    (cleanDeckKey: string, exportLabel: string): boolean => {
+  const checkExportAuditOrPrompt = useCallback(
+    (
+      cleanDeckKey: string,
+      format: ExportFormatType,
+      exportLabel: string,
+      bypassAudit?: boolean
+    ): boolean => {
+      if (bypassAudit) return true;
       const deckAudit = lintDeck(cards, Object.keys(localMediaAssets), cleanDeckKey);
       if (deckAudit.canExport) return true;
-
-      const reasons: string[] = [];
-      if (deckAudit.duplicateImages.length > 0) {
-        reasons.push(
-          `• ${deckAudit.duplicateImages.length} imagem(ns) repetida(s) entre cards`
-        );
-      }
-      const missingLegendErrs = deckAudit.errors.filter(
-        (e) => e.code === 'IMAGE_MISSING_LEGEND'
-      );
-      if (missingLegendErrs.length > 0) {
-        const ids = missingLegendErrs.slice(0, 6).map((e) => `#${e.cardId}`).join(', ');
-        reasons.push(
-          `• ${missingLegendErrs.length} imagem(ns) sem legenda descritiva <i> (mín. 3 palavras) [${ids}]`
-        );
-      }
-      const modalityErrs = deckAudit.errors.filter((e) => e.code === 'MODALITY_CONFLICT');
-      if (modalityErrs.length > 0) {
-        const ids = modalityErrs.slice(0, 6).map((e) => `#${e.cardId}`).join(', ');
-        reasons.push(
-          `• ${modalityErrs.length} conflito(s) de modalidade exame×legenda [${ids}]`
-        );
-      }
-
-      if (typeof window === 'undefined' || typeof window.confirm !== 'function') {
-        return true;
-      }
-
-      const proceed = window.confirm(
-        `A auditoria visual detectou pendências antes de exportar ${exportLabel}:\n\n${reasons.join(
-          '\n'
-        )}\n\nDeseja exportar mesmo assim? (Clique em "Cancelar" para revisar os cards antes.)`
-      );
-      if (!proceed) {
-        showStatus(`Exportação ${exportLabel} cancelada para revisão da auditoria visual.`, 'info');
-      }
-      return proceed;
+      setPendingExportConfirm({
+        format,
+        label: exportLabel,
+        deckAudit,
+      });
+      return false;
     },
-    [cards, localMediaAssets, showStatus]
+    [cards, localMediaAssets]
   );
 
-  const handleDownloadJson = useCallback(() => {
-    if (cards.length === 0) return;
-    const cleanDeckKey = sanitizeDeckKey(deckKey);
-    if (!confirmExportIfVisualAuditFails(cleanDeckKey, 'JSON')) return;
-    const jsonString = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
-    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
-    triggerBlobDownload(blob, `${cleanDeckKey}_notes.json`);
-  }, [cards, confirmExportIfVisualAuditFails, deckKey, extractedMeta]);
+  const handleDownloadJson = useCallback(
+    (bypassAudit = false) => {
+      if (cards.length === 0) return;
+      const cleanDeckKey = sanitizeDeckKey(deckKey);
+      if (!checkExportAuditOrPrompt(cleanDeckKey, 'json', 'JSON', bypassAudit)) return;
+      const jsonString = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
+      const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+      triggerBlobDownload(blob, `${cleanDeckKey}_notes.json`);
+    },
+    [cards, checkExportAuditOrPrompt, deckKey, extractedMeta]
+  );
 
-  const handleDownloadOfflineBundle = useCallback(async () => {
-    if (cards.length === 0) return;
-    const cleanDeckKey = sanitizeDeckKey(deckKey);
-    if (!confirmExportIfVisualAuditFails(cleanDeckKey, 'ZIP Offline')) return;
-    const notesJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
-    const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
-    const flatGuidEntries = extractSanitizedGuidEntries(guidRegistry);
+  const handleDownloadOfflineBundle = useCallback(
+    async (bypassAudit = false) => {
+      if (cards.length === 0) return;
+      const cleanDeckKey = sanitizeDeckKey(deckKey);
+      if (!checkExportAuditOrPrompt(cleanDeckKey, 'zip', 'ZIP Offline', bypassAudit)) return;
+      const notesJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
+      const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
+      const flatGuidEntries = extractSanitizedGuidEntries(guidRegistry);
 
-    setIsExportingBundle(true);
-    try {
-      const { blob, headers } = await fetchBlobWithTimeout('/api/media/export-bundle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deckKey: cleanDeckKey,
-          notesJson,
-          mediaManifest,
-          mediaAssets: localMediaAssets,
-          guidRegistry: flatGuidEntries,
-        }),
-        timeoutMs: 90_000,
-      });
+      setIsExportingBundle(true);
+      try {
+        const { blob, headers } = await fetchBlobWithTimeout('/api/media/export-bundle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deckKey: cleanDeckKey,
+            notesJson,
+            mediaManifest,
+            mediaAssets: localMediaAssets,
+            guidRegistry: flatGuidEntries,
+          }),
+          timeoutMs: 90_000,
+        });
 
-      const resolvedCount = Number(headers.get('X-Resolved-Media-Count') || 0);
-      const missingCount = Number(headers.get('X-Missing-Media-Count') || 0);
-      const missingHeader = headers.get('X-Missing-Media') || '';
-      const missingList = missingHeader ? decodeURIComponent(missingHeader) : '';
+        const resolvedCount = Number(headers.get('X-Resolved-Media-Count') || 0);
+        const missingCount = Number(headers.get('X-Missing-Media-Count') || 0);
+        const missingHeader = headers.get('X-Missing-Media') || '';
+        const missingList = missingHeader ? decodeURIComponent(missingHeader) : '';
 
-      triggerBlobDownload(blob, `${cleanDeckKey}_anki_offline_bundle.zip`);
+        triggerBlobDownload(blob, `${cleanDeckKey}_anki_offline_bundle.zip`);
 
-      if (missingCount > 0) {
-        showStatus(
-          `Pacote .zip baixado (${resolvedCount}/${mediaManifest.length} mídias embutidas), porém ${missingCount} mídia(s) não puderam ser baixadas (${missingList}).`,
-          'error'
-        );
-      } else {
-        showStatus(
-          `Pacote Anki Offline (${cleanDeckKey}_anki_offline_bundle.zip) baixado com ${resolvedCount}/${mediaManifest.length} mídia(s) e GUIDs FSRS.`,
-          'success'
-        );
+        if (missingCount > 0) {
+          showStatus(
+            `Pacote .zip baixado (${resolvedCount}/${mediaManifest.length} mídias embutidas), porém ${missingCount} mídia(s) não puderam ser baixadas (${missingList}).`,
+            'error'
+          );
+        } else {
+          showStatus(
+            `Pacote Anki Offline (${cleanDeckKey}_anki_offline_bundle.zip) baixado com ${resolvedCount}/${mediaManifest.length} mídia(s) e GUIDs FSRS.`,
+            'success'
+          );
+        }
+      } catch {
+        handleDownloadJson(true);
+        showStatus('Falha ao empacotar ZIP offline; JSON canônico baixado como fallback.', 'error');
+      } finally {
+        setIsExportingBundle(false);
       }
-    } catch {
-      handleDownloadJson();
-      showStatus('Falha ao empacotar ZIP offline; JSON canônico baixado como fallback.', 'error');
-    } finally {
-      setIsExportingBundle(false);
-    }
-  }, [cards, confirmExportIfVisualAuditFails, deckKey, extractedMeta, guidRegistry, handleDownloadJson, localMediaAssets, showStatus]);
+    },
+    [cards, checkExportAuditOrPrompt, deckKey, extractedMeta, guidRegistry, handleDownloadJson, localMediaAssets, showStatus]
+  );
 
-  const handleExportApkg = useCallback(async () => {
-    if (cards.length === 0) return;
-    const cleanDeckKey = sanitizeDeckKey(deckKey);
-    if (!confirmExportIfVisualAuditFails(cleanDeckKey, '.apkg')) return;
+  const handleExportApkg = useCallback(
+    async (bypassAudit = false) => {
+      if (cards.length === 0) return;
+      const cleanDeckKey = sanitizeDeckKey(deckKey);
+      if (!checkExportAuditOrPrompt(cleanDeckKey, 'apkg', '.apkg', bypassAudit)) return;
     const deterministicDeckId = computeDeterministicDeckId(cleanDeckKey);
     const canonicalJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
     const canonicalNotes: Array<{ id: number }> = JSON.parse(canonicalJson);
@@ -356,13 +344,14 @@ export function useDeckExporter(params: {
     } finally {
       setIsExportingApkg(false);
     }
-  }, [cards, clinicalMap, deckKey, extractedMeta, guidRegistry, localMediaAssets, mergeGuidEntries, showStatus]);
+  }, [cards, checkExportAuditOrPrompt, clinicalMap, deckKey, extractedMeta, guidRegistry, localMediaAssets, mergeGuidEntries, showStatus]);
 
   // Ponte Opcional para AnkiConnect Local com sincronização de modelos CSS, mídias e campos (['Question', 'Topic', 'Answer', 'Hint'])
-  const handleSyncAnkiConnect = useCallback(async () => {
+  const handleSyncAnkiConnect = useCallback(async (bypassAudit = false) => {
     if (cards.length === 0) return;
-    setIsSyncingAnkiConnect(true);
     const cleanDeckKey = sanitizeDeckKey(deckKey);
+    if (!checkExportAuditOrPrompt(cleanDeckKey, 'anki_connect', 'AnkiConnect', bypassAudit)) return;
+    setIsSyncingAnkiConnect(true);
     const deckTitle = clinicalMap?.themeTitle
       ? `Internato::${clinicalMap.themeTitle}`
       : `Internato::${cleanDeckKey}`;
@@ -515,12 +504,46 @@ export function useDeckExporter(params: {
     } finally {
       setIsSyncingAnkiConnect(false);
     }
-  }, [cards, clinicalMap, deckKey, extractedMeta, localMediaAssets, showStatus]);
+  }, [cards, checkExportAuditOrPrompt, clinicalMap, deckKey, extractedMeta, localMediaAssets, showStatus]);
+
+  const cancelPendingExport = useCallback(() => {
+    if (pendingExportConfirm) {
+      showStatus(
+        `Exportação ${pendingExportConfirm.label} cancelada para revisão da auditoria.`,
+        'info'
+      );
+      setPendingExportConfirm(null);
+    }
+  }, [pendingExportConfirm, showStatus]);
+
+  const confirmPendingExport = useCallback(() => {
+    if (!pendingExportConfirm) return;
+    const fmt = pendingExportConfirm.format;
+    setPendingExportConfirm(null);
+    if (fmt === 'json') {
+      handleDownloadJson(true);
+    } else if (fmt === 'zip') {
+      void handleDownloadOfflineBundle(true);
+    } else if (fmt === 'apkg') {
+      void handleExportApkg(true);
+    } else if (fmt === 'anki_connect') {
+      void handleSyncAnkiConnect(true);
+    }
+  }, [
+    handleDownloadJson,
+    handleDownloadOfflineBundle,
+    handleExportApkg,
+    handleSyncAnkiConnect,
+    pendingExportConfirm,
+  ]);
 
   return {
     isExportingBundle,
     isExportingApkg,
     isSyncingAnkiConnect,
+    pendingExportConfirm,
+    confirmPendingExport,
+    cancelPendingExport,
     handleDownloadJson,
     handleDownloadOfflineBundle,
     handleExportApkg,

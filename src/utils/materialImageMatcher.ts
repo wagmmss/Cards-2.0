@@ -12,6 +12,7 @@ export interface MaterialCatalogItem {
 
 export type ModalityKey =
   | 'ecg'
+  | 'echo'
   | 'rx'
   | 'tc'
   | 'rm'
@@ -29,6 +30,7 @@ export type ModalityKey =
 
 const VISUAL_DIAGNOSTIC_MODALITIES = new Set<ModalityKey>([
   'ecg',
+  'echo',
   'rx',
   'tc',
   'rm',
@@ -54,7 +56,14 @@ const MODALITY_PATTERNS: Array<{
     trigger:
       /\b(ecg|ekg|eletrocardiograma|supra|infra|arritmia|fibrilacao|flutter|bav|taquicardia|qrs|onda|delta|wpw|brd|bre|brugada)\b/i,
     candidate:
-      /\b(ecg|ekg|eletrocardiograma|electrocardiogram|derivac|qrs|supra|st|arritmia|onda|ritmo|v1|v2|v5|v6)\b/i,
+      /\b(ecg|ekg|eletrocardiograma|electrocardiogram|derivac|qrs|supra|arritmia|onda|ritmo|v1|v2|v5|v6|litfl)\b/i,
+  },
+  {
+    key: 'echo',
+    trigger:
+      /\b(ecocardiograma|ecocardiografia|echocardiogra\w*|ecodoppler\s+cardiaco|modo[\s-]?m|fracao\s+de\s+ejecao)\b/i,
+    candidate:
+      /\b(ecocardiograma|ecocardiografia|echocardiogra\w*|echopedia|m[-\s]?mode|apical\s+4|parasternal\s+long)\b/i,
   },
   {
     key: 'rx',
@@ -347,7 +356,7 @@ export function collectAllMaterialImages(pdfs: UploadedPdfFile[]): PdfExtractedI
 export function buildCatalogFromExtractedImages(
   images: PdfExtractedImage[]
 ): MaterialCatalogItem[] {
-  return (images || []).slice(0, 60).map((img) => ({
+  return (images || []).slice(0, 160).map((img) => ({
     id: img.id,
     pdfName: img.pdfName,
     pageNumber: img.pageNumber,

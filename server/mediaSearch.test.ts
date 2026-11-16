@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildEnglishMedicalSearchQueries,
+  extractEditorialImageUrlsFromHtml,
   isSpamOrLogoImageUrl,
   isSvgImageUrl,
   normalizeImageCanonicalKey,
@@ -688,3 +689,82 @@ test('Bishop score / labor induction queries do not drift into cardiotocography 
     true
   );
 });
+
+test('scoreImageRelevance penalizes Echo-vs-ECG (-85), normal sinus ECG for pathology (-32), and animated GIF (-45)', () => {
+  const ecgPathologyCand = {
+    title: 'Atrial flutter 12-lead ECG LITFL',
+    description: 'Sawtooth flutter waves in inferior leads II, III, aVF',
+    source: 'litfl.com (via Google Search)',
+    thumbUrl: 'https://litfl.com/ecg/atrial_flutter_static.jpg',
+    fullUrl: 'https://litfl.com/ecg/atrial_flutter_static.jpg',
+    isSvg: false,
+  };
+  const echoMismatchCand = {
+    title: 'M-mode echocardiogram of atrial flutter flutter waves',
+    description: 'Transthoracic echocardiography apical view with atrial flutter',
+    source: 'Echopedia',
+    thumbUrl: 'https://echopedia.org/media/flutter_mmode_echo.jpg',
+    fullUrl: 'https://echopedia.org/media/flutter_mmode_echo.jpg',
+    isSvg: false,
+  };
+  const normalEcgCand = {
+    title: 'Normal sinus rhythm 12-lead ECG',
+    description: 'Normal ECG baseline tracing for comparison with atrial flutter',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/normal_sinus_ecg.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/normal_sinus_ecg.jpg',
+    isSvg: false,
+  };
+  const animatedGifCand = {
+    title: 'Atrial flutter animation ECG',
+    description: 'Animated reentry loop atrial flutter',
+    source: 'Wikimedia Commons',
+    thumbUrl: 'https://upload.wikimedia.org/commons/atrial_flutter_loop.gif',
+    fullUrl: 'https://upload.wikimedia.org/commons/atrial_flutter_loop.gif',
+    isSvg: false,
+  };
+
+  const ctx = {
+    query: 'flutter atrial ondas F ECG',
+    topic: 'Cardiologia - Arritmias',
+    question: 'Qual taquiarritmia está representada no ECG de 12 derivações?',
+    answer: 'Flutter atrial típico.',
+    enQueries: ['atrial flutter ECG LITFL'],
+  };
+
+  const staticEcgScore = scoreImageRelevance(ecgPathologyCand, ctx);
+  const echoScore = scoreImageRelevance(echoMismatchCand, ctx);
+  const normalScore = scoreImageRelevance(normalEcgCand, ctx);
+  const gifScore = scoreImageRelevance(animatedGifCand, ctx);
+
+  assert.ok(staticEcgScore - echoScore >= 85, `Expected ECG (${staticEcgScore}) >> Echo (${echoScore})`);
+  assert.ok(staticEcgScore > normalScore + 30, `Expected pathology ECG (${staticEcgScore}) >> normal sinus (${normalScore})`);
+  assert.ok(staticEcgScore > gifScore + 40, `Expected static ECG (${staticEcgScore}) >> animated GIF (${gifScore})`);
+});
+
+test('extractEditorialImageUrlsFromHtml prioritizes <article>/<figure> clinical figures over <nav>/<aside>/<footer> pollution', () => {
+  const sampleHtml = `
+    <html>
+      <body>
+        <header><img src="/assets/banner-hospital.jpg" width="800" alt="Hospital Header" /></header>
+        <nav><img src="/sidebar/promo-curso.jpg" width="600" alt="PromoSidebar" /></nav>
+        <article>
+          <h1>Anterior STEMI ECG Case</h1>
+          <figure>
+            <img src="/uploads/anterior-stemi-12lead.jpg" width="900" alt="Anterior STEMI 12-lead ECG" />
+          </figure>
+        </article>
+        <aside><img src="/related/author-avatar.jpg" width="400" alt="Related thumbnail" /></aside>
+        <footer><img src="/footer/badge.png" width="300" alt="Footer badge" /></footer>
+      </body>
+    </html>
+  `;
+  const urls = extractEditorialImageUrlsFromHtml(
+    sampleHtml,
+    'https://litfl.com/anterior-stemi-case/',
+    'Anterior STEMI'
+  );
+  assert.equal(urls.length, 1);
+  assert.equal(urls[0].url, 'https://litfl.com/uploads/anterior-stemi-12lead.jpg');
+});
+

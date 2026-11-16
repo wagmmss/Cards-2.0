@@ -52,7 +52,7 @@ export function createMediaRouter(): express.Router {
 
   // Buscar Imagens Médicas Fidedignas na Internet
   router.post('/media/search-medical-images', async (req, res) => {
-    const { signal, cleanup } = attachRequestAbort(req, res, 18_000);
+    const { signal, cleanup } = attachRequestAbort(req, res, 28_000);
     try {
       const {
         query = '',

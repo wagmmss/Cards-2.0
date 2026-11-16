@@ -62,6 +62,50 @@ export interface MedicalImageResult {
   materialScore?: number;
 }
 
+export type CardAuditVerdict = 'keep' | 'rebuild' | 'split' | 'prune';
+
+export interface CardAuditItem {
+  cardId: number;
+  verdict: CardAuditVerdict;
+  score: number;
+  reason: string;
+  clinicalIssue?: string;
+  targetConcept: string;
+  priority: PriorityLevel;
+  suggestedType: CardType;
+}
+
+export interface DeckAuditReport {
+  deckKey: string;
+  overallSummary: string;
+  counts: {
+    keep: number;
+    rebuild: number;
+    split: number;
+    prune: number;
+  };
+  items: CardAuditItem[];
+}
+
+export interface DeckFinalVerificationReport {
+  overallScore: number;
+  approved: boolean;
+  mapCoveragePct: number;
+  summary: string;
+  clinicalAccuracyNotes: string[];
+  missingConcepts: Array<{
+    priority: PriorityLevel;
+    subtopic: string;
+    concept: string;
+    recommendedType: CardType;
+  }>;
+  weakCardFixes: Array<{
+    cardId: number;
+    issue: string;
+    fixInstruction: string;
+  }>;
+}
+
 export interface CanonicalCard {
   id: number;
   type: CardType;
@@ -79,6 +123,12 @@ export interface CanonicalCard {
   imageVerified?: boolean;
   imageAlternatives?: MedicalImageResult[];
   isResolvingImage?: boolean;
+  auditVerdict?: CardAuditVerdict;
+  auditReason?: string;
+  auditScore?: number;
+  auditTargetConcept?: string;
+  auditSuggestedType?: CardType;
+  needsManualImage?: boolean;
 }
 
 export interface ExtractedDeckMetadata {
@@ -142,6 +192,8 @@ export type WarningCode =
   | 'FDA_OBSOLETE_CATEGORY'
   | 'LEGACY_MARKERS'
   | 'RECOGNITION_MISMATCH'
+  | 'ORPHAN_VISUAL_REFERENCE'
+  | 'TABLE_MALFORMED'
   | 'MATUSCHAK_UNFOCUSED_SET'
   | 'NIELSEN_PASSIVE_OR_BINARY';
 
@@ -183,6 +235,7 @@ export interface UploadedPdfFile {
   textContent?: string;
   docRole?: 'diretriz' | 'resumo' | 'questoes' | 'documento';
   extractedImages?: PdfExtractedImage[];
+  rawArrayBuffer?: ArrayBuffer;
 }
 
 export interface DeckCurationStats {

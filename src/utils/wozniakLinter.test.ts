@@ -1492,5 +1492,198 @@ test('pdfImageCore filters 3+ page watermarks before caption assignment, activat
   assert.equal(midCtx.captionHint.startsWith('tendo contração adequada'), true);
 });
 
+test('pdfImageCore activates fallbackCropCandidate for dense pages (up to 6500 chars) with vector diagrams and formatCanonicalDeckJson strips UI audit metadata', () => {
+  const denseVectorText =
+    'Partograma e evolução clínica no trabalho de parto ativo. '.repeat(75) +
+    'Fluxograma de parada secundária da dilatação e descida.';
+  assert.equal(denseVectorText.length > 2600 && denseVectorText.length < 6500, true);
+
+  const pageBuffers: RawPdfPageBuffer[] = [
+    {
+      pageNumber: 5,
+      pageText: denseVectorText,
+      captionMatches: collectPageCaptionMatches(denseVectorText),
+      hasVectorDiagramOps: true,
+      candidates: [
+        {
+          id: 'p5_small_icon',
+          pdfName: 'parto.pdf',
+          pageNumber: 5,
+          width: 400,
+          height: 300,
+          dataUrl: 'data:image/jpeg;base64,ICON',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p5_icon.jpg',
+          kind: 'embedded',
+          signature: 'unique_icon_400x300',
+          byteLengthHint: 8000,
+        },
+      ],
+      fallbackCropCandidate: {
+        id: 'p5_vector_flowchart',
+        pdfName: 'parto.pdf',
+        pageNumber: 5,
+        width: 1000,
+        height: 1400,
+        dataUrl: 'data:image/jpeg;base64,FLOWCHART',
+        captionHint: '',
+        pageTextSnippet: denseVectorText.slice(0, 200),
+        suggestedFilename: 'p5_flow.jpg',
+        kind: 'page_crop',
+        signature: 'page_5_crop',
+        byteLengthHint: 42000,
+      },
+    },
+  ];
+
+  const extracted = assignCaptionsAndFilterWatermarks(pageBuffers, 300);
+  assert.equal(extracted.some((img) => img.id === 'p5_vector_flowchart'), true);
+
+  const cardWithUiMeta: CanonicalCard = {
+    id: 171000901,
+    type: 'basic',
+    topic: 'Obstetrícia - Trabalho de Parto',
+    question: 'Qual a linha do partograma indica necessidade de intervenção ativa após 4 horas da linha de alerta?',
+    answer: 'Linha de ação.',
+    hint: '<b>Comentário:</b> A <b>linha de ação</b> fica 4 horas à direita da linha de alerta, indicando avaliação imediata da progressão.',
+    priority: 'P1',
+    auditVerdict: 'rebuild',
+    auditReason: 'Card antigo tinha enunciado vago.',
+    auditScore: 4,
+    auditTargetConcept: 'Critério de linha de ação no partograma',
+    auditSuggestedType: 'basic',
+    needsManualImage: true,
+    imageVerified: false,
+  };
+
+  const jsonStr = formatCanonicalDeckJson(
+    [cardWithUiMeta],
+    {
+      existingIds: [171000901],
+      mediaTags: [],
+      detectedDeckKey: 'assistencia_parto',
+      rawCards: [],
+    },
+    'assistencia_parto'
+  );
+  const parsed = JSON.parse(jsonStr) as Array<Record<string, unknown>>;
+  const note = parsed[0];
+  assert.equal('auditVerdict' in note, false);
+  assert.equal('auditReason' in note, false);
+  assert.equal('auditScore' in note, false);
+  assert.equal('auditTargetConcept' in note, false);
+  assert.equal('auditSuggestedType' in note, false);
+  assert.equal('needsManualImage' in note, false);
+  assert.equal('priority' in note, false);
+  assert.equal('sources' in note, false);
+  assert.equal(note.id, 171000901);
+});
+
+test('detects ORPHAN_VISUAL_REFERENCE, TABLE_MALFORMED, silent cloze-as-basic normalization, and preserves med-table in surgicalRepairCardLocal', () => {
+  const orphanVisualCard: CanonicalCard = {
+    id: 171009901,
+    type: 'basic',
+    topic: 'Cardiologia - Taquiarritmias',
+    question: 'Analise o ECG abaixo em paciente estável. Qual a arritmia demonstrada?',
+    answer: 'Flutter atrial típico.',
+    hint: '<b>Comentário:</b> Ondas F em <b>dente de serra</b> em DII, DIII e aVF diferenciam flutter de <b>taquicardia sinusal</b>.',
+  };
+  const orphanLint = lintCard(orphanVisualCard);
+  assert.equal(
+    orphanLint.warnings.some((w) => w.code === 'ORPHAN_VISUAL_REFERENCE' && w.severity === 'error'),
+    true
+  );
+
+  // removeMissingMediaFromCard must clean orphaned visual deixis so no ORPHAN_VISUAL_REFERENCE remains
+  const missingImgCard: CanonicalCard = {
+    id: 171009902,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cardiologia - ECG',
+    question: 'Paciente com dor torácica realiza o exame abaixo:<br><img src="ausente_ecg.png"><br>Qual a artéria culpada mais provável?',
+    answer: 'Artéria descendente anterior.',
+    hint: '<i>Traçado de 12 derivações evidenciando supradesnivelamento de ST em V1 a V4.</i><br><br><b>Comentário:</b> O <b>supradesnivelamento em V1-V4</b> localiza lesão anterior, diferente da <b>parede inferior</b> (DII, DIII e aVF).',
+  };
+  const cleanedMissing = removeMissingMediaFromCard(missingImgCard, []);
+  const cleanedLint = lintCard(cleanedMissing);
+  assert.equal(
+    cleanedLint.warnings.some((w) => w.code === 'ORPHAN_VISUAL_REFERENCE'),
+    false,
+    `Unexpected ORPHAN_VISUAL_REFERENCE after cleanup: ${cleanedMissing.question}`
+  );
+
+  // Malformed unclosed table triggers TABLE_MALFORMED error
+  const brokenTableCard: CanonicalCard = {
+    id: 171009903,
+    type: 'basic',
+    topic: 'Cardiologia - IAMCSST',
+    question: 'Na suspeita de IAM inferior em DII, DIII e aVF, quais derivações adicionais solicitar imediatamente?',
+    answer: 'V3R, V4R, V7, V8 e V9.',
+    hint: '<b>Comentário:</b> O registro de <b>derivações direitas e posteriores</b> identifica extensão para VD e parede posterior.<br><table class="med-table"><thead><tr><th>Parede</th><th>Derivações</th></tr></thead><tbody><tr><td>Inferior</td><td>DII, DIII, aVF',
+  };
+  assert.equal(
+    lintCard(brokenTableCard).warnings.some((w) => w.code === 'TABLE_MALFORMED' && w.severity === 'error'),
+    true
+  );
+
+  // Valid table + long text preserved cleanly by surgicalRepairCardLocal without cutting mid-table
+  const validTableCard: CanonicalCard = {
+    id: 171009904,
+    type: 'basic',
+    topic: 'Cardiologia - IAMCSST',
+    question: 'Na suspeita de IAM inferior em DII, DIII e aVF, quais derivações adicionais solicitar imediatamente?',
+    answer: 'V3R, V4R, V7, V8 e V9.',
+    hint: '<b>Comentário:</b> As <b>derivações direitas (V3R-V4R)</b> rastreiam infarto de ventrículo direito, enquanto <b>V7-V9</b> avaliam parede dorsal.<br><table class="med-table"><thead><tr><th>Parede</th><th>Derivações</th><th>Artéria</th></tr></thead><tbody><tr><td>Anterior</td><td>V1-V4</td><td>Descendente anterior</td></tr><tr><td>Inferior</td><td>DII, DIII, aVF</td><td>Coronária direita</td></tr></tbody></table>',
+  };
+  const repairedTable = surgicalRepairCardLocal(validTableCard);
+  assert.equal(repairedTable.hint.includes('</table>'), true);
+  assert.equal(
+    lintCard(repairedTable).warnings.some((w) => w.code === 'TABLE_MALFORMED'),
+    false
+  );
+
+  // Silent cloze stored as basic with empty answer auto-normalizes to cloze
+  const silentClozeAsBasic: CanonicalCard = {
+    id: 171009905,
+    type: 'basic',
+    topic: 'Cardiologia - Brugada',
+    question: 'A síndrome de Brugada tipo 1 apresenta padrão côncavo/convexo em {{c1::V1 e V2}}.',
+    answer: '',
+    hint: '<b>Comentário:</b> O <b>padrão tipo 1 em V1-V2</b> confere maior risco arrítmico, diferente do <b>padrão tipo 2</b> em sela.',
+  };
+  const repairedSilent = surgicalRepairCardLocal(silentClozeAsBasic);
+  assert.equal(repairedSilent.type, 'cloze');
+
+  // Broadened COMPOUND_QUESTION and VAGUE_TEMPORAL_WINDOW checks
+  const disguisedCompound: CanonicalCard = {
+    id: 171009906,
+    type: 'basic',
+    topic: 'Cardiologia - Emergência',
+    question: 'Paciente com taquicardia regular de QRS estreito em PS. Qual o diagnóstico provável e o antiarrítmico de escolha?',
+    answer: 'Taquicardia supraventricular e adenosina.',
+    hint: '<b>Comentário:</b> A <b>adenosina em bolus rápido</b> interrompe reentrada nodal, diferente do <b>choque sincronizado</b> na instabilidade.',
+  };
+  assert.equal(
+    lintCard(disguisedCompound).warnings.some((w) => w.code === 'COMPOUND_QUESTION'),
+    true
+  );
+
+  const vagueManejo: CanonicalCard = {
+    id: 171009907,
+    type: 'basic',
+    topic: 'Cardiologia - Emergência',
+    question: 'Paciente com dor torácica e infradesnivelamento difuso de ST. Qual é o manejo?',
+    answer: 'Estratificação invasiva precoce.',
+    hint: '<b>Comentário:</b> A <b>estratificação de risco TIMI/GRACE</b> orienta o momento do cateterismo, diferente do <b>IAMCSST</b> imediato.',
+  };
+  assert.equal(
+    lintCard(vagueManejo).warnings.some((w) => w.code === 'VAGUE_TEMPORAL_WINDOW'),
+    true
+  );
+});
+
+
+
 
 

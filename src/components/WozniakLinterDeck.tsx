@@ -17,7 +17,9 @@ import {
 import {
   CanonicalCard,
   CardLintResult,
+  DeckAuditReport,
   DeckCurationStats,
+  DeckFinalVerificationReport,
   ExtractedDeckMetadata,
   MedicalImageResult,
 } from '../types/deck';
@@ -52,6 +54,14 @@ interface WozniakLinterDeckProps {
   onCancelAutoResolve?: () => void;
   isAutoResolvingImages?: boolean;
   pdfExtractedImages?: MedicalImageResult[];
+  pdfCount?: number;
+  onOpenPdfGallery?: (cardId?: number | null, tab?: 'extracted' | 'browse') => void;
+  deckAuditReport?: DeckAuditReport | null;
+  onAuditExistingDeck?: () => void;
+  isAuditingDeck?: boolean;
+  finalVerificationReport?: DeckFinalVerificationReport | null;
+  onVerifyDeckAdequacy?: () => void;
+  isVerifyingDeck?: boolean;
   onSuggestVisualCards?: () => void;
   onCancelSuggestVisuals?: () => void;
   isSuggestingVisuals?: boolean;
@@ -64,6 +74,12 @@ interface WozniakLinterDeckProps {
   onAddNewCard: () => void;
   onAutoRepairAllFlagged: () => void;
   onAutoRepairSingleCard: (cardId: number) => void;
+  onAutoRepairSingleCardWithAi?: (
+    cardId: number,
+    targetField?: 'question' | 'answer' | 'hint' | 'topic',
+    fieldInstruction?: string
+  ) => void;
+  repairingCardId?: number | null;
   onLoadGenericSample: () => void;
   isRepairing: boolean;
   onDownloadJson: () => void;
@@ -86,6 +102,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   onCancelAutoResolve,
   isAutoResolvingImages = false,
   pdfExtractedImages = [],
+  pdfCount = 0,
+  onOpenPdfGallery,
+  deckAuditReport,
+  onAuditExistingDeck,
+  isAuditingDeck = false,
+  finalVerificationReport,
+  onVerifyDeckAdequacy,
+  isVerifyingDeck = false,
   onSuggestVisualCards,
   onCancelSuggestVisuals,
   isSuggestingVisuals = false,
@@ -98,6 +122,8 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   onAddNewCard,
   onAutoRepairAllFlagged,
   onAutoRepairSingleCard,
+  onAutoRepairSingleCardWithAi,
+  repairingCardId = null,
   onLoadGenericSample,
   isRepairing,
   onDownloadJson,
@@ -107,12 +133,13 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   isExportingApkg = false,
 }) => {
   const [filterMode, setFilterMode] = useState<
-    'ALL' | 'WARNINGS' | 'MISSING_MEDIA' | 'BASIC' | 'CLOZE'
+    'ALL' | 'WARNINGS' | 'MISSING_MEDIA' | 'MANUAL_IMAGE' | 'AUDIT_FLAGGED' | 'BASIC' | 'CLOZE'
   >('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [editingCardId, setEditingCardId] = useState<number | null>(null);
   const [viewTab, setViewTab] = useState<'CARDS' | 'RAW_JSON'>('CARDS');
   const [copiedJson, setCopiedJson] = useState(false);
+  const [showAllPrunedIds, setShowAllPrunedIds] = useState(false);
 
   // Medical Image Picker state per card
   const [imagePickerCardId, setImagePickerCardId] = useState<number | null>(null);
@@ -160,6 +187,15 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const clozeCount = cards.filter((c) => c.type === 'cloze').length;
   const basicPct = cards.length > 0 ? Math.round((basicCount / cards.length) * 100) : 0;
   const clozePct = cards.length > 0 ? 100 - basicPct : 0;
+  const manualImageCount = cards.filter(
+    (c) => c.needsManualImage && !/<img\b/i.test(`${c.question || ''} ${c.hint || ''}`)
+  ).length;
+  const auditFlaggedCount = cards.filter(
+    (c) =>
+      c.auditVerdict === 'rebuild' ||
+      c.auditVerdict === 'split' ||
+      c.auditVerdict === 'prune'
+  ).length;
 
   const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
   const deckImageUsage = useMemo(
@@ -173,6 +209,20 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     if (
       filterMode === 'MISSING_MEDIA' &&
       (!lintRes || lintRes.metrics.missingMediaFiles.length === 0)
+    )
+      return false;
+    if (
+      filterMode === 'MANUAL_IMAGE' &&
+      !(card.needsManualImage && !/<img\b/i.test(`${card.question || ''} ${card.hint || ''}`))
+    )
+      return false;
+    if (
+      filterMode === 'AUDIT_FLAGGED' &&
+      !(
+        card.auditVerdict === 'rebuild' ||
+        card.auditVerdict === 'split' ||
+        card.auditVerdict === 'prune'
+      )
     )
       return false;
     if (filterMode === 'BASIC' && card.type !== 'basic') return false;
@@ -316,6 +366,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
     onUpdateCard({
       ...updated,
       imageVerified: true,
+      needsManualImage: false,
     });
   };
 
@@ -360,6 +411,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         answer: nextAnswer,
         image_mode: 'recognition',
         imageVerified: false,
+        needsManualImage: false,
         imageAlternatives: imageResults.slice(0, 6),
         question: `${cleanQ}<br><img src="${imgUrl.trim()}" data-anki-file="${localFile}">`,
         hint: cleanHintWithoutImgs
@@ -371,6 +423,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         ...card,
         image_mode: 'feedback',
         imageVerified: false,
+        needsManualImage: false,
         imageAlternatives: imageResults.slice(0, 6),
         question: cleanQ,
         hint: cleanHintWithoutImgs
@@ -555,10 +608,22 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
               <strong className="text-amber-400">-{curationStats.prunedCount}</strong>
               {curationStats.prunedIds && curationStats.prunedIds.length > 0 && (
                 <span className="ml-1 font-mono text-[11px] text-amber-300/90">
-                  (IDs: {curationStats.prunedIds.slice(0, 8).join(', ')}
-                  {curationStats.prunedIds.length > 8
-                    ? `, +${curationStats.prunedIds.length - 8}`
-                    : ''}
+                  (IDs:{' '}
+                  {(showAllPrunedIds
+                    ? curationStats.prunedIds
+                    : curationStats.prunedIds.slice(0, 8)
+                  ).join(', ')}
+                  {curationStats.prunedIds.length > 8 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllPrunedIds((prev) => !prev)}
+                      className="ml-1.5 underline text-sky-300 hover:text-sky-200 cursor-pointer"
+                    >
+                      {showAllPrunedIds
+                        ? 'Ocultar'
+                        : `+${curationStats.prunedIds.length - 8} (ver todos)`}
+                    </button>
+                  )}
                   )
                 </span>
               )}
@@ -586,6 +651,85 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           </div>
         )}
 
+        {/* Boletim da Auditoria Prévia Card-a-Card */}
+        {deckAuditReport && (
+          <div className="px-3.5 py-2.5 rounded-lg bg-[#0B0F17] border border-amber-700/60 space-y-1 text-xs text-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold text-amber-300">
+                Auditoria Card-a-Card (Antes da Reconstrução):
+              </span>
+              <div className="flex flex-wrap items-center gap-2 tabular-nums text-[11px]">
+                <span className="text-emerald-300">
+                  Manter: <strong>{deckAuditReport.counts.keep}</strong>
+                </span>
+                <span className="text-amber-300">
+                  Refazer do zero: <strong>{deckAuditReport.counts.rebuild}</strong>
+                </span>
+                <span className="text-indigo-300">
+                  Desmembrar: <strong>{deckAuditReport.counts.split}</strong>
+                </span>
+                <span className="text-red-300">
+                  Podar: <strong>{deckAuditReport.counts.prune}</strong>
+                </span>
+              </div>
+            </div>
+            {deckAuditReport.overallSummary && (
+              <p className="text-[11px] text-slate-400">{deckAuditReport.overallSummary}</p>
+            )}
+          </div>
+        )}
+
+        {/* Boletim Final de Adequação do Deck */}
+        {finalVerificationReport && (
+          <div
+            className={`px-3.5 py-3 rounded-lg border space-y-1.5 text-xs ${
+              finalVerificationReport.approved
+                ? 'bg-emerald-950/35 border-emerald-700/70 text-emerald-100'
+                : 'bg-amber-950/35 border-amber-700/70 text-amber-100'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-bold">
+                  {finalVerificationReport.approved
+                    ? '✅ Verificação Final Aprovada'
+                    : '⚠️ Verificação Final: Ajustes Recomendados'}
+                </span>
+                <span className="px-2 py-0.5 rounded bg-slate-900/90 border border-slate-700 font-mono text-[11px] tabular-nums">
+                  Nota {finalVerificationReport.overallScore}/10 · Cobertura Mapa{' '}
+                  {finalVerificationReport.mapCoveragePct}%
+                </span>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-200 leading-relaxed">
+              {finalVerificationReport.summary}
+            </p>
+            {finalVerificationReport.missingConcepts.length > 0 && (
+              <p className="text-[11px] text-amber-200">
+                <strong>Lacunas identificadas:</strong>{' '}
+                {finalVerificationReport.missingConcepts
+                  .map((m) => `[${m.priority}] ${m.subtopic}: ${m.concept}`)
+                  .join(' · ')}
+              </p>
+            )}
+            {finalVerificationReport.clinicalAccuracyNotes.length > 0 && (
+              <p className="text-[11px] text-slate-300">
+                <strong>Acurácia clínica:</strong>{' '}
+                {finalVerificationReport.clinicalAccuracyNotes.join(' · ')}
+              </p>
+            )}
+            {finalVerificationReport.weakCardFixes.length > 0 && (
+              <p className="text-[11px] text-indigo-200">
+                <strong>Sugestões pontuais:</strong>{' '}
+                {finalVerificationReport.weakCardFixes
+                  .slice(0, 4)
+                  .map((w) => `ID ${w.cardId}: ${w.issue}`)
+                  .join(' | ')}
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -595,6 +739,44 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             <Eye className="w-3.5 h-3.5" />
             <span>👁️ Revisão Rápida (Anki)</span>
           </button>
+
+          {onOpenPdfGallery && (pdfCount > 0 || pdfExtractedImages.length > 0) && (
+            <button
+              type="button"
+              onClick={() =>
+                onOpenPdfGallery(null, pdfExtractedImages.length > 0 ? 'extracted' : 'browse')
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-100 bg-indigo-950/80 border border-indigo-700/70 hover:bg-indigo-900/80 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span>🖼️ Galeria da Apostila ({pdfExtractedImages.length})</span>
+            </button>
+          )}
+
+          {onAuditExistingDeck && (
+            <button
+              type="button"
+              onClick={onAuditExistingDeck}
+              disabled={isAuditingDeck || cards.length === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-200 bg-amber-950/70 border border-amber-700/70 hover:bg-amber-900/70 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span>{isAuditingDeck ? 'Julgando Cards...' : '⚖️ Julgar Cards (IA)'}</span>
+            </button>
+          )}
+
+          {onVerifyDeckAdequacy && (
+            <button
+              type="button"
+              onClick={onVerifyDeckAdequacy}
+              disabled={isVerifyingDeck || cards.length === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-200 bg-emerald-950/70 border border-emerald-700/70 hover:bg-emerald-900/70 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span>
+                {isVerifyingDeck
+                  ? 'Confirmando Adequação...'
+                  : '✅ Confirmar Adequação Final (IA)'}
+              </span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -776,6 +958,22 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                     },
                   ]
                 : []),
+              ...(manualImageCount > 0
+                ? [
+                    {
+                      id: 'MANUAL_IMAGE' as const,
+                      label: `Escolher na Apostila (${manualImageCount})`,
+                    },
+                  ]
+                : []),
+              ...(auditFlaggedCount > 0
+                ? [
+                    {
+                      id: 'AUDIT_FLAGGED' as const,
+                      label: `Para Refazer/Podar (${auditFlaggedCount})`,
+                    },
+                  ]
+                : []),
               { id: 'BASIC', label: `Basic (${basicCount})` },
               { id: 'CLOZE', label: `Cloze (${clozeCount})` },
             ] as const
@@ -863,7 +1061,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                 deckImageUsage={deckImageUsage}
                 onToggleSingleCardType={handleToggleSingleCardType}
                 onAutoRepairSingleCard={onAutoRepairSingleCard}
+                onAutoRepairSingleCardWithAi={onAutoRepairSingleCardWithAi}
+                isAiRepairing={repairingCardId === card.id}
                 onOpenImagePicker={handleOpenImagePicker}
+                onOpenPdfGallery={
+                  onOpenPdfGallery
+                    ? (cardId, tab) => onOpenPdfGallery(cardId, tab || 'extracted')
+                    : undefined
+                }
                 onToggleEditing={(id) =>
                   setEditingCardId((prev) => (prev === id ? null : id))
                 }

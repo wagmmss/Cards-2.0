@@ -2,14 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CanonicalCard,
   ClinicalMapResponse,
+  DeckAuditReport,
   DeckCurationStats,
+  DeckFinalVerificationReport,
   DomainProfile,
   ExtractedDeckMetadata,
   GeminiModelOption,
   UploadedPdfFile,
 } from '../types/deck';
 import { buildGenericClinicalMap } from '../data/demoDecks';
-import { fetchJsonWithTimeout, sanitizeDeckKey } from '../utils/apiClient';
+import {
+  auditDeckApi,
+  fetchJsonWithTimeout,
+  sanitizeDeckKey,
+  verifyDeckApi,
+} from '../utils/apiClient';
 import { buildPdfImagesCatalog } from '../utils/materialImageMatcher';
 import {
   curateAndRebalanceDeck,
@@ -18,7 +25,7 @@ import {
 } from '../utils/wozniakLinter';
 
 export interface GenerationProgress {
-  phase: 'upload' | 'map' | 'batches' | 'gaps' | 'repair';
+  phase: 'upload' | 'map' | 'audit' | 'batches' | 'gaps' | 'images' | 'repair' | 'verify';
   label: string;
   currentBatch: number;
   totalBatches: number;
@@ -41,7 +48,10 @@ export function useBatchDeckGenerator(params: {
   setCards: React.Dispatch<React.SetStateAction<CanonicalCard[]>>;
   setCurationStats: React.Dispatch<React.SetStateAction<DeckCurationStats | null>>;
   availableMediaNames?: string[];
-  autoResolveDeckMissingImages: (cards: CanonicalCard[], names?: string[]) => Promise<void>;
+  autoResolveDeckMissingImages: (
+    cards: CanonicalCard[],
+    names?: string[]
+  ) => Promise<CanonicalCard[]>;
   showStatus: (message: string, tone?: 'info' | 'success' | 'error') => void;
 }) {
   const {
@@ -65,8 +75,15 @@ export function useBatchDeckGenerator(params: {
 
   const [isGeneratingMap, setIsGeneratingMap] = useState(false);
   const [isDeepeningGuidelines, setIsDeepeningGuidelines] = useState(false);
+  const [isAuditingDeck, setIsAuditingDeck] = useState(false);
   const [isGeneratingDeck, setIsGeneratingDeck] = useState(false);
   const [isRepairing, setIsRepairing] = useState(false);
+  const [repairingCardId, setRepairingCardId] = useState<number | null>(null);
+  const [isVerifyingDeck, setIsVerifyingDeck] = useState(false);
+  const [isRunningFullPipeline, setIsRunningFullPipeline] = useState(false);
+  const [deckAuditReport, setDeckAuditReport] = useState<DeckAuditReport | null>(null);
+  const [finalVerificationReport, setFinalVerificationReport] =
+    useState<DeckFinalVerificationReport | null>(null);
   const [progress, setProgress] = useState<GenerationProgress | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -99,8 +116,11 @@ export function useBatchDeckGenerator(params: {
     stopTimerAndReset();
     setIsGeneratingMap(false);
     setIsDeepeningGuidelines(false);
+    setIsAuditingDeck(false);
     setIsGeneratingDeck(false);
     setIsRepairing(false);
+    setIsVerifyingDeck(false);
+    setIsRunningFullPipeline(false);
     showStatus('Operação cancelada. Seu baralho atual foi preservado sem alterações.', 'info');
   }, [showStatus, stopTimerAndReset]);
 
@@ -167,7 +187,6 @@ export function useBatchDeckGenerator(params: {
               keyFingerprint: data.keyFingerprint || pdf.keyFingerprint,
             };
             updated[idx] = enriched;
-            // Functional state update prevents race conditions if user adds/removes PDFs concurrently
             setPdfs((prev) =>
               prev.map((item) =>
                 item.name === pdf.name && item.size === pdf.size
@@ -185,7 +204,6 @@ export function useBatchDeckGenerator(params: {
           }
         } catch (err) {
           if (signal.aborted) throw err;
-          // Keep base64Data fallback if pre-upload fails
         }
       }
 
@@ -194,7 +212,7 @@ export function useBatchDeckGenerator(params: {
     [setPdfs]
   );
 
-  const serializePdfsForApi = (sourcePdfs: UploadedPdfFile[]) =>
+  const serializePdfsForApi = (sourcePdfs: UploadedPdfFile[]): Array<Record<string, unknown>> =>
     sourcePdfs.map((p) => {
       if (p.fileUri) {
         return {
@@ -208,118 +226,129 @@ export function useBatchDeckGenerator(params: {
           docRole: p.docRole,
         };
       }
-      const { extractedImages: _omitExtracted, ...rest } = p;
-      return rest;
+      const { extractedImages: _omitExtracted, rawArrayBuffer: _omitBuf, ...rest } = p;
+      return { ...rest };
     });
 
-  const handleGenerateClinicalMap = useCallback(async (): Promise<ClinicalMapResponse> => {
-    const effectiveKey = sanitizeDeckKey(
-      deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
-    );
-    if (!deckKey.trim()) setDeckKey(effectiveKey);
-
-    abortControllerRef.current?.abort();
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    const profileOverride = selectedProfile === 'auto' ? undefined : selectedProfile;
-    const optimisticMap = buildGenericClinicalMap(
-      effectiveKey,
-      extractedMeta.rawCards,
-      profileOverride
-    );
-    setClinicalMap(optimisticMap);
-    setIsGeneratingMap(true);
-    startTimer({
-      phase: 'map',
-      label: 'Mapeando prioridades P1–P4 e consultando diretrizes clínicas...',
-      currentBatch: 0,
-      totalBatches: 1,
-      cardsReady: 0,
-      elapsedSec: 0,
-    });
-
-    try {
-      const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, controller.signal);
-      setProgress((prev) =>
-        prev
-          ? {
-              ...prev,
-              phase: 'map',
-              label: 'Sintetizando Mapa Clínico P1–P4 com Gemini...',
-            }
-          : prev
+  const handleGenerateClinicalMap = useCallback(
+    async (externalSignal?: AbortSignal): Promise<ClinicalMapResponse> => {
+      const effectiveKey = sanitizeDeckKey(
+        deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
       );
+      if (!deckKey.trim()) setDeckKey(effectiveKey);
 
-      const existingSummary = extractedMeta.rawCards
-        .slice(0, 30)
-        .map((c) => `ID ${c.id} [${c.type}]: ${c.topic} -> ${c.question.slice(0, 140)}`)
-        .join('\n');
+      let controller: AbortController | null = null;
+      if (!externalSignal) {
+        abortControllerRef.current?.abort();
+        controller = new AbortController();
+        abortControllerRef.current = controller;
+      }
+      const activeSignal = externalSignal || controller!.signal;
 
-      const data = await fetchJsonWithTimeout<
-        ClinicalMapResponse & { fallback?: boolean; error?: string }
-      >('/api/gemini/clinical-map', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deckKey: effectiveKey,
-          profile: selectedProfile,
-          pdfs: serializePdfsForApi(preparedPdfs),
-          existingJsonSummary: existingSummary,
-          useGoogleSearch,
-          model: selectedModel,
-        }),
-        timeoutMs: 165_000,
-        signal: controller.signal,
-      });
+      const profileOverride = selectedProfile === 'auto' ? undefined : selectedProfile;
+      const optimisticMap = buildGenericClinicalMap(
+        effectiveKey,
+        extractedMeta.rawCards,
+        profileOverride
+      );
+      setClinicalMap(optimisticMap);
+      setIsGeneratingMap(true);
+      if (!externalSignal) {
+        startTimer({
+          phase: 'map',
+          label: 'Mapeando prioridades P1–P4 e consultando diretrizes clínicas...',
+          currentBatch: 0,
+          totalBatches: 1,
+          cardsReady: 0,
+          elapsedSec: 0,
+        });
+      }
 
-      if (data?.fallback || data?.error) {
+      try {
+        const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, activeSignal);
+        setProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                phase: 'map',
+                label: 'Sintetizando Mapa Clínico P1–P4 com Gemini...',
+              }
+            : prev
+        );
+
+        const existingSummary = extractedMeta.rawCards
+          .slice(0, 30)
+          .map((c) => `ID ${c.id} [${c.type}]: ${c.topic} -> ${c.question.slice(0, 140)}`)
+          .join('\n');
+
+        const data = await fetchJsonWithTimeout<
+          ClinicalMapResponse & { fallback?: boolean; error?: string }
+        >('/api/gemini/clinical-map', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deckKey: effectiveKey,
+            profile: selectedProfile,
+            pdfs: serializePdfsForApi(preparedPdfs),
+            existingJsonSummary: existingSummary,
+            useGoogleSearch,
+            model: selectedModel,
+          }),
+          timeoutMs: 165_000,
+          signal: activeSignal,
+        });
+
+        if (data?.fallback || data?.error) {
+          showStatus(
+            `IA indisponível no Mapa Clínico (${data.error || 'erro desconhecido'}). Exibindo rascunho local para edição.`,
+            'error'
+          );
+          return optimisticMap;
+        }
+
+        if (data && Array.isArray(data.items) && data.items.length > 0) {
+          setClinicalMap(data);
+          const updCount = Array.isArray(data.guidelineUpdates) ? data.guidelineUpdates.length : 0;
+          const srcCount = Array.isArray(data.groundingSources) ? data.groundingSources.length : 0;
+          showStatus(
+            `Mapa Clínico P1–P4 gerado para "${data.themeTitle}" (${data.items.length} conceitos · ${updCount} achados clínicos · ${srcCount} fontes web).`,
+            'success'
+          );
+          return data;
+        }
+        return optimisticMap;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return optimisticMap;
+        }
+        const msg = err instanceof Error ? err.message : 'erro de rede';
         showStatus(
-          `IA indisponível no Mapa Clínico (${data.error || 'erro desconhecido'}). Exibindo rascunho local para edição.`,
+          `Falha ao gerar Mapa Clínico (${msg}). Rascunho local mantido para edição.`,
           'error'
         );
         return optimisticMap;
+      } finally {
+        setIsGeneratingMap(false);
+        if (!externalSignal) {
+          stopTimerAndReset();
+        }
       }
-
-      if (data && Array.isArray(data.items) && data.items.length > 0) {
-        setClinicalMap(data);
-        const updCount = Array.isArray(data.guidelineUpdates) ? data.guidelineUpdates.length : 0;
-        const srcCount = Array.isArray(data.groundingSources) ? data.groundingSources.length : 0;
-        showStatus(
-          `Mapa Clínico P1–P4 gerado para "${data.themeTitle}" (${data.items.length} conceitos · ${updCount} achados clínicos · ${srcCount} fontes web).`,
-          'success'
-        );
-        return data;
-      }
-      return optimisticMap;
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return optimisticMap;
-      }
-      const msg = err instanceof Error ? err.message : 'erro de rede';
-      showStatus(
-        `Falha ao gerar Mapa Clínico (${msg}). Rascunho local mantido para edição.`,
-        'error'
-      );
-      return optimisticMap;
-    } finally {
-      setIsGeneratingMap(false);
-      stopTimerAndReset();
-    }
-  }, [
-    deckKey,
-    ensurePdfsUploadedToGemini,
-    extractedMeta,
-    pdfs,
-    selectedModel,
-    selectedProfile,
-    setClinicalMap,
-    setDeckKey,
-    showStatus,
-    startTimer,
-    stopTimerAndReset,
-    useGoogleSearch,
-  ]);
+    },
+    [
+      deckKey,
+      ensurePdfsUploadedToGemini,
+      extractedMeta,
+      pdfs,
+      selectedModel,
+      selectedProfile,
+      setClinicalMap,
+      setDeckKey,
+      showStatus,
+      startTimer,
+      stopTimerAndReset,
+      useGoogleSearch,
+    ]
+  );
 
   const handleDeepenGuidelines = useCallback(
     async (focusQuery?: string) => {
@@ -411,16 +440,154 @@ export function useBatchDeckGenerator(params: {
     [clinicalMap, deckKey, selectedModel, selectedProfile, setClinicalMap, showStatus]
   );
 
+  const handleAuditExistingDeck = useCallback(
+    async (
+      mapOverride?: ClinicalMapResponse,
+      externalSignal?: AbortSignal
+    ): Promise<{ report: DeckAuditReport | null; auditedCards: CanonicalCard[] }> => {
+      const targetCards = cards.length > 0 ? cards : extractedMeta.rawCards;
+      if (targetCards.length === 0) {
+        showStatus('Importe um JSON existente ou gere cards antes de auditar.', 'info');
+        return { report: null, auditedCards: [] };
+      }
+
+      const effectiveKey = sanitizeDeckKey(
+        deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
+      );
+      const activeMap =
+        mapOverride ||
+        clinicalMap ||
+        buildGenericClinicalMap(
+          effectiveKey,
+          targetCards,
+          selectedProfile === 'auto' ? undefined : selectedProfile
+        );
+
+      let controller: AbortController | null = null;
+      if (!externalSignal) {
+        abortControllerRef.current?.abort();
+        controller = new AbortController();
+        abortControllerRef.current = controller;
+      }
+      const activeSignal = externalSignal || controller!.signal;
+
+      setIsAuditingDeck(true);
+      if (!externalSignal) {
+        startTimer({
+          phase: 'audit',
+          label: `Julgando qualidade de ${targetCards.length} card(s) frente aos PDFs e Mapa P1–P4...`,
+          currentBatch: 0,
+          totalBatches: 1,
+          cardsReady: 0,
+          elapsedSec: 0,
+        });
+      }
+
+      try {
+        const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, activeSignal);
+        const apiPdfs = serializePdfsForApi(preparedPdfs);
+
+        const data = (await auditDeckApi(
+          {
+            deckKey: effectiveKey,
+            cards: targetCards.map((c) => ({
+              id: c.id,
+              type: c.type,
+              topic: c.topic,
+              question: c.question,
+              answer: c.answer,
+              hint: c.hint,
+              priority: c.priority,
+            })),
+            clinicalMap: activeMap,
+            pdfs: apiPdfs,
+            model: selectedModel,
+          },
+          activeSignal
+        )) as DeckAuditReport & { fallback?: boolean; error?: string };
+
+        if (data?.fallback || data?.error) {
+          showStatus(
+            `Auditoria por IA indisponível (${data.error || 'erro desconhecido'}).`,
+            'error'
+          );
+          return { report: null, auditedCards: targetCards };
+        }
+
+        const itemMap = new Map(
+          (Array.isArray(data.items) ? data.items : []).map((it) => [it.cardId, it])
+        );
+        const auditedCards: CanonicalCard[] = targetCards.map((c) => {
+          const item = itemMap.get(c.id);
+          if (!item) return c;
+          return {
+            ...c,
+            priority: item.priority || c.priority,
+            auditVerdict: item.verdict,
+            auditReason: item.clinicalIssue
+              ? `${item.reason} [${item.clinicalIssue}]`
+              : item.reason,
+            auditScore: item.score,
+            auditTargetConcept: item.targetConcept,
+            auditSuggestedType: item.suggestedType,
+          };
+        });
+
+        setCards(auditedCards);
+        setDeckAuditReport(data);
+        showStatus(
+          `Auditoria concluída: ${data.counts.keep} mantidos · ${data.counts.rebuild} para refazer do zero · ${data.counts.split} desmembrar · ${data.counts.prune} podar.`,
+          'success'
+        );
+        return { report: data, auditedCards };
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return { report: null, auditedCards: targetCards };
+        }
+        const msg = err instanceof Error ? err.message : 'erro de rede';
+        showStatus(`Falha ao auditar deck (${msg}).`, 'error');
+        return { report: null, auditedCards: targetCards };
+      } finally {
+        setIsAuditingDeck(false);
+        if (!externalSignal) {
+          stopTimerAndReset();
+        }
+      }
+    },
+    [
+      cards,
+      clinicalMap,
+      deckKey,
+      ensurePdfsUploadedToGemini,
+      extractedMeta,
+      pdfs,
+      selectedModel,
+      selectedProfile,
+      setCards,
+      showStatus,
+      startTimer,
+      stopTimerAndReset,
+    ]
+  );
+
   const handleRecreateCanonicalDeck = useCallback(
-    async (mapOverride?: ClinicalMapResponse) => {
+    async (
+      mapOverride?: ClinicalMapResponse,
+      sourceCardsOverride?: CanonicalCard[],
+      externalSignal?: AbortSignal
+    ): Promise<CanonicalCard[] | null> => {
       const effectiveKey = sanitizeDeckKey(
         deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
       );
       if (!deckKey.trim()) setDeckKey(effectiveKey);
 
-      abortControllerRef.current?.abort();
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
+      let controller: AbortController | null = null;
+      if (!externalSignal) {
+        abortControllerRef.current?.abort();
+        controller = new AbortController();
+        abortControllerRef.current = controller;
+      }
+      const activeSignal = externalSignal || controller!.signal;
 
       const profileOverride = selectedProfile === 'auto' ? undefined : selectedProfile;
       const activeMap =
@@ -429,26 +596,39 @@ export function useBatchDeckGenerator(params: {
         buildGenericClinicalMap(effectiveKey, extractedMeta.rawCards, profileOverride);
       if (!clinicalMap) setClinicalMap(activeMap);
 
-      const sourceCards = extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards;
-      const totalBatches = sourceCards.length > 0 ? Math.ceil(sourceCards.length / 10) : 1;
+      const rawSourceCards =
+        sourceCardsOverride ??
+        (cards.length > 0 ? cards : extractedMeta.rawCards);
+      // Apply audit verdicts: keep intact, prune removed, send rebuild/split/unaudited to LLM
+      const keptCards = rawSourceCards
+        .filter((c) => c.auditVerdict === 'keep')
+        .map((c) => surgicalRepairCardLocal(c));
+      const cardsToProcess = rawSourceCards.filter(
+        (c) => c.auditVerdict !== 'keep' && c.auditVerdict !== 'prune'
+      );
+
+      const totalBatches =
+        cardsToProcess.length > 0 ? Math.ceil(cardsToProcess.length / 10) : rawSourceCards.length === 0 ? 1 : 0;
 
       setIsGeneratingDeck(true);
-      startTimer({
-        phase: 'batches',
-        label: 'Preparando documentos e lotes FSRS...',
-        currentBatch: 0,
-        totalBatches,
-        cardsReady: 0,
-        elapsedSec: 0,
-      });
+      if (!externalSignal) {
+        startTimer({
+          phase: 'batches',
+          label: 'Preparando documentos e lotes FSRS...',
+          currentBatch: 0,
+          totalBatches: Math.max(1, totalBatches),
+          cardsReady: keptCards.length,
+          elapsedSec: 0,
+        });
+      }
 
       try {
-        const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, controller.signal);
+        const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, activeSignal);
         const apiPdfs = serializePdfsForApi(preparedPdfs);
         const pdfImagesCatalog = buildPdfImagesCatalog(preparedPdfs);
-        const allRebuiltNotes: CanonicalCard[] = [];
+        const allRebuiltNotes: CanonicalCard[] = [...keptCards];
 
-        if (sourceCards.length > 0) {
+        if (cardsToProcess.length > 0) {
           const BATCH_SIZE = 10;
           const CONCURRENCY = 2;
           const ID_STRIDE = 100;
@@ -456,18 +636,20 @@ export function useBatchDeckGenerator(params: {
             Math.max(
               171000100,
               ...(extractedMeta.existingIds || []),
-              ...sourceCards.map((c) => Number(c.id) || 0)
+              ...rawSourceCards.map((c) => Number(c.id) || 0)
             ) + 1;
 
-          const deckOutline = sourceCards.map((c, idx) => ({
-            batch: Math.floor(idx / BATCH_SIZE) + 1,
-            id: c.id,
-            summary: String(c.topic || c.question || '')
-              .replace(/<[^>]+>/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim()
-              .slice(0, 90),
-          }));
+          const deckOutline = rawSourceCards
+            .filter((c) => c.auditVerdict !== 'prune')
+            .map((c, idx) => ({
+              batch: Math.floor(idx / BATCH_SIZE) + 1,
+              id: c.id,
+              summary: String(c.auditTargetConcept || c.topic || c.question || '')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 90),
+            }));
 
           const batchResults: CanonicalCard[][] = Array.from({ length: totalBatches }, () => []);
           let completedBatches = 0;
@@ -475,14 +657,13 @@ export function useBatchDeckGenerator(params: {
 
           const runWorker = async () => {
             while (nextBatchIdx < totalBatches) {
-              if (controller.signal.aborted) {
+              if (activeSignal.aborted) {
                 throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
               }
               const batchIndex = nextBatchIdx++;
-              const batchCards = sourceCards.slice(
-                batchIndex * BATCH_SIZE,
-                (batchIndex + 1) * BATCH_SIZE
-              );
+              const batchCards = cardsToProcess
+                .slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE)
+                .map(({ imageAlternatives: _omitAlt, isResolvingImage: _omitRes, ...rest }) => rest);
               const batchNewIdStart = baseNewIdStart + batchIndex * ID_STRIDE;
 
               setProgress((prev) =>
@@ -490,7 +671,7 @@ export function useBatchDeckGenerator(params: {
                   ? {
                       ...prev,
                       phase: 'batches',
-                      label: `Reconstruindo lote ${completedBatches + 1} de ${totalBatches} (Matuschak & Nielsen)...`,
+                      label: `Reconstruindo do zero lote ${completedBatches + 1} de ${totalBatches} (Matuschak & Nielsen)...`,
                     }
                   : prev
               );
@@ -516,7 +697,7 @@ export function useBatchDeckGenerator(params: {
                   model: selectedModel,
                 }),
                 timeoutMs: 185_000,
-                signal: controller.signal,
+                signal: activeSignal,
               });
 
               if (data?.fallback || data?.error) {
@@ -532,13 +713,15 @@ export function useBatchDeckGenerator(params: {
 
               batchResults[batchIndex] = batchNotes;
               completedBatches++;
-              const rebuiltSoFar = batchResults.reduce((acc, arr) => acc + arr.length, 0);
+              const rebuiltSoFar =
+                keptCards.length + batchResults.reduce((acc, arr) => acc + arr.length, 0);
               setProgress((prev) =>
                 prev
                   ? {
                       ...prev,
                       phase: 'batches',
                       currentBatch: completedBatches,
+                      totalBatches,
                       cardsReady: rebuiltSoFar,
                       label: `Lote ${completedBatches}/${totalBatches} concluído (${rebuiltSoFar} cards prontos)`,
                     }
@@ -587,7 +770,7 @@ export function useBatchDeckGenerator(params: {
                   model: selectedModel,
                 }),
                 timeoutMs: 145_000,
-                signal: controller.signal,
+                signal: activeSignal,
               });
               if (!gapData?.fallback && !gapData?.error && Array.isArray(gapData.notes)) {
                 const seenIds = new Set(allRebuiltNotes.map((n) => Number(n.id)));
@@ -600,11 +783,10 @@ export function useBatchDeckGenerator(params: {
                 }
               }
             } catch (gapErr) {
-              if (controller.signal.aborted) throw gapErr;
-              // Non-fatal: batch notes remain valid
+              if (activeSignal.aborted) throw gapErr;
             }
           }
-        } else {
+        } else if (rawSourceCards.length === 0) {
           setProgress((prev) =>
             prev
               ? {
@@ -630,7 +812,7 @@ export function useBatchDeckGenerator(params: {
               model: selectedModel,
             }),
             timeoutMs: 185_000,
-            signal: controller.signal,
+            signal: activeSignal,
           });
 
           if (data?.fallback || data?.error) {
@@ -652,23 +834,29 @@ export function useBatchDeckGenerator(params: {
         );
         setCards(finalCurated);
         setCurationStats(finalStats);
-        showStatus(
-          `Reconstrução concluída: ${finalStats.originalCount} → ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS mantidos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
-          'success'
-        );
-        void autoResolveDeckMissingImages(finalCurated, availableMediaNames);
+        if (!externalSignal) {
+          showStatus(
+            `Reconstrução concluída: ${finalStats.originalCount} → ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS mantidos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
+            'success'
+          );
+          void autoResolveDeckMissingImages(finalCurated, availableMediaNames);
+        }
+        return finalCurated;
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
-          return;
+          return null;
         }
         const msg = err instanceof Error ? err.message : 'erro desconhecido';
         showStatus(
           `Reconstrução por IA falhou (${msg}). Seus cards atuais foram preservados intactos.`,
           'error'
         );
+        return null;
       } finally {
         setIsGeneratingDeck(false);
-        stopTimerAndReset();
+        if (!externalSignal) {
+          stopTimerAndReset();
+        }
       }
     },
     [
@@ -686,6 +874,117 @@ export function useBatchDeckGenerator(params: {
       setClinicalMap,
       setCurationStats,
       setDeckKey,
+      showStatus,
+      startTimer,
+      stopTimerAndReset,
+    ]
+  );
+
+  const handleVerifyDeckAdequacy = useCallback(
+    async (
+      cardsOverride?: CanonicalCard[],
+      mapOverride?: ClinicalMapResponse,
+      externalSignal?: AbortSignal
+    ): Promise<DeckFinalVerificationReport | null> => {
+      const targetCards = cardsOverride ?? cards;
+      if (targetCards.length === 0) {
+        showStatus('Gere ou importe um baralho antes de verificar a adequação final.', 'info');
+        return null;
+      }
+
+      const effectiveKey = sanitizeDeckKey(
+        deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
+      );
+      const activeMap =
+        mapOverride ||
+        clinicalMap ||
+        buildGenericClinicalMap(
+          effectiveKey,
+          targetCards,
+          selectedProfile === 'auto' ? undefined : selectedProfile
+        );
+
+      let controller: AbortController | null = null;
+      if (!externalSignal) {
+        abortControllerRef.current?.abort();
+        controller = new AbortController();
+        abortControllerRef.current = controller;
+      }
+      const activeSignal = externalSignal || controller!.signal;
+
+      setIsVerifyingDeck(true);
+      if (!externalSignal) {
+        startTimer({
+          phase: 'verify',
+          label: `Confirmando adequação clínica, cobertura P1–P4 e mídia de ${targetCards.length} cards...`,
+          currentBatch: 0,
+          totalBatches: 1,
+          cardsReady: targetCards.length,
+          elapsedSec: 0,
+        });
+      }
+
+      try {
+        const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, activeSignal);
+        const apiPdfs = serializePdfsForApi(preparedPdfs);
+
+        const report = (await verifyDeckApi(
+          {
+            deckKey: effectiveKey,
+            cards: targetCards.map((c) => ({
+              id: c.id,
+              type: c.type,
+              topic: c.topic,
+              question: c.question,
+              answer: c.answer,
+              hint: c.hint,
+              image_mode: c.image_mode,
+              priority: c.priority,
+            })),
+            clinicalMap: activeMap,
+            pdfs: apiPdfs,
+            model: selectedModel,
+          },
+          activeSignal
+        )) as DeckFinalVerificationReport & { fallback?: boolean; error?: string };
+
+        if (report?.fallback || report?.error) {
+          showStatus(
+            `Verificação final indisponível (${report.error || 'erro desconhecido'}).`,
+            'error'
+          );
+          return null;
+        }
+
+        setFinalVerificationReport(report);
+        showStatus(
+          `Verificação final: nota ${report.overallScore}/10 · Cobertura do Mapa ${report.mapCoveragePct}% (${report.approved ? 'Aprovado' : 'Ajustes sugeridos'}).`,
+          report.approved ? 'success' : 'info'
+        );
+        return report;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return null;
+        }
+        const msg = err instanceof Error ? err.message : 'erro de rede';
+        showStatus(`Falha na verificação final do baralho (${msg}).`, 'error');
+        return null;
+      } finally {
+        setIsVerifyingDeck(false);
+        if (!externalSignal) {
+          stopTimerAndReset();
+        }
+      }
+    },
+    [
+      cards,
+      clinicalMap,
+      deckKey,
+      ensurePdfsUploadedToGemini,
+      extractedMeta,
+      pdfs,
+      selectedModel,
+      selectedProfile,
       showStatus,
       startTimer,
       stopTimerAndReset,
@@ -748,6 +1047,8 @@ export function useBatchDeckGenerator(params: {
     );
 
     try {
+      const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, controller.signal);
+      const apiPdfs = serializePdfsForApi(preparedPdfs);
       const repairedById = new Map<number, CanonicalCard>();
       let fallbackErrorMsg: string | null = null;
 
@@ -805,6 +1106,8 @@ export function useBatchDeckGenerator(params: {
           body: JSON.stringify({
             deckKey: effectiveKey,
             flaggedCards: compactFlaggedPayload,
+            clinicalMap: activeMap,
+            pdfs: apiPdfs,
             model: selectedModel,
           }),
           timeoutMs: 145_000,
@@ -837,9 +1140,16 @@ export function useBatchDeckGenerator(params: {
       }
 
       if (repairedById.size > 0) {
-        setCards((prev) =>
-          prev.map((c) => (repairedById.has(c.id) ? repairedById.get(c.id)! : c))
+        const updatedDeck = curatedAndRepaired.map((c) =>
+          repairedById.has(c.id) ? repairedById.get(c.id)! : c
         );
+        setCards(updatedDeck);
+        const hasNewPlaceholders = Array.from(repairedById.values()).some((c) =>
+          /buscar_imagem:/i.test(`${c.question || ''} ${c.hint || ''}`)
+        );
+        if (hasNewPlaceholders) {
+          void autoResolveDeckMissingImages(updatedDeck, availableMediaNames);
+        }
       }
 
       if (fallbackErrorMsg) {
@@ -861,10 +1171,439 @@ export function useBatchDeckGenerator(params: {
       stopTimerAndReset();
     }
   }, [
+    autoResolveDeckMissingImages,
+    availableMediaNames,
     cards,
     clinicalMap,
     deckKey,
+    ensurePdfsUploadedToGemini,
     extractedMeta,
+    pdfs,
+    selectedModel,
+    setCards,
+    setCurationStats,
+    showStatus,
+    startTimer,
+    stopTimerAndReset,
+  ]);
+
+  const handleAutoRepairSingleCardWithAi = useCallback(
+    async (
+      cardId: number,
+      targetField?: 'question' | 'answer' | 'hint' | 'topic',
+      fieldInstruction?: string
+    ) => {
+      const targetCard = cards.find((c) => c.id === cardId);
+      if (!targetCard) return;
+
+      const effectiveKey = sanitizeDeckKey(
+        deckKey.trim() || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
+      );
+      const activeMap =
+        clinicalMap ||
+        buildGenericClinicalMap(
+          effectiveKey,
+          extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards
+        );
+
+      const lint = lintCard(targetCard);
+      const controller = new AbortController();
+      setRepairingCardId(cardId);
+
+      try {
+        const preparedPdfs = await ensurePdfsUploadedToGemini(pdfs, controller.signal);
+        const apiPdfs = serializePdfsForApi(preparedPdfs);
+
+        const dataUriPlaceholders = new Map<string, string>();
+        let uriSeq = 0;
+        const tokenizeDataUris = (html: string) =>
+          (html || '').replace(/data:image\/[^"'\s>]+/gi, (uriMatch) => {
+            const token = `__EMBEDDED_DATA_URI_${uriSeq++}__`;
+            dataUriPlaceholders.set(token, uriMatch);
+            return token;
+          });
+        const restoreDataUris = (html: string) =>
+          (html || '').replace(/__EMBEDDED_DATA_URI_\d+__/g, (tok) =>
+            dataUriPlaceholders.get(tok) || tok
+          );
+
+        const {
+          imageAlternatives: _omitAlt,
+          isResolvingImage: _omitRes,
+          imageVerified: _omitVer,
+          ...restCard
+        } = targetCard;
+
+        const warningsList = lint.warnings.map((w) => `[${w.field}] ${w.message}`);
+        if (fieldInstruction) {
+          warningsList.unshift(fieldInstruction);
+        } else if (warningsList.length === 0) {
+          warningsList.push(
+            'Refinar clareza clínica, rigor Matuschak/Nielsen, comentário objetivo e tabela HTML comparativa se útil.'
+          );
+        }
+
+        const data = await fetchJsonWithTimeout<{
+          repairedCards?: CanonicalCard[];
+          fallback?: boolean;
+          error?: string;
+        }>('/api/gemini/repair-cards', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deckKey: effectiveKey,
+            flaggedCards: [
+              {
+                ...restCard,
+                question: tokenizeDataUris(restCard.question || ''),
+                hint: tokenizeDataUris(restCard.hint || ''),
+                warnings: warningsList,
+              },
+            ],
+            clinicalMap: activeMap,
+            pdfs: apiPdfs,
+            targetField,
+            fieldInstruction,
+            model: selectedModel,
+          }),
+          timeoutMs: 90_000,
+          signal: controller.signal,
+        });
+
+        if (data?.fallback || data?.error || !Array.isArray(data.repairedCards) || data.repairedCards.length === 0) {
+          throw new Error(data?.error || 'IA indisponível');
+        }
+
+        const rc = data.repairedCards[0];
+        const mergedRaw: CanonicalCard = {
+          ...targetCard,
+          ...rc,
+          question: restoreDataUris(rc.question || targetCard.question),
+          hint: restoreDataUris(rc.hint || targetCard.hint),
+          priority: rc.priority ?? targetCard.priority,
+          deck_key: rc.deck_key ?? targetCard.deck_key ?? effectiveKey,
+          exam_refs: rc.exam_refs ?? targetCard.exam_refs,
+          last_synced_hash: rc.last_synced_hash ?? targetCard.last_synced_hash,
+          imageVerified: targetCard.imageVerified,
+          imageAlternatives: targetCard.imageAlternatives,
+        };
+        const finalCard = surgicalRepairCardLocal(mergedRaw);
+        const nextDeck = cards.map((c) => (c.id === cardId ? finalCard : c));
+        setCards(nextDeck);
+
+        showStatus(
+          targetField
+            ? `Campo [${targetField}] do Card ID ${cardId} reescrito com IA.`
+            : `Card ID ${cardId} reescrito com IA segundo diretrizes Matuschak & Nielsen.`,
+          'success'
+        );
+
+        if (/buscar_imagem:/i.test(`${finalCard.question || ''} ${finalCard.hint || ''}`)) {
+          void autoResolveDeckMissingImages(nextDeck, availableMediaNames);
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        const locallyFixed = surgicalRepairCardLocal(targetCard);
+        setCards((prev) => prev.map((c) => (c.id === cardId ? locallyFixed : c)));
+        const msg = err instanceof Error ? err.message : 'erro inesperado';
+        showStatus(
+          `Ajuste local aplicado ao Card ID ${cardId}; reescrita avançada com IA falhou (${msg}).`,
+          'info'
+        );
+      } finally {
+        setRepairingCardId(null);
+      }
+    },
+    [
+      autoResolveDeckMissingImages,
+      availableMediaNames,
+      cards,
+      clinicalMap,
+      deckKey,
+      ensurePdfsUploadedToGemini,
+      extractedMeta,
+      pdfs,
+      selectedModel,
+      setCards,
+      showStatus,
+    ]
+  );
+
+  const handleRunFullPipeline = useCallback(async () => {
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const signal = controller.signal;
+
+    const existingCards = cards.length > 0 ? cards : extractedMeta.rawCards;
+    const totalStages = existingCards.length > 0 ? 5 : 4;
+    let stage = 1;
+
+    setIsRunningFullPipeline(true);
+    setFinalVerificationReport(null);
+    startTimer({
+      phase: 'map',
+      label: `Etapa ${stage}/${totalStages}: Planejando Mapa Clínico P1–P4 e diretrizes...`,
+      currentBatch: stage,
+      totalBatches: totalStages,
+      cardsReady: existingCards.length,
+      elapsedSec: 0,
+    });
+
+    try {
+      // 1. Mapa Clínico
+      const activeMap = await handleGenerateClinicalMap(signal);
+      if (signal.aborted) return;
+
+      // 2. Auditoria card-a-card (se houver deck anterior)
+      let cardsForRebuild = existingCards;
+      if (existingCards.length > 0) {
+        stage++;
+        setProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                phase: 'audit',
+                currentBatch: stage,
+                totalBatches: totalStages,
+                label: `Etapa ${stage}/${totalStages}: Julgando ${existingCards.length} card(s) antigo(s)...`,
+              }
+            : prev
+        );
+        const auditRes = await handleAuditExistingDeck(activeMap, signal);
+        if (signal.aborted) return;
+        cardsForRebuild = auditRes.auditedCards;
+      }
+
+      // 3. Criar / Reconstruir do Zero + Preencher Lacunas
+      stage++;
+      setProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: 'batches',
+              currentBatch: stage,
+              totalBatches: totalStages,
+              label: `Etapa ${stage}/${totalStages}: Reconstruindo cards fracos do zero e cobrindo P1–P4...`,
+            }
+          : prev
+      );
+      const rebuiltCards = await handleRecreateCanonicalDeck(
+        activeMap,
+        cardsForRebuild,
+        signal
+      );
+      if (signal.aborted || !rebuiltCards) return;
+
+      // 4. Imagens (Apostila + Visão Computacional Estrita Web)
+      stage++;
+      setProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: 'images',
+              currentBatch: stage,
+              totalBatches: totalStages,
+              cardsReady: rebuiltCards.length,
+              label: `Etapa ${stage}/${totalStages}: Validando imagens da Apostila e Web (visão computacional)...`,
+            }
+          : prev
+      );
+      let cardsWithImages = await autoResolveDeckMissingImages(
+        rebuiltCards,
+        availableMediaNames
+      );
+      if (signal.aborted) return;
+
+      // 5. Verificação Final Holística (+ 1 rodada automática de correção se necessário)
+      stage++;
+      setProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: 'verify',
+              currentBatch: stage,
+              totalBatches: totalStages,
+              cardsReady: cardsWithImages.length,
+              label: `Etapa ${stage}/${totalStages}: Confirmando adequação clínica e cobertura final...`,
+            }
+          : prev
+      );
+      let finalReport = await handleVerifyDeckAdequacy(
+        cardsWithImages,
+        activeMap,
+        signal
+      );
+      if (signal.aborted) return;
+
+      if (
+        finalReport &&
+        !finalReport.approved &&
+        (finalReport.missingConcepts.length > 0 || finalReport.weakCardFixes.length > 0)
+      ) {
+        setProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                phase: 'repair',
+                label: 'Aplicando rodada automática de ajustes finais detectados na verificação...',
+              }
+            : prev
+        );
+        const effectiveKey = sanitizeDeckKey(
+          activeMap.deckKey || deckKey || extractedMeta.detectedDeckKey || 'tema_clinico_internato'
+        );
+        let workingCards = [...cardsWithImages];
+
+        if (finalReport.weakCardFixes.length > 0) {
+          const fixMap = new Map(
+            finalReport.weakCardFixes.map((f) => [f.cardId, f])
+          );
+          const preparedVerifyPdfs = await ensurePdfsUploadedToGemini(pdfs, signal);
+          const apiVerifyPdfs = serializePdfsForApi(preparedVerifyPdfs);
+          const allFlaggedPayload = workingCards
+            .filter((c) => fixMap.has(c.id))
+            .map((c) => {
+              const fix = fixMap.get(c.id)!;
+              return {
+                id: c.id,
+                type: c.type,
+                priority: c.priority,
+                topic: c.topic,
+                question: c.question,
+                answer: c.answer,
+                hint: c.hint,
+                warnings: [`${fix.issue} -> ${fix.fixInstruction}`],
+              };
+            });
+          const CHUNK_VERIFY_FIX = 12;
+          for (let i = 0; i < allFlaggedPayload.length; i += CHUNK_VERIFY_FIX) {
+            if (signal.aborted) break;
+            const flaggedChunk = allFlaggedPayload.slice(i, i + CHUNK_VERIFY_FIX);
+            try {
+              const fixResp = await fetchJsonWithTimeout<{
+                repairedCards?: CanonicalCard[];
+                fallback?: boolean;
+              }>('/api/gemini/repair-cards', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  deckKey: effectiveKey,
+                  flaggedCards: flaggedChunk,
+                  clinicalMap: activeMap,
+                  pdfs: apiVerifyPdfs,
+                  model: selectedModel,
+                }),
+                timeoutMs: 120_000,
+                signal,
+              });
+              if (!fixResp?.fallback && Array.isArray(fixResp.repairedCards)) {
+                const fixedById = new Map(
+                  fixResp.repairedCards.map((r) => [r.id, surgicalRepairCardLocal(r)])
+                );
+                workingCards = workingCards.map((c) =>
+                  fixedById.has(c.id) ? { ...c, ...fixedById.get(c.id)! } : c
+                );
+              }
+            } catch {
+              // keep workingCards
+            }
+          }
+        }
+
+        if (finalReport.missingConcepts.length > 0) {
+          const syntheticMap: ClinicalMapResponse = {
+            ...activeMap,
+            items: finalReport.missingConcepts.map((m, idx) => ({
+              id: `verify-gap-${idx + 1}`,
+              priority: m.priority,
+              subtopic: m.subtopic,
+              concept: m.concept,
+              guidelineNote: 'Lacuna detectada na verificação final.',
+              targetCardType: m.recommendedType,
+              checked: true,
+            })),
+          };
+          const gapIdStart =
+            Math.max(171000200, ...workingCards.map((c) => Number(c.id) || 0)) + 1;
+          try {
+            const gapResp = await fetchJsonWithTimeout<{
+              notes?: CanonicalCard[];
+              fallback?: boolean;
+            }>('/api/gemini/fill-map-gaps', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                deckKey: effectiveKey,
+                clinicalMap: syntheticMap,
+                rebuiltCards: workingCards,
+                pdfImagesCatalog: buildPdfImagesCatalog(pdfs),
+                nextNewIdStart: gapIdStart,
+                model: selectedModel,
+              }),
+              timeoutMs: 120_000,
+              signal,
+            });
+            if (!gapResp?.fallback && Array.isArray(gapResp.notes)) {
+              const seenIds = new Set(workingCards.map((c) => c.id));
+              for (const n of gapResp.notes) {
+                if (!seenIds.has(n.id)) {
+                  seenIds.add(n.id);
+                  workingCards.push(n);
+                }
+              }
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+
+        const { cards: reCurated, stats: reStats } = curateAndRebalanceDeck(
+          workingCards,
+          extractedMeta,
+          effectiveKey,
+          activeMap,
+          { skipTemplateGapAdditions: true }
+        );
+        setCards(reCurated);
+        setCurationStats(reStats);
+        cardsWithImages = await autoResolveDeckMissingImages(
+          reCurated,
+          availableMediaNames
+        );
+        finalReport = await handleVerifyDeckAdequacy(
+          cardsWithImages,
+          activeMap,
+          signal
+        );
+      }
+
+      if (finalReport) {
+        showStatus(
+          `Pipeline Completo finalizado! Nota final: ${finalReport.overallScore}/10 · Cobertura: ${finalReport.mapCoveragePct}% (${cardsWithImages.length} cards).`,
+          finalReport.approved ? 'success' : 'info'
+        );
+      }
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        const msg = err instanceof Error ? err.message : 'erro inesperado';
+        showStatus(`Pipeline completo interrompido (${msg}).`, 'error');
+      }
+    } finally {
+      setIsRunningFullPipeline(false);
+      stopTimerAndReset();
+    }
+  }, [
+    autoResolveDeckMissingImages,
+    availableMediaNames,
+    cards,
+    deckKey,
+    extractedMeta,
+    handleAuditExistingDeck,
+    handleGenerateClinicalMap,
+    handleRecreateCanonicalDeck,
+    handleVerifyDeckAdequacy,
+    pdfs,
     selectedModel,
     setCards,
     setCurationStats,
@@ -876,13 +1615,23 @@ export function useBatchDeckGenerator(params: {
   return {
     isGeneratingMap,
     isDeepeningGuidelines,
+    isAuditingDeck,
     isGeneratingDeck,
     isRepairing,
+    repairingCardId,
+    isVerifyingDeck,
+    isRunningFullPipeline,
+    deckAuditReport,
+    finalVerificationReport,
     progress,
     cancelGeneration,
     handleGenerateClinicalMap,
     handleDeepenGuidelines,
+    handleAuditExistingDeck,
     handleRecreateCanonicalDeck,
     handleAutoRepairAllFlagged,
+    handleAutoRepairSingleCardWithAi,
+    handleVerifyDeckAdequacy,
+    handleRunFullPipeline,
   };
 }

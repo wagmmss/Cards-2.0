@@ -6,7 +6,10 @@ import { InputPanel } from './components/InputPanel';
 import { ClinicalMapSection } from './components/ClinicalMapSection';
 import { WozniakLinterDeck } from './components/WozniakLinterDeck';
 import { QuickReviewModal } from './components/QuickReviewModal';
+import { PdfGalleryModal } from './components/deck/PdfGalleryModal';
+import { buildDeckImageUsageMap } from './components/deck/CardMediaPanel';
 import { DoctrineReferenceSection } from './components/DoctrineReferenceSection';
+import { ExportConfirmationModal } from './components/ExportConfirmationModal';
 import {
   CanonicalCard,
   CardType,
@@ -21,9 +24,11 @@ import {
   UploadedPdfFile,
 } from './types/deck';
 import {
+  convertClozeToBasic,
   curateAndRebalanceDeck,
   extractDeckMetadata,
   removeMissingMediaFromCard,
+  resolveLocalMediaFilename,
   surgicalRepairCardLocal,
 } from './utils/wozniakLinter';
 import { sanitizeDeckKey } from './utils/apiClient';
@@ -79,6 +84,11 @@ export default function App() {
 
   const [manualStep, setManualStep] = useState<1 | 2 | 3 | 4 | null>(null);
   const [isQuickReviewOpen, setIsQuickReviewOpen] = useState<boolean>(false);
+  const [pdfGalleryState, setPdfGalleryState] = useState<{
+    open: boolean;
+    cardId: number | null;
+    tab: 'extracted' | 'browse';
+  }>({ open: false, cardId: null, tab: 'extracted' });
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<'info' | 'success' | 'error'>('info');
 
@@ -156,14 +166,24 @@ export default function App() {
   const {
     isGeneratingMap,
     isDeepeningGuidelines,
+    isAuditingDeck,
     isGeneratingDeck,
     isRepairing,
+    repairingCardId,
+    isVerifyingDeck,
+    isRunningFullPipeline,
+    deckAuditReport,
+    finalVerificationReport,
     progress,
     cancelGeneration,
     handleGenerateClinicalMap,
     handleDeepenGuidelines,
+    handleAuditExistingDeck,
     handleRecreateCanonicalDeck,
     handleAutoRepairAllFlagged,
+    handleAutoRepairSingleCardWithAi,
+    handleVerifyDeckAdequacy,
+    handleRunFullPipeline,
   } = useBatchDeckGenerator({
     pdfs,
     setPdfs,
@@ -187,6 +207,9 @@ export default function App() {
     isExportingBundle,
     isExportingApkg,
     isSyncingAnkiConnect,
+    pendingExportConfirm,
+    confirmPendingExport,
+    cancelPendingExport,
     handleDownloadJson,
     handleDownloadOfflineBundle,
     handleExportApkg,
@@ -441,6 +464,107 @@ export default function App() {
     });
   };
 
+  const cleanDeckKeyForUsage = sanitizeDeckKey(
+    deckKey.trim() || extractedMeta.detectedDeckKey || 'deck'
+  );
+  const deckImageUsage = useMemo(
+    () => buildDeckImageUsageMap(cards, cleanDeckKeyForUsage),
+    [cards, cleanDeckKeyForUsage]
+  );
+
+  const openPdfGallery = useCallback(
+    (cardId: number | null = null, tab: 'extracted' | 'browse' = 'extracted') => {
+      setPdfGalleryState({ open: true, cardId, tab });
+    },
+    []
+  );
+
+  const handleSaveCroppedPdfImage = useCallback(
+    (pdfName: string, cropped: PdfExtractedImage) => {
+      setPdfs((prev) =>
+        prev.map((pdf) =>
+          pdf.name === pdfName
+            ? {
+                ...pdf,
+                extractedImages: [...(pdf.extractedImages || []), cropped],
+              }
+            : pdf
+        )
+      );
+      showStatus(
+        `Recorte salvo na Galeria da Apostila (${pdfName}, Pág. ${cropped.pageNumber}).`,
+        'success'
+      );
+    },
+    [showStatus]
+  );
+
+  const handleAttachFromPdfGallery = useCallback(
+    (
+      cardId: number,
+      result: MedicalImageResult,
+      legend: string,
+      mode: 'recognition' | 'feedback'
+    ) => {
+      const imgUrl = (result.fullUrl || result.thumbUrl || '').trim();
+      if (!imgUrl) return;
+      const effKey = cleanDeckKeyForUsage;
+      setCards((prev) =>
+        prev.map((card) => {
+          if (card.id !== cardId) return card;
+          const convertedBase =
+            mode === 'recognition' && card.type === 'cloze'
+              ? convertClozeToBasic(card)
+              : card;
+          const cleanQ = (convertedBase.question || card.question)
+            .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+            .trim();
+          const cleanHintWithoutImgs = (convertedBase.hint || card.hint)
+            .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
+            .replace(/^(?:\s*<br\s*\/?>\s*)+/i, '')
+            .replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '')
+            .trim();
+          const localFile =
+            result.suggestedFilename?.trim() ||
+            resolveLocalMediaFilename('', imgUrl, card.id, 0, effKey);
+          const safeLegend =
+            legend.trim() ||
+            result.defaultLegend ||
+            `Legenda visual: figura ilustrativa do tema ${card.topic || effKey}.`;
+
+          if (mode === 'recognition') {
+            return {
+              ...convertedBase,
+              type: 'basic',
+              answer:
+                (convertedBase.answer || '').trim() ||
+                'Achado clínico característico evidenciado no exame.',
+              image_mode: 'recognition',
+              imageVerified: true,
+              needsManualImage: false,
+              question: `${cleanQ}<br><img src="${imgUrl}" data-anki-file="${localFile}">`,
+              hint: cleanHintWithoutImgs
+                ? `<i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`
+                : `<i>${safeLegend}</i>`,
+            };
+          }
+          return {
+            ...card,
+            image_mode: 'feedback',
+            imageVerified: true,
+            needsManualImage: false,
+            question: cleanQ,
+            hint: cleanHintWithoutImgs
+              ? `<img src="${imgUrl}" data-anki-file="${localFile}"><br><i>${safeLegend}</i><br><br>${cleanHintWithoutImgs}`
+              : `<img src="${imgUrl}" data-anki-file="${localFile}"><br><i>${safeLegend}</i>`,
+          };
+        })
+      );
+      showStatus(`Figura da apostila anexada ao Card ID ${cardId}.`, 'success');
+    },
+    [cleanDeckKeyForUsage, showStatus]
+  );
+
   const hasInput = pdfs.length > 0 || rawJsonText.trim().length > 0 || deckKey.trim().length > 0;
   const hasMap = Boolean(clinicalMap && clinicalMap.items.length > 0);
   const hasCards = cards.length > 0;
@@ -454,7 +578,7 @@ export default function App() {
       <TopBar
         deckKey={deckKey}
         cardCount={cards.length}
-        onDownloadJson={handleDownloadJson}
+        onDownloadJson={() => handleDownloadJson()}
         onExportApkg={() => void handleExportApkg()}
         isExportingApkg={isExportingApkg}
       />
@@ -498,6 +622,8 @@ export default function App() {
           onAddPdfs={handleAddPdfs}
           onRemovePdf={handleRemovePdf}
           onClearPdfs={handleClearPdfs}
+          extractedImagesCount={materialImages.length}
+          onOpenPdfGallery={(tab) => openPdfGallery(null, tab || 'extracted')}
           localMediaAssets={localMediaAssets}
           onAddLocalMedia={handleAddLocalMedia}
           onClearLocalMedia={handleClearLocalMedia}
@@ -519,10 +645,15 @@ export default function App() {
           useGoogleSearch={useGoogleSearch}
           onToggleGoogleSearch={setUseGoogleSearch}
           onGenerateClinicalMap={() => void handleGenerateClinicalMap()}
+          onAuditExistingDeck={() => void handleAuditExistingDeck()}
           onRecreateCanonicalDeck={() => void handleRecreateCanonicalDeck()}
+          onRunFullPipeline={() => void handleRunFullPipeline()}
           onLoadGenericSample={handleLoadGenericSample}
+          hasExistingCards={cards.length > 0}
           isGeneratingMap={isGeneratingMap}
+          isAuditingDeck={isAuditingDeck}
           isGeneratingDeck={isGeneratingDeck}
+          isRunningFullPipeline={isRunningFullPipeline}
           guidCount={Object.keys(guidRegistry.entries).length}
           onImportGuidRegistry={handleImportGuidRegistry}
           onExportGuidRegistry={exportGuidRegistryFile}
@@ -554,6 +685,14 @@ export default function App() {
           onCancelAutoResolve={cancelAutoResolve}
           isAutoResolvingImages={isAutoResolvingImages}
           pdfExtractedImages={pdfExtractedImages}
+          pdfCount={pdfs.length}
+          onOpenPdfGallery={(cardId, tab) => openPdfGallery(cardId ?? null, tab || 'extracted')}
+          deckAuditReport={deckAuditReport}
+          onAuditExistingDeck={() => void handleAuditExistingDeck()}
+          isAuditingDeck={isAuditingDeck}
+          finalVerificationReport={finalVerificationReport}
+          onVerifyDeckAdequacy={() => void handleVerifyDeckAdequacy()}
+          isVerifyingDeck={isVerifyingDeck}
           onSuggestVisualCards={() =>
             void suggestAndAttachVisualCards(
               cards,
@@ -571,9 +710,13 @@ export default function App() {
           onAddNewCard={handleAddNewCard}
           onAutoRepairAllFlagged={() => void handleAutoRepairAllFlagged()}
           onAutoRepairSingleCard={handleAutoRepairSingleCard}
+          onAutoRepairSingleCardWithAi={(cardId, targetField, fieldInstruction) =>
+            void handleAutoRepairSingleCardWithAi(cardId, targetField, fieldInstruction)
+          }
+          repairingCardId={repairingCardId}
           onLoadGenericSample={handleLoadGenericSample}
           isRepairing={isRepairing}
-          onDownloadJson={handleDownloadJson}
+          onDownloadJson={() => handleDownloadJson()}
           onDownloadOfflineBundle={() => void handleDownloadOfflineBundle()}
           onExportApkg={() => void handleExportApkg()}
           isExportingBundle={isExportingBundle}
@@ -587,6 +730,24 @@ export default function App() {
           deckKey={deckKey}
           localMediaAssets={localMediaAssets}
           onUpdateCard={handleUpdateCard}
+        />
+
+        <PdfGalleryModal
+          open={pdfGalleryState.open}
+          onClose={() => setPdfGalleryState((prev) => ({ ...prev, open: false }))}
+          pdfs={pdfs}
+          cards={cards}
+          initialCardId={pdfGalleryState.cardId}
+          initialTab={pdfGalleryState.tab}
+          deckImageUsage={deckImageUsage}
+          onAttachImageToCard={handleAttachFromPdfGallery}
+          onSaveCroppedPdfImage={handleSaveCroppedPdfImage}
+        />
+
+        <ExportConfirmationModal
+          pending={pendingExportConfirm}
+          onConfirm={confirmPendingExport}
+          onCancel={cancelPendingExport}
         />
 
         <DoctrineReferenceSection />

@@ -286,11 +286,13 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
   * Se n\xE3o houver figura correspondente nos PDFs, mas o card ganhar valor com imagem cl\xEDnica real, insira <img src="buscar_imagem: termo cl\xEDnico espec\xEDfico em PT ou EN"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">, <img src="buscar_imagem: pneumotorax hipertensivo radiografia torax">).
   * Coloque <img ...> na "question" ("image_mode": "recognition") quando o estudante precisa reconhecer o achado visual para responder; ou coloque no in\xEDcio do "hint" ("image_mode": "feedback", antes de <b>Coment\xE1rio:</b>) quando a imagem refor\xE7a a explica\xE7\xE3o, classifica\xE7\xE3o ou algoritmo sem entregar a resposta na frente.
   * Em cards puramente normativos, de dose ou c\xE1lculo simples onde imagem n\xE3o acrescenta, N\xC3O force <img>.
-  * Para escores ou classifica\xE7\xF5es estruturadas em tabela (ex.: \xCDndice de Bishop, Apgar, Wells, CURB-65) sem figura correspondente nos PDFs, prefira renderizar uma tabela HTML compacta <table class="med-table"> no "hint" em vez de for\xE7ar busca de imagem externa.
+  * Para escores, crit\xE9rios diagn\xF3sticos ou correla\xE7\xF5es topogr\xE1ficas estruturadas (ex.: \xCDndice de Bishop, Apgar, Wells, CURB-65, Sgarbossa, Paredes/Coron\xE1rias no IAM) sem figura correspondente nos PDFs, renderize proativamente uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> no "hint" AP\xD3S o texto de <b>Coment\xE1rio:</b> (m\xE1x. 4 colunas, c\xE9lulas curtas; a tabela N\xC3O entra na contagem de 180\u2013300 chars do coment\xE1rio).
+  * Toda <img> anexada exige legenda descritiva em <i>...</i> com \u2265 6 palavras descrevendo o achado vis\xEDvel real (PROIBIDO legenda gen\xE9rica/tautol\xF3gica ou que d\xEA spoiler da resposta em cards recognition).
+- PRECIS\xC3O TERMINOL\xD3GICA ESTRITA: valide cada termo bioqu\xEDmico, anat\xF4mico e eletrocardiogr\xE1fico com rigor absoluto (ex.: pot\xE1ssio = "calemia" / hipercalemia, NUNCA confundir com "litemia" de l\xEDtio; parear corretamente parede card\xEDaca \xD7 deriva\xE7\xF5es \xD7 art\xE9ria culpada).
 - FILTRO NEGATIVO ESTRITO: ZERO gen\xE9tica/biologia molecular de bancada sem impacto terap\xEAutico imediato, ZERO hist\xF3ria da medicina/datas e ZERO epidemiologia percentual solta que n\xE3o mude conduta.
-- PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>).
+- PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>, <table class="med-table">).
 - PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X").
-- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> ", teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
+- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " excluindo <table>, teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
 function extractJsonBlock(text) {
   if (!text) return "{}";
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -322,6 +324,24 @@ function buildFullCardsDigest(rawCards) {
     const type = c.type === "cloze" ? "cloze" : "basic";
     const priority = c.priority ? ` ${String(c.priority)}` : "";
     const topic = sanitizeCardTextForPrompt(c.topic, 140);
+    const verdict = c.auditVerdict === "rebuild" || c.auditVerdict === "split" ? String(c.auditVerdict) : "";
+    if (verdict) {
+      const targetConcept = sanitizeCardTextForPrompt(c.auditTargetConcept, 200);
+      const auditReason = sanitizeCardTextForPrompt(c.auditReason, 220);
+      const suggestedType = c.auditSuggestedType === "cloze" || c.auditSuggestedType === "basic" ? String(c.auditSuggestedType) : type;
+      const imgTags = `${String(c.question || "")} ${String(c.hint || "")}`.match(
+        /<img\b[^>]*>/gi
+      );
+      const preservedMedia = imgTags ? imgTags.filter((tag) => !/(?:buscar_imagem|pdfimg):/i.test(tag)).map((tag) => sanitizeCardTextForPrompt(tag, 180)).slice(0, 2).join(" ") : "";
+      return [
+        `- ID:${id} [${type}${priority}] [AUDITORIA: ${verdict} \u2192 REFAZER DO ZERO \u2014 N\xC3O PARAFRASEAR TEXTO ANTIGO]`,
+        `  Topic: "${topic}"`,
+        targetConcept ? `  Conceito-Alvo: "${targetConcept}"` : null,
+        auditReason ? `  Motivo da Reconstru\xE7\xE3o: "${auditReason}"` : null,
+        `  Tipo Recomendado: "${suggestedType}"`,
+        preservedMedia ? `  M\xEDdia Existente V\xE1lida (reutilizar somente se compat\xEDvel): ${preservedMedia}` : null
+      ].filter(Boolean).join("\n");
+    }
     const q = sanitizeCardTextForPrompt(c.question, 600);
     const a = sanitizeCardTextForPrompt(c.answer, 250);
     const h = sanitizeCardTextForPrompt(c.hint, 700);
@@ -567,7 +587,24 @@ async function withTimeoutAndAbort(promise, timeoutMs, signal, timeoutMessage = 
 }
 var PRIMARY_GEMINI_MODEL = "gemini-4-hydrogen";
 var FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite";
-var ALLOWED_GEMINI_MODELS = /* @__PURE__ */ new Set(["gemini-4-hydrogen", "gemini-3.8-flash"]);
+var ALLOWED_GEMINI_MODELS = /* @__PURE__ */ new Set([
+  "gemini-4-hydrogen",
+  "gemini-3.8-flash",
+  "gemini-3.1-flash-lite"
+]);
+var geminiModelCooldownUntil = /* @__PURE__ */ new Map();
+function parseGeminiRetryDelayMs(error) {
+  const raw = extractErrorDetails(error);
+  const match = raw.match(/Please\s+retry\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s)/i);
+  if (match && match[1]) {
+    const val = Number(match[1]);
+    if (Number.isFinite(val) && val > 0) {
+      const ms = match[2].toLowerCase() === "ms" ? val : val * 1e3;
+      return Math.min(25e3, Math.max(2500, Math.ceil(ms) + 400));
+    }
+  }
+  return 18e3;
+}
 function resolveGeminiModel(requestedModel) {
   if (typeof requestedModel === "string") {
     const clean = requestedModel.trim();
@@ -608,13 +645,23 @@ async function generateContentWithRetry(ai, params, options = {}) {
     ]
   ];
   let lastError;
+  let lastFailedModel = null;
+  let lastSuggestedDelayMs = 0;
   for (let i = 0; i < attemptPlans.length; i++) {
     const plan = attemptPlans[i];
     if (signal?.aborted) {
       throw new DOMException("Opera\xE7\xE3o cancelada pelo usu\xE1rio.", "AbortError");
     }
-    if (plan.delayBeforeMs > 0) {
-      await sleepWithAbort(plan.delayBeforeMs, signal);
+    const now = Date.now();
+    const modelCoolingUntil = geminiModelCooldownUntil.get(plan.model) || 0;
+    const hasUncooledAlternatePlan = attemptPlans.slice(i + 1).some((p) => p.model !== plan.model && (geminiModelCooldownUntil.get(p.model) || 0) <= now);
+    if (modelCoolingUntil > now && hasUncooledAlternatePlan) {
+      continue;
+    }
+    const isFreshFallbackSwitch = lastFailedModel !== null && plan.model !== lastFailedModel;
+    const delayMs = isFreshFallbackSwitch ? 250 : lastSuggestedDelayMs > 0 && plan.model === lastFailedModel ? Math.min(1e4, Math.max(plan.delayBeforeMs, Math.min(lastSuggestedDelayMs, 8e3))) : plan.delayBeforeMs;
+    if (delayMs > 0) {
+      await sleepWithAbort(delayMs, signal);
     }
     const attemptConfig = {
       ...params.config || {},
@@ -686,19 +733,35 @@ async function generateContentWithRetry(ai, params, options = {}) {
         signal,
         `Timeout ap\xF3s ${Math.round(timeoutMs / 1e3)}s no modelo ${plan.model}`
       );
+      geminiModelCooldownUntil.delete(plan.model);
       return result;
     } catch (error) {
       lastError = error;
+      lastFailedModel = plan.model;
+      const errDetails = extractErrorDetails(error);
       console.error(
         `[gemini] attempt ${i + 1}/${attemptPlans.length} (${plan.model}) failed:`,
-        extractErrorDetails(error)
+        errDetails
       );
       if (signal?.aborted) {
         throw error;
       }
+      const isQuotaError = /429|RESOURCE_EXHAUSTED|quota exceeded/i.test(errDetails);
+      if (isQuotaError) {
+        const retryMs = parseGeminiRetryDelayMs(error);
+        lastSuggestedDelayMs = retryMs;
+        geminiModelCooldownUntil.set(plan.model, Date.now() + retryMs);
+      } else {
+        lastSuggestedDelayMs = 0;
+      }
       const canRetry = isRetryableGeminiError(error) || enableModelFallback && isModelOverloadOrQuotaError(error);
       if (!canRetry || i === attemptPlans.length - 1) {
         throw error;
+      }
+      if (enableModelFallback && (isQuotaError || /TimeoutError|timed out|DEADLINE_EXCEEDED/i.test(errDetails))) {
+        while (i + 1 < attemptPlans.length && attemptPlans[i + 1].model === plan.model && attemptPlans.slice(i + 2).some((p) => p.model !== plan.model)) {
+          i++;
+        }
       }
     }
   }
@@ -1109,7 +1172,7 @@ function formatPdfImagesCatalogBlock(pdfImagesCatalog) {
   if (!Array.isArray(pdfImagesCatalog) || pdfImagesCatalog.length === 0) {
     return "";
   }
-  const lines = pdfImagesCatalog.slice(0, 45).map((item) => {
+  const lines = pdfImagesCatalog.slice(0, 120).map((item) => {
     const rec = item || {};
     const id = sanitizeCardTextForPrompt(rec.id, 60);
     if (!id) return null;
@@ -1140,12 +1203,48 @@ function sanitizeReturnedNotes(notes) {
     const copy = { ...n };
     delete copy.sources;
     const rawType = String(copy.type || "basic").trim().toLowerCase();
-    copy.type = rawType === "cloze" ? "cloze" : "basic";
+    const qStr = String(copy.question || "");
+    const aStr = String(copy.answer || "").trim();
+    const hasSilentCloze = /\{\{c\d+::[\s\S]+?\}\}/.test(qStr) && !aStr;
+    copy.type = rawType === "cloze" || hasSilentCloze ? "cloze" : "basic";
     if (copy.type === "cloze") {
       copy.answer = "";
     }
     return copy;
   });
+}
+function applyDeterministicAuditGuard(c, existing) {
+  const cid = Number(c.id);
+  const plainQ = String(c.question || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const plainA = String(c.answer || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const plainHint = String(c.hint || "").replace(/<table[\s\S]*?<\/table>/gi, " ").replace(/<[^>]+>/g, " ").replace(/Coment[áa]rio:/gi, "").replace(/\s+/g, " ").trim();
+  const hasVaguePrompt = !/\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+minuto\s+zero|diagn[oó]stic[ao])\b/i.test(plainQ) && /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|como\s+conduzir|o\s+que\s+fazer)\s*\?\s*$/i.test(plainQ);
+  const isPassivePrompt = /^\s*(?:o\s+que\s+[eé]\s+|defina\s+|fale\s+sobre\s+)/i.test(plainQ);
+  const hasOrphanDeixis = !/<img\b/i.test(`${String(c.question || "")} ${String(c.hint || "")}`) && /\b(?:ecg|tra[çc]ado|exame|imagem|rx|usg|tc|ctg)\s+(?:abaixo|acima|em\s+anexo)\b/i.test(plainQ);
+  const hasMissingBasicAnswer = String(c.type || "basic").toLowerCase() === "basic" && !plainA;
+  const hasShortComment = plainHint.length < 100;
+  const deterministicRebuildReason = hasOrphanDeixis ? 'Refer\xEAncia visual ("abaixo"/"em anexo") sem imagem anexada.' : hasMissingBasicAnswer ? "Card basic com resposta vazia." : hasVaguePrompt ? "Comando vago sem janela temporal ou linha terap\xEAutica." : isPassivePrompt ? "Defini\xE7\xE3o passiva sem vinheta ou decis\xE3o cl\xEDnica." : hasShortComment ? `Coment\xE1rio muito curto (${plainHint.length} chars) sem contraste diferencial adequado.` : "";
+  if (existing) {
+    if (existing.verdict === "keep" && deterministicRebuildReason) {
+      return {
+        ...existing,
+        verdict: "rebuild",
+        score: Math.min(existing.score, 5),
+        reason: `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.`
+      };
+    }
+    return existing;
+  }
+  const validPriorities = /* @__PURE__ */ new Set(["P1", "P2", "P3", "P4"]);
+  return {
+    cardId: cid,
+    verdict: deterministicRebuildReason ? "rebuild" : "keep",
+    score: deterministicRebuildReason ? 5 : 8,
+    reason: deterministicRebuildReason ? `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.` : "Mantido ap\xF3s auditoria geral.",
+    targetConcept: sanitizeCardTextForPrompt(c.topic, 140) || "Conceito cl\xEDnico do card.",
+    priority: validPriorities.has(String(c.priority || "").toUpperCase()) ? String(c.priority).toUpperCase() : "P2",
+    suggestedType: c.type === "cloze" ? "cloze" : "basic"
+  };
 }
 function createGeminiRouter() {
   const router = express.Router();
@@ -1253,13 +1352,14 @@ Organize a resposta em t\xF3picos objetivos por eixo, sempre citando a fonte e o
           groundedSearchQueries = searchResult.searchQueries || [];
           googleSearchUsed = groundedSources.length > 0 || groundedSearchQueries.length > 0 || groundedDossierText.length > 120;
         } catch (searchErr) {
-          if (signal.aborted || !isRetryableGeminiError(searchErr)) {
+          if (signal.aborted) {
             throw searchErr;
           }
           console.warn(
-            "[clinical-map] Stage 1 googleSearch failed with retryable error, proceeding to Stage 2:",
+            "[clinical-map] Stage 1 googleSearch failed, falling back gracefully to Stage 2 (PDFs + internal knowledge):",
             extractErrorDetails(searchErr)
           );
+          googleSearchUsed = false;
         }
       }
       const dossierBlock = groundedDossierText ? `
@@ -1308,7 +1408,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido (sem coment\xE1rios fora do JSON
     }
   ]
 }
-Gere entre 10 e 16 itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
+Gere entre ${Array.isArray(pdfs) && pdfs.length > 0 || String(existingJsonSummary || "").trim() ? "12 e 20" : "10 e 16"} itens distribu\xEDdos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", cobrindo integralmente os sub-eixos cl\xEDnicos e de exames complementares do tema (ex.: se cardiologia/ECG, cubra paredes do IAM, supra vs infra, TPSV, FA/Flutter, BAVs, BRD/BRE, WPW/Brugada e emerg\xEAncias metab\xF3licas) e escolhendo fluidamente targetCardType ("basic" para decis\xE3o cl\xEDnica/diferencial/mecanismo/imagem e "cloze" para crit\xE9rios num\xE9ricos/limiares/doses em \xE2ncora), sem cota percentual r\xEDgida.`;
       const result = await withGeminiKeyRotation(async (ai, keyFp) => {
         const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
         parts.push({ text: prompt });
@@ -1450,6 +1550,168 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
       cleanup();
     }
   });
+  router.post("/audit-deck", async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 18e4);
+    try {
+      const {
+        deckKey = "tema_clinico_internato",
+        cards = [],
+        clinicalMap = null,
+        pdfs = [],
+        model: requestedModel
+      } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
+        });
+      }
+      const inputCards = Array.isArray(cards) ? cards : [];
+      if (inputCards.length === 0) {
+        return res.json({
+          deckKey,
+          overallSummary: "Nenhum card pr\xE9vio enviado para auditoria.",
+          counts: { keep: 0, rebuild: 0, split: 0, prune: 0 },
+          items: []
+        });
+      }
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ""} ${clinicalMap?.specialty || ""}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+      const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
+      const cardsDigest = buildFullCardsDigest(
+        inputCards.slice(0, 140).map((c) => ({
+          id: c.id,
+          type: c.type,
+          priority: c.priority,
+          topic: c.topic,
+          question: c.question,
+          answer: c.answer,
+          hint: c.hint
+        }))
+      );
+      const prompt = `Voc\xEA \xE9 o Auditor Chefe de Qualidade Cl\xEDnica e Pedag\xF3gica (Matuschak & Nielsen + Diretrizes M\xE9dicas Brasileiras) avaliando UM BARALHO EXISTENTE para o tema "${deckKey}".
+Analise cada card abaixo individualmente comparando-o com os PDFs anexados, o Mapa Cl\xEDnico P1\u2013P4 e as diretrizes atualizadas.
+
+${profilePromptBlock}${guidelinesBlock}
+MAPA CL\xCDNICO P1\u2013P4 DE REFER\xCANCIA:
+${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Avalie conforme matriz P1\u2013P4 do tema."}
+
+CARDS EXISTENTES PARA JULGAMENTO (JULGUE TODOS OS ${Math.min(140, inputCards.length)} CARDS):
+${cardsDigest}
+
+CRIT\xC9RIOS DE VEREDITO POR CARD ("verdict"):
+- "keep": Card j\xE1 est\xE1 excelente (nota >= 8/10): decis\xE3o at\xF4mica clara, clinicamente atualizada e correta segundo os PDFs/diretrizes, sem spoiler, sem lista disfar\xE7ada, "hint" com \u2265 120 chars vis\xEDveis e contraste diferencial, E com tag <img ...> caso o t\xF3pico exija reconhecimento visual (ECG/RX/USG/TC/CTG/les\xE3o). NUNCA atribua "keep" a pergunta vaga ("Qual a conduta?", "Qual o manejo?", "O que fazer?"), defini\xE7\xE3o passiva ("O que \xE9 X?"), card sem imagem em reconhecimento visual ou coment\xE1rio raso (< 110 chars).
+- "rebuild": Card cobre um conceito cl\xEDnico \xFAtil/importante, POR\xC9M est\xE1 fraco (pergunta vaga como "Qual a conduta?", "Qual o manejo?", "O que fazer?", defini\xE7\xE3o passiva "O que \xE9...", resposta longa/lista, spoiler no enunciado/t\xF3pico, dose ou crit\xE9rio desatualizado/impreciso, coment\xE1rio raso ou exame visual sem <img>). DEVE SER REFEITO DO ZERO!
+- "split": Card mistura 2 ou mais decis\xF5es cl\xEDnicas diferentes no mesmo card (ex.: diagn\xF3stico + tratamento, parede + art\xE9ria, achado + antiarr\xEDtmico, ou m\xFAltiplos esquemas/crit\xE9rios) e precisa ser desdobrado em cards at\xF4micos separados.
+- "prune": Card \xE9 duplicata exata de outro card melhor no deck, \xE9 trivial sem impacto cl\xEDnico ou viola o Filtro Negativo (hist\xF3ria da medicina, gen\xE9tica de bancada sem conduta).
+
+Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido:
+{
+  "overallSummary": "Resumo executivo de 1 a 2 frases sobre a qualidade atual do deck e o que precisa ser reconstru\xEDdo.",
+  "items": [
+    {
+      "cardId": 171000101,
+      "verdict": "rebuild",
+      "score": 4,
+      "reason": "Pergunta vaga e cloze longo; misturando 1\xAA linha e dose em lista.",
+      "clinicalIssue": "Esquema ou crit\xE9rio desatualizado/impreciso (opcional se n\xE3o houver erro cl\xEDnico).",
+      "targetConcept": "Conduta ou crit\xE9rio exato que este card deveria testar (1 frase clara).",
+      "priority": "P1",
+      "suggestedType": "basic"
+    }
+  ]
+}`;
+      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: "application/json",
+              maxOutputTokens: 32768,
+              thinkingConfig: { thinkingLevel: ThinkingLevel2.MEDIUM }
+            }
+          },
+          { signal, timeoutMs: 14e4, enableModelFallback: true }
+        );
+      }, signal);
+      if (res.writableEnded) return;
+      const rawText = response.text || "{}";
+      const { items: rawItems } = parseOrRecoverJsonArrayField(rawText, "items", [
+        "cardId",
+        "verdict"
+      ]);
+      let overallSummary = "";
+      try {
+        const full = JSON.parse(extractJsonBlock(rawText));
+        overallSummary = String(full?.overallSummary || "").trim();
+      } catch {
+        const sumMatch = rawText.match(/"overallSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (sumMatch?.[1]) {
+          try {
+            overallSummary = JSON.parse(`"${sumMatch[1]}"`);
+          } catch {
+            overallSummary = sumMatch[1];
+          }
+        }
+      }
+      const validVerdicts = /* @__PURE__ */ new Set(["keep", "rebuild", "split", "prune"]);
+      const validPriorities = /* @__PURE__ */ new Set(["P1", "P2", "P3", "P4"]);
+      const itemMap = /* @__PURE__ */ new Map();
+      for (const raw of rawItems) {
+        const cardId = Number(raw.cardId);
+        if (!Number.isFinite(cardId)) continue;
+        const vRaw = String(raw.verdict || "rebuild").toLowerCase().trim();
+        const verdict = validVerdicts.has(vRaw) ? vRaw : "rebuild";
+        const pRaw = String(raw.priority || "P2").toUpperCase().trim();
+        const priority = validPriorities.has(pRaw) ? pRaw : "P2";
+        const scoreNum = Number(raw.score);
+        const score = Number.isFinite(scoreNum) ? Math.max(0, Math.min(10, Math.round(scoreNum))) : verdict === "keep" ? 8 : 5;
+        itemMap.set(cardId, {
+          cardId,
+          verdict,
+          score,
+          reason: sanitizeCardTextForPrompt(raw.reason, 220) || "Avaliado pela auditoria cl\xEDnica.",
+          ...raw.clinicalIssue ? { clinicalIssue: sanitizeCardTextForPrompt(raw.clinicalIssue, 180) } : {},
+          targetConcept: sanitizeCardTextForPrompt(raw.targetConcept, 200) || "Conceito cl\xEDnico central do card.",
+          priority,
+          suggestedType: raw.suggestedType === "cloze" ? "cloze" : "basic"
+        });
+      }
+      const normalizedItems = inputCards.map(
+        (c) => applyDeterministicAuditGuard(c, itemMap.get(Number(c.id)))
+      );
+      const counts = { keep: 0, rebuild: 0, split: 0, prune: 0 };
+      for (const it of normalizedItems) {
+        counts[it.verdict]++;
+      }
+      return res.json({
+        deckKey,
+        overallSummary: overallSummary || `Auditoria conclu\xEDda: ${counts.keep} mantido(s), ${counts.rebuild} para refazer do zero, ${counts.split} para desmembrar e ${counts.prune} para podar.`,
+        counts,
+        items: normalizedItems,
+        modelUsed: response.modelUsed
+      });
+    } catch (error) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, "Erro ao auditar qualidade dos cards existentes.")
+      });
+    } finally {
+      cleanup();
+    }
+  });
   router.post("/generate-deck", async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 3e5);
     try {
@@ -1495,8 +1757,13 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
           throw new DOMException("Opera\xE7\xE3o cancelada pelo usu\xE1rio.", "AbortError");
         }
         const rawCardsSummary = buildFullCardsDigest(subsetCards);
+        const hasAuditedRebuilds = subsetCards.some(
+          (c) => c.auditVerdict === "rebuild" || c.auditVerdict === "split"
+        );
+        const auditedRebuildRule = hasAuditedRebuilds ? `
+- REGRA DE RECONSTRU\xC7\xC3O DO ZERO (AUDITORIA ATIVA): Para os cards marcados com [AUDITORIA: rebuild/split \u2192 REFAZER DO ZERO], o texto antigo foi intencionalmente ocultado para evitar par\xE1frase viciada. Crie um flashcard 100% NOVO a partir dos PDFs anexados, das Diretrizes Verificadas e do "Conceito-Alvo", preservando o "id" FSRS original (e usando novo ID >= ${subsetNewIdStart} apenas se "split" exigir desdobramento em 2 decis\xF5es distintas).` : "";
         const batchInstruction = isBatchMode ? `MODO DE RECONSTRU\xC7\xC3O PROFUNDA EM LOTE (${batchIndex + 1}/${totalBatches} \u2014 ${subsetCards.length} cards neste lote):
-- PROIBIDO PAR\xC1FRASE COSM\xC9TICA DE CLOZES FRACOS: Reconstrua cada conceito v\xE1lido **DO ZERO** segundo Andy Matuschak & Michael Nielsen (esfor\xE7o real de recupera\xE7\xE3o, anti-pattern-matching, racioc\xEDnio causal "por que / como", precis\xE3o cl\xEDnica).
+- PROIBIDO PAR\xC1FRASE COSM\xC9TICA DE CLOZES FRACOS: Reconstrua cada conceito v\xE1lido **DO ZERO** segundo Andy Matuschak & Michael Nielsen (esfor\xE7o real de recupera\xE7\xE3o, anti-pattern-matching, racioc\xEDnio causal "por que / como", precis\xE3o cl\xEDnica).${auditedRebuildRule}
 - ESCOPO ESTRITO DO LOTE (ZERO COLIS\xC3O ENTRE LOTES PARALELOS):
   * Trabalhe EXCLUSIVAMENTE sobre os conceitos presentes nos ${subsetCards.length} cards originais DESTE lote. **PROIBIDO criar cards novos para lacunas globais do Mapa Cl\xEDnico P1\u2013P4 ausentes deste lote** \u2014 a auditoria global p\xF3s-lotes adicionar\xE1 automaticamente todas as lacunas do Mapa Cl\xEDnico ap\xF3s a converg\xEAncia dos lotes, evitando duplicatas entre lotes paralelos!
   * S\xF3 crie ID novo (a partir de ${subsetNewIdStart}) se um \xFAnico card complexo DESTE lote precisar ser desmembrado em 2 decis\xF5es cl\xEDnicas distintas.
@@ -1508,7 +1775,7 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
 - EQUIL\xCDBRIO ENTRE PRESERVAR CONCEITOS E PODAR DUPLICATAS REAIS:
   * Mantenha com seu "id" FSRS original todos os conceitos cl\xEDnicos verdadeiramente distintos de P1\u2013P4.
   * PODA ATIVA DE DUPLICATAS: Se dois cards neste lote ou no \xCDNDICE GLOBAL DE TODOS OS LOTES testarem exatamente a MESMA conduta/alvo redundante (ex.: m\xFAltiplos cards fechando "{{c1::48 a 72 horas}}" para retorno, ou dois cards distintos cobrando a mesma prescri\xE7\xE3o de alta de autoinjetor de adrenalina), **EXCLUA o ID duplicado** neste lote ou diferencie explicitamente o alvo cl\xEDnico. Tamb\xE9m exclua cards reprovados pelo Filtro Negativo.` : `MODO DE GERA\xC7\xC3O INTEGRAL DO BARALHO (${subsetCards.length} cards originais fornecidos):
-- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos cl\xEDnicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Cl\xEDnico P1\u2013P4.`;
+- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos cl\xEDnicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Cl\xEDnico P1\u2013P4.${auditedRebuildRule}`;
         const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
         const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
         const prompt = `Reconstrua profundamente e lapide o baralho can\xF4nico para o tema "${deckKey}".
@@ -1548,7 +1815,7 @@ CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
 5. Duplo Salto Cognitivo Impl\xEDcito: NUNCA fa\xE7a pergunta composta ("Qual o diagn\xF3stico e a conduta?"). Apresente o caso cl\xEDnico e pergunte apenas 1 decis\xE3o at\xF4mica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre par\xEAnteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve ter "<b>Coment\xE1rio:</b> " logo antes da explica\xE7\xE3o textual (se houver <i>Legenda</i> ou <img ...>, coloque no in\xEDcio ANTES de "<b>Coment\xE1rio:</b> "), com 1 a 2 frases (180 a 300 caracteres vis\xEDveis no coment\xE1rio textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.
+8. "hint": deve ter "<b>Coment\xE1rio:</b> " logo antes da explica\xE7\xE3o textual (se houver <i>Legenda</i> ou <img ...>, coloque no in\xEDcio ANTES de "<b>Coment\xE1rio:</b> "), com 1 a 2 frases (180 a 300 caracteres vis\xEDveis no coment\xE1rio textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio. Para escores, crit\xE9rios num\xE9ricos ou pareamento parede\xD7deriva\xE7\xF5es\xD7art\xE9ria, inclua AP\xD3S o coment\xE1rio uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> (\u2264 4 colunas; n\xE3o conta nos 310 chars). Valide termos bioqu\xEDmicos (ex.: calemia = pot\xE1ssio, nunca "litemia").
 9. N\xC3O inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
@@ -1690,7 +1957,7 @@ TAREFA CIR\xDARGICA:
   * Racioc\xEDnio visual proativo: se a lacuna envolve exame/les\xE3o/tra\xE7ado/algoritmo que ganhe reten\xE7\xE3o com imagem, use <img src="pdfimg:ID_EXATO"> (se presente no cat\xE1logo acima) ou <img src="buscar_imagem: query cl\xEDnica espec\xEDfica"> na "question" ("image_mode": "recognition") ou no in\xEDcio do "hint" ("image_mode": "feedback"). NUNCA invente arquivos locais.
   * Se "basic": "question" <= 45\u201350 palavras (vinheta ou pergunta causal), "answer" com 1 a 12 palavras terminado em ponto final (.), sem ";".
   * Se "cloze": exatamente 1 lacuna {{c1::...}} (1 a 5 palavras) e "answer": "".
-  * "hint": comece com "<b>Coment\xE1rio:</b> " (precedido por <i>Legenda</i> ou <img ...><br> quando aplic\xE1vel), tenha entre 180 e 300 caracteres vis\xEDveis (medidos AP\xD3S "<b>Coment\xE1rio:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema.
+  * "hint": comece com "<b>Coment\xE1rio:</b> " (precedido por <i>Legenda</i> ou <img ...><br> quando aplic\xE1vel), tenha entre 180 e 300 caracteres vis\xEDveis (medidos AP\xD3S "<b>Coment\xE1rio:</b> " excluindo <table>, teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema. Inclua <table class="med-table"> compacta ap\xF3s o coment\xE1rio sempre que houver escore, crit\xE9rios ou tabela topogr\xE1fica. Valide terminologia cl\xEDnica estrita (ex.: calemia = K+, nunca "litemia").
 - Se TODOS os conceitos do Mapa Cl\xEDnico j\xE1 possu\xEDrem card pr\xF3prio dedicado acima, retorne "notes": [].
 - NUNCA duplique conceitos j\xE1 cobertos nos cards existentes acima.
 - N\xC3O inclua o campo "sources".
@@ -1740,7 +2007,15 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
   router.post("/repair-cards", async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 18e4);
     try {
-      const { flaggedCards = [], deckKey = "internato_deck", model: requestedModel } = req.body || {};
+      const {
+        flaggedCards = [],
+        deckKey = "internato_deck",
+        clinicalMap = null,
+        pdfs = [],
+        targetField = "",
+        fieldInstruction = "",
+        model: requestedModel
+      } = req.body || {};
       const activeModel = resolveGeminiModel(requestedModel);
       if (parseGeminiApiKeys().length === 0) {
         return res.status(200).json({
@@ -1748,17 +2023,28 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
           error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
         });
       }
-      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html).
-Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia v\xE1lida de cada card. N\xC3O inclua o campo "sources".
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+      const checkedItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false).slice(0, 20).map(
+        (i) => `- [${String(i.priority || "P2")}] ${sanitizeCardTextForPrompt(i.subtopic, 60)}: ${sanitizeCardTextForPrompt(i.concept, 150)}`
+      ).join("\n") : "";
+      const targetFieldBlock = targetField ? `
+FOCO SOLICITADO PELO USU\xC1RIO: Concentre a reescrita no campo "${String(targetField)}"${fieldInstruction ? ` (motivo: "${sanitizeCardTextForPrompt(fieldInstruction, 220)}")` : ""}, preservando os demais campos j\xE1 v\xE1lidos e mantendo coer\xEAncia total entre pergunta, resposta e coment\xE1rio.` : "";
+      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html) e/ou pela Verifica\xE7\xE3o Final.
+Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia v\xE1lida (como __EMBEDDED_DATA_URI_*__) de cada card, A MENOS que o card fa\xE7a refer\xEAncia visual sem imagem \u2014 nesse caso insira <img src="buscar_imagem: query cl\xEDnica precisa"> ou remova a refer\xEAncia \xF3rf\xE3. N\xC3O inclua o campo "sources".
+${guidelinesBlock}${checkedItems ? `
+MAPA CL\xCDNICO DO DECK "${deckKey}":
+${checkedItems}
+` : ""}${targetFieldBlock}
 
 REGRAS DE CORRE\xC7\xC3O CIR\xDARGICA (MATUSCHAK & NIELSEN):
-- **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/crit\xE9rios...?", "Cite...") ou a resposta tem m\xFAltiplos itens/ponto-e-v\xEDrgula, isole 1 \xFAnico atributo/decis\xE3o determinante.
+- **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/crit\xE9rios...?", "Cite...") ou a resposta tem m\xFAltiplos itens/ponto-e-v\xEDrgula, isole 1 \xFAnico atributo/decis\xE3o determinante. Se for pergunta composta ("Qual a parede e a art\xE9ria?", "Qual o diagn\xF3stico e antiarr\xEDtmico?"), mantenha apenas 1 alvo at\xF4mico.
 - **Salience & Anti-Passivo (Nielsen):** Se a pergunta \xE9 uma defini\xE7\xE3o inerte ("O que \xE9 X?") ou bin\xE1ria ("Sim/N\xE3o"), transforme em um prompt de sali\xEAncia ancorado em cen\xE1rio cl\xEDnico ou mecanismo causal.
-- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (cen\xE1rio cl\xEDnico com decis\xE3o inequ\xEDvoca ou prompt causal/diferencial de Nielsen & Matuschak); "answer" DEVE ter entre 1 e 12 palavras (m\xE1x 15 palavras / 110 chars), terminar com ".", N\xC3O conter ";" e N\xC3O ter <b> envolvendo tudo. Use "basic" ou "cloze" livremente conforme o que melhor encaixar para o card.
+- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (com janela temporal expl\xEDcita: "imediata", "inicial", "de 1\xAA escolha" \u2014 NUNCA "Qual a conduta?"); "answer" DEVE ter entre 1 e 12 palavras (m\xE1x 15 palavras / 110 chars), terminar com ".", N\xC3O conter ";" e N\xC3O ter <b> envolvendo tudo.
 - **Cloze At\xF4mico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposi\xE7\xE3o pendurada no final, SEM "::dica", e "answer" DEVE ser "".
-- **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta \xE9 "Manobra de...") mantendo formato "Tema - Subtema".
+- **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra/radical da resposta mantendo formato "Tema - Subtema".
+- **Precis\xE3o Terminol\xF3gica & Tabelas:** Corrija imprecis\xF5es cl\xEDnicas (ex.: calemia = pot\xE1ssio, nunca litemia). Se o card explicar escore ou correla\xE7\xE3o topogr\xE1fica, mantenha ou adicione <table class="med-table"> compacta (\u2264 4 colunas) AP\xD3S o texto de <b>Coment\xE1rio:</b>.
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (\u2192, \u2265, \u2264).
-- "hint": DEVE conter "<b>Coment\xE1rio:</b> ", ter entre 180 e 295 caracteres vis\xEDveis AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " (PROIBIDO passar de 320 caracteres vis\xEDveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
+- "hint": DEVE conter "<b>Coment\xE1rio:</b> ", ter entre 180 e 295 caracteres vis\xEDveis AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " (excluindo <table>; PROIBIDO passar de 320 chars vis\xEDveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
 
 CARDS SINALIZADOS E SEUS AVISOS:
 ${JSON.stringify(flaggedCards, null, 2)}
@@ -1777,12 +2063,14 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no formato:
     }
   ]
 }`;
-      const response = await withGeminiKeyRotation(
-        (ai) => generateContentWithRetry(
+      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
           ai,
           {
             model: activeModel,
-            contents: prompt,
+            contents: { parts },
             config: {
               systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
               responseMimeType: "application/json",
@@ -1791,9 +2079,8 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no formato:
             }
           },
           { signal, timeoutMs: 135e3, enableModelFallback: true }
-        ),
-        signal
-      );
+        );
+      }, signal);
       if (res.writableEnded) return;
       const rawText = response.text || "{}";
       const { items: rawRepaired } = parseOrRecoverJsonArrayField(
@@ -1923,7 +2210,7 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido no formato:
     }
   });
   router.post("/validate-image", async (req, res) => {
-    const { signal, cleanup } = createRequestAbortSignal(req, res, 35e3);
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 42e3);
     let mediaReachableRaster = false;
     try {
       const {
@@ -1989,7 +2276,7 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido no formato:
           visualLegend: ""
         });
       }
-      const activeModel = resolveGeminiModel(requestedModel);
+      const activeModel = requestedModel ? resolveGeminiModel(requestedModel) : FALLBACK_GEMINI_MODEL;
       const safeMode = imageMode === "recognition" ? "recognition" : "feedback";
       const prompt = `Voc\xEA \xE9 um preceptor m\xE9dico auditando visualmente uma imagem candidata a ser anexada a um flashcard do Internato.
 Analise EXCLUSIVAMENTE OS PIXELS REAIS DA IMAGEM ANEXADA (n\xE3o confie em suposi\xE7\xF5es do texto se os pixels mostrarem outra modalidade!).
@@ -2002,14 +2289,17 @@ CONTEXTO DO FLASHCARD:
 - Coment\xE1rio: "${sanitizeCardTextForPrompt(cardHint, 180)}"
 ${captionHint ? `- Legenda/nota extra\xEDda pr\xF3xima \xE0 figura: "${sanitizeCardTextForPrompt(captionHint, 140)}"` : ""}
 
-REGRAS DE INSPE\xC7\xC3O VISUAL:
-1. "detectedModality": nomeie a modalidade real vis\xEDvel nos pixels (ex.: "usg", "videolaparoscopia", "ecg", "radiografia", "tomografia", "ctg", "dermatoscopia", "histologia", "fluxograma", "foto_clinica", "esquema", "irrelevante_logo").
+REGRAS ESTRITAS DE INSPE\xC7\xC3O VISUAL:
+1. "detectedModality": nomeie a modalidade real vis\xEDvel nos pixels (ex.: "usg", "videolaparoscopia", "ecg_12_derivacoes", "ecg_tira_ritmo", "ecocardiograma", "radiografia", "tomografia", "ctg", "dermatoscopia", "histologia", "fluxograma", "foto_clinica", "esquema_desenho", "irrelevante_logo").
 2. "isCompatible":
-   - Retorne FALSE se houver conflito de modalidade entre o que o card solicita/descreve e o que aparece na imagem (ex.: card pede USG/ultrassonografia e a imagem \xE9 videolaparoscopia/cirurgia, ou card pede ECG e a imagem \xE9 anatomia/retrato/logo/capa de aula).
-   - Retorne FALSE se a imagem for ileg\xEDvel, logomarca, retrato de autor, texto puro gen\xE9rico sem valor cl\xEDnico ou claramente de outra doen\xE7a incompat\xEDvel.
-   - Retorne TRUE apenas se os pixels realmente representarem uma figura cl\xEDnica compat\xEDvel e \xFAtil para este card.
-3. "conflictReason": explica\xE7\xE3o objetiva curta caso isCompatible=false (ou "" se compat\xEDvel).
-4. "visualLegend": descreva fielmente em Portugu\xEAs do Brasil (entre 8 e 24 palavras, M\xCDNIMO 6 palavras, sem iniciar com "Legenda visual:") APENAS o que est\xE1 vis\xEDvel na imagem real. Se mode="recognition", descreva os achados visuais sem entregar o termo diagn\xF3stico da resposta esperada.`;
+   - Retorne FALSE se houver conflito de modalidade (ex.: card pede ECG e a imagem \xE9 ecocardiograma/modo-M, anatomia, retrato, logo ou capa de aula; ou card pede USG e a imagem \xE9 laparoscopia).
+   - Retorne FALSE se o card testa uma **patologia/altera\xE7\xE3o espec\xEDfica** (ex.: IAM com supra, Flutter atrial, WPW, BAVT, Brugada, pneumot\xF3rax, hipercalemia), MAS os pixels mostrarem um **exame NORMAL/FISIOL\xD3GICO** (ex.: ECG em ritmo sinusal normal sem altera\xE7\xE3o) ou de **OUTRA patologia diferente** (ex.: hemibloqueio anterior esquerdo quando o card pede IAM anterior; BRD quando o card pede BRE; FA quando o card pede Flutter).
+   - Retorne FALSE se modo="${safeMode}" for "recognition" e a imagem for **ilustra\xE7\xE3o/esquema vetorial/cartoon** em vez de exame diagn\xF3stico real, OU se o **diagn\xF3stico/resposta aparecer escrito em texto grande leg\xEDvel como spoiler nos pixels**.
+   - Retorne FALSE se a imagem for ileg\xEDvel, borrada, logomarca ou texto puro gen\xE9rico.
+   - Retorne TRUE apenas se os pixels mostrarem inequivocamente o exame/achado cl\xEDnico compat\xEDvel e \xFAtil para este card.
+3. "visualScore": nota inteira de 1 a 10 da qualidade did\xE1tica e precis\xE3o diagn\xF3stica da imagem (9\u201310 = ECG de 12 deriva\xE7\xF5es ou exame real n\xEDtido demonstrando o achado exato sem texto spoiler; 6\u20138 = tira de ritmo/exame aceit\xE1vel demonstrando a patologia; 1\u20135 = imagem fraca, amb\xEDgua, cortada ou incompat\xEDvel).
+4. "conflictReason": explica\xE7\xE3o objetiva curta caso isCompatible=false (ou "" se compat\xEDvel).
+5. "visualLegend": descreva fielmente em Portugu\xEAs do Brasil (entre 8 e 24 palavras, M\xCDNIMO 6 palavras, sem iniciar com "Legenda visual:") APENAS o que est\xE1 vis\xEDvel nos pixels reais. Se mode="recognition", descreva a morfologia visual sem entregar o diagn\xF3stico final da resposta esperada.`;
       const result = await withGeminiKeyRotation(
         (ai) => generateContentWithRetry(
           ai,
@@ -2035,14 +2325,15 @@ REGRAS DE INSPE\xC7\xC3O VISUAL:
                 properties: {
                   detectedModality: { type: Type.STRING },
                   isCompatible: { type: Type.BOOLEAN },
+                  visualScore: { type: Type.INTEGER },
                   conflictReason: { type: Type.STRING },
                   visualLegend: { type: Type.STRING }
                 },
-                required: ["detectedModality", "isCompatible", "visualLegend"]
+                required: ["detectedModality", "isCompatible", "visualScore", "visualLegend"]
               }
             }
           },
-          { signal, timeoutMs: 22e3, enableModelFallback: true }
+          { signal, timeoutMs: 15e3, enableModelFallback: true }
         ),
         signal
       );
@@ -2050,6 +2341,8 @@ REGRAS DE INSPE\xC7\xC3O VISUAL:
       const parsed = JSON.parse(extractJsonBlock(result.text || "{}"));
       const detectedModality = String(parsed.detectedModality || "clinical_image").trim().slice(0, 60);
       const isCompatible = parsed.isCompatible === true;
+      const rawScore = Number(parsed.visualScore);
+      const visualScore = Number.isFinite(rawScore) ? Math.max(1, Math.min(10, Math.round(rawScore))) : isCompatible ? 7 : 2;
       const conflictReason = String(parsed.conflictReason || "").trim().slice(0, 220);
       const visualLegend = String(parsed.visualLegend || "").replace(/^legenda\s+visual\s*:\s*/i, "").trim().slice(0, 220);
       return res.json({
@@ -2057,6 +2350,7 @@ REGRAS DE INSPE\xC7\xC3O VISUAL:
         reachable: true,
         isSvg: false,
         isCompatible,
+        visualScore,
         detectedModality,
         conflictReason,
         visualLegend,
@@ -2069,11 +2363,177 @@ REGRAS DE INSPE\xC7\xC3O VISUAL:
         fallback: true,
         reachable: mediaReachableRaster,
         isSvg: false,
-        isCompatible: mediaReachableRaster,
+        isCompatible: false,
         detectedModality: mediaReachableRaster ? "unverified" : "unreachable",
-        conflictReason: mediaReachableRaster ? "" : "Falha ao validar imagem.",
+        conflictReason: mediaReachableRaster ? "Falha ao validar imagem por vis\xE3o computacional." : "Falha ao validar imagem.",
         visualLegend: "",
         error: formatGeminiError(error, "Falha na valida\xE7\xE3o multimodal da imagem.")
+      });
+    } finally {
+      cleanup();
+    }
+  });
+  router.post("/verify-deck", async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 16e4);
+    try {
+      const {
+        deckKey = "tema_clinico_internato",
+        cards = [],
+        clinicalMap = null,
+        pdfs = [],
+        model: requestedModel
+      } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error: "Chave GEMINI_API_KEY n\xE3o configurada no ambiente. Configure sua chave no painel Settings > Secrets."
+        });
+      }
+      const inputCards = Array.isArray(cards) ? cards : [];
+      if (inputCards.length === 0) {
+        return res.json({
+          overallScore: 0,
+          approved: false,
+          mapCoveragePct: 0,
+          summary: "Baralho vazio \u2014 nenhum card dispon\xEDvel para verifica\xE7\xE3o.",
+          clinicalAccuracyNotes: [],
+          missingConcepts: [],
+          weakCardFixes: []
+        });
+      }
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ""} ${clinicalMap?.specialty || ""}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+      const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
+      const deckSummary = inputCards.slice(0, 140).map((c) => {
+        const hasImg = /<img\b/i.test(`${String(c.question || "")} ${String(c.hint || "")}`);
+        return `- ID:${c.id} [${c.type === "cloze" ? "cloze" : "basic"}${c.priority ? ` ${String(c.priority)}` : ""}]${hasImg ? ` [IMG:${String(c.image_mode || "feedback")}]` : ""} | Topic: "${sanitizeCardTextForPrompt(c.topic, 100)}" | Q: "${sanitizeCardTextForPrompt(c.question, 650)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 200)}"` : ""} | Hint: "${sanitizeCardTextForPrompt(c.hint, 850)}"`;
+      }).join("\n");
+      const prompt = `Voc\xEA \xE9 o Preceptor Revisor Final auditando se o baralho montado para "${deckKey}" est\xE1 COMPLETO, ADEQUADO, CLINICAMENTE CORRETO e pronto para estudo no Anki (FSRS).
+
+${profilePromptBlock}${guidelinesBlock}
+MAPA CL\xCDNICO P1\u2013P4 APROVADO:
+${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Avalie cobertura integral do tema."}
+
+BARALHO FINAL MONTADO (${inputCards.length} cards):
+${deckSummary}
+
+AVALIE RIGOROSAMENTE:
+1. Cobertura do Mapa Cl\xEDnico P1\u2013P4 (quais conceitos cr\xEDticos realmente ficaram descobertos em "missingConcepts").
+2. Acur\xE1cia cl\xEDnica frente \xE0s Diretrizes Verificadas e PDFs anexados (doses, crit\xE9rios, condutas).
+3. Rigor pedag\xF3gico Matuschak & Nielsen e adequa\xE7\xE3o cl\xEDnica das imagens/legendas ("weakCardFixes" \u2014 liste apenas cards que realmente tenham falha cl\xEDnica, ambiguidade ou incompatibilidade entre o achado descrito na legenda e o tema do card. NOTA IMPORTANTE: tags <img src="https://..." data-anki-file="..."> e src="[IMAGEM_EMBUTIDA]" representam imagens m\xE9dicas J\xC1 validadas e resolvidas que ser\xE3o empacotadas localmente no .apkg \u2014 NUNCA aponte "URL externa" como problema e NUNCA pe\xE7a para trocar uma URL resolvida de volta para "buscar_imagem:").
+4. "overallScore" de 0 a 10 e "approved": true somente se overallScore >= 8 e n\xE3o houver lacunas P1 cr\xEDticas descobertas.
+
+Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido:
+{
+  "overallScore": 9,
+  "approved": true,
+  "mapCoveragePct": 95,
+  "summary": "S\xEDntese objetiva da qualidade final do baralho.",
+  "clinicalAccuracyNotes": ["Observa\xE7\xE3o objetiva sobre alinhamento com diretrizes/PDFs."],
+  "missingConcepts": [
+    {
+      "priority": "P1",
+      "subtopic": "Subtema sem spoiler",
+      "concept": "Conceito ausente que precisa de 1 card dedicado",
+      "recommendedType": "basic"
+    }
+  ],
+  "weakCardFixes": [
+    {
+      "cardId": 171000101,
+      "issue": "Problema cl\xEDnico ou ambiguidade detectada",
+      "fixInstruction": "Instru\xE7\xE3o cir\xFArgica exata para corrigir o card"
+    }
+  ]
+}`;
+      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: "application/json",
+              maxOutputTokens: 16384,
+              thinkingConfig: { thinkingLevel: ThinkingLevel2.MEDIUM }
+            }
+          },
+          { signal, timeoutMs: 135e3, enableModelFallback: true }
+        );
+      }, signal);
+      if (res.writableEnded) return;
+      const rawText = response.text || "{}";
+      let parsed = {};
+      try {
+        parsed = JSON.parse(extractJsonBlock(rawText));
+      } catch {
+        const { items: recoveredMissing } = parseOrRecoverJsonArrayField(
+          rawText,
+          "missingConcepts",
+          ["concept"]
+        );
+        const { items: recoveredFixes } = parseOrRecoverJsonArrayField(
+          rawText,
+          "weakCardFixes",
+          ["cardId", "issue"]
+        );
+        const scoreMatch = rawText.match(/"overallScore"\s*:\s*(\d+(?:\.\d+)?)/);
+        const covMatch = rawText.match(/"mapCoveragePct"\s*:\s*(\d+(?:\.\d+)?)/);
+        const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        parsed = {
+          overallScore: scoreMatch ? Number(scoreMatch[1]) : 7,
+          approved: false,
+          mapCoveragePct: covMatch ? Number(covMatch[1]) : 80,
+          summary: sumMatch?.[1] || "Verifica\xE7\xE3o final recuperada parcialmente.",
+          clinicalAccuracyNotes: [],
+          missingConcepts: recoveredMissing,
+          weakCardFixes: recoveredFixes
+        };
+      }
+      const validPriorities = /* @__PURE__ */ new Set(["P1", "P2", "P3", "P4"]);
+      const missingConcepts = Array.isArray(parsed.missingConcepts) ? parsed.missingConcepts.filter((m) => Boolean(m && typeof m === "object" && m.concept)).map((m) => {
+        const p = String(m.priority || "P2").toUpperCase();
+        return {
+          priority: validPriorities.has(p) ? p : "P2",
+          subtopic: sanitizeCardTextForPrompt(m.subtopic || deckKey, 90),
+          concept: sanitizeCardTextForPrompt(m.concept, 220),
+          recommendedType: m.recommendedType === "cloze" ? "cloze" : "basic"
+        };
+      }) : [];
+      const weakCardFixes = Array.isArray(parsed.weakCardFixes) ? parsed.weakCardFixes.filter((f) => Boolean(f && typeof f === "object" && Number.isFinite(Number(f.cardId)))).map((f) => ({
+        cardId: Number(f.cardId),
+        issue: sanitizeCardTextForPrompt(f.issue, 200),
+        fixInstruction: sanitizeCardTextForPrompt(f.fixInstruction, 240)
+      })).filter(
+        (f) => !(/\b(?:url\s+externa|links?\s+externos?|links?\s+mortos?)\b/i.test(f.issue) && /buscar_imagem:/i.test(f.fixInstruction))
+      ) : [];
+      const overallScore = Number.isFinite(Number(parsed.overallScore)) ? Math.max(0, Math.min(10, Math.round(Number(parsed.overallScore) * 10) / 10)) : 8;
+      const mapCoveragePct = Number.isFinite(Number(parsed.mapCoveragePct)) ? Math.max(0, Math.min(100, Math.round(Number(parsed.mapCoveragePct)))) : 85;
+      const approved = typeof parsed.approved === "boolean" ? parsed.approved : overallScore >= 8 && missingConcepts.filter((m) => m.priority === "P1").length === 0;
+      return res.json({
+        overallScore,
+        approved,
+        mapCoveragePct,
+        summary: sanitizeCardTextForPrompt(parsed.summary, 350) || `Baralho avaliado com nota ${overallScore}/10 e ${mapCoveragePct}% de cobertura do Mapa Cl\xEDnico.`,
+        clinicalAccuracyNotes: Array.isArray(parsed.clinicalAccuracyNotes) ? parsed.clinicalAccuracyNotes.map((n) => sanitizeCardTextForPrompt(n, 220)).filter(Boolean).slice(0, 8) : [],
+        missingConcepts,
+        weakCardFixes,
+        modelUsed: response.modelUsed
+      });
+    } catch (error) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, "Erro ao realizar verifica\xE7\xE3o final do baralho.")
       });
     } finally {
       cleanup();
@@ -3253,6 +3713,28 @@ function scoreImageRelevance(candidate, context) {
   if (/\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|tomografia|ultrasound|ultrassom|ultrassonografia|e-?fast)\b/i.test(queryContextText) && /(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histolog|microscop|diatom|microfossil|brightfield)/i.test(candidateText)) {
     score -= 90;
   }
+  const expectsEcgQuery = /\b(?:ecg|ekg|electrocardiogra\w*|eletrocardiogra\w*|stemi|flutter|fibrillation|brugada|wpw|delta\s+wave|bundle\s+branch|peaked\s+t\s+wave|av\s+block|torsades)\b/i.test(
+    queryContextText
+  ) && !/\b(?:echocardiogra\w*|ecocardiogra\w*|doppler|m[-\s]?mode)\b/i.test(queryContextText);
+  if (expectsEcgQuery && /\b(?:echocardiogra\w*|ecocardiogra\w*|echopedia|m[-\s]?mode|doppler|ultrasound|sonogram|sonography)\b/i.test(
+    candidateText
+  )) {
+    score -= 85;
+  }
+  const expectsPathology = /\b(?:stemi|infarction|ischemia|flutter|fibrillation|block|wpw|brugada|hyperkalemia|vt|svt|torsades|supradesnivelamento|infradesnivelamento|arritmia|bloqueio|taquicardia)\b/i.test(
+    queryContextText
+  ) && !/\b(?:normal\s+sinus|ritmo\s+sinusal\s+normal)\b/i.test(queryContextText);
+  const normalEcgRegex = /\b(?:normal\s+(?:sinus|ecg|ekg|12[-\s]?lead|rhythm)|sinus\s+rhythm\s+normal|healthy\s+control)\b/i;
+  if (expectsPathology && normalEcgRegex.test(candidate.title || "")) {
+    score -= 45;
+  } else if (expectsPathology && normalEcgRegex.test(candidateText) && answerHits + enHits < 2) {
+    score -= 32;
+  }
+  const cleanThumbLower = (candidate.thumbUrl || "").split("?")[0].toLowerCase();
+  const cleanFullLower = (candidate.fullUrl || "").split("?")[0].toLowerCase();
+  if (/\.gif$/i.test(cleanThumbLower) || /\.gif$/i.test(cleanFullLower)) {
+    score -= 45;
+  }
   return score;
 }
 function buildEnglishMedicalSearchQueries(rawQuery, topic = "", question = "", answer = "") {
@@ -3321,7 +3803,7 @@ Exemplo de sa\xEDda: ["right bundle branch block ECG", "RBBB V1 ECG LITFL"]`,
           thinkingConfig: { thinkingLevel: ThinkingLevel3.MINIMAL }
         }
       },
-      { signal, timeoutMs: 8500, enableModelFallback: false }
+      { signal, timeoutMs: 4500, enableModelFallback: false }
     );
     const parsed = JSON.parse(extractJsonBlock(res.text || "[]"));
     if (Array.isArray(parsed)) {
@@ -3598,6 +4080,65 @@ async function validateCandidateImageUrl(url, signal) {
     return { ok: false, contentType: "", byteLength: 0, isSvg: false };
   }
 }
+function extractEditorialImageUrlsFromHtml(html, pageUrl, pageTitle = "") {
+  const extracted = [];
+  const seen = /* @__PURE__ */ new Set();
+  const addCandidate = (rawSrc, alt = "") => {
+    const trimmed = rawSrc.trim().replace(/&amp;/g, "&");
+    if (!trimmed || trimmed.startsWith("data:")) return;
+    try {
+      const resolved = new URL(trimmed, pageUrl).toString();
+      if (!resolved.startsWith("http")) return;
+      if (isSpamOrLogoImageUrl(resolved, alt)) return;
+      const canonical = normalizeImageCanonicalKey(resolved, alt);
+      if (seen.has(canonical)) return;
+      seen.add(canonical);
+      extracted.push({ url: resolved, alt: alt.trim(), pageUrl, pageTitle });
+    } catch {
+    }
+  };
+  const mainMatch = html.match(/<main\b[^>]*>[\s\S]*?<\/main>/i)?.[0] || "";
+  const articleMatches = (html.match(/<article\b[^>]*>[\s\S]*?<\/article>/gi) || []).join(" ");
+  const figureMatches = (html.match(/<figure\b[^>]*>[\s\S]*?<\/figure>/gi) || []).join(" ");
+  const cleanedBodyFallback = html.replace(/<(nav|aside|footer|header)\b[^>]*>[\s\S]*?<\/\1>/gi, " ").replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ");
+  const editorialHtml = [figureMatches, articleMatches, mainMatch].filter((s) => s.length > 80).join(" ") || cleanedBodyFallback;
+  const scanImgTags = (sourceHtml) => {
+    const imgRegex = /<img\b[^>]*>/gi;
+    let m2;
+    while ((m2 = imgRegex.exec(sourceHtml)) !== null && extracted.length < 10) {
+      const tag = m2[0];
+      const srcMatch = /\b(?:data-lazy-src|data-src|src)=["']([^"']+)["']/i.exec(tag);
+      if (!srcMatch) continue;
+      const altMatch = /\balt=["']([^"']*)["']/i.exec(tag);
+      const widthMatch = /\bwidth=["']?(\d+)/i.exec(tag);
+      if (widthMatch && Number(widthMatch[1]) > 0 && Number(widthMatch[1]) < 150) {
+        continue;
+      }
+      addCandidate(srcMatch[1], altMatch?.[1] || pageTitle);
+    }
+  };
+  scanImgTags(editorialHtml);
+  if (extracted.length === 0 && editorialHtml !== cleanedBodyFallback) {
+    scanImgTags(cleanedBodyFallback);
+  }
+  const isLikelySiteCard = (u) => /(?:default|site[-_]?image|og[-_]?default|social[-_]?card|share[-_]?img|brand|header|masthead|cropped-)/i.test(
+    u
+  );
+  let m;
+  const metaRegex = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
+  while ((m = metaRegex.exec(html)) !== null) {
+    if (!isLikelySiteCard(m[1])) {
+      addCandidate(m[1], pageTitle);
+    }
+  }
+  const metaReverseRegex = /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]*>/gi;
+  while ((m = metaReverseRegex.exec(html)) !== null) {
+    if (!isLikelySiteCard(m[1])) {
+      addCandidate(m[1], pageTitle);
+    }
+  }
+  return extracted;
+}
 async function extractImagesFromMedicalWebPage(pageUrl, pageTitle = "", signal) {
   if (!pageUrl || !pageUrl.startsWith("http")) return [];
   try {
@@ -3612,44 +4153,7 @@ async function extractImagesFromMedicalWebPage(pageUrl, pageTitle = "", signal) 
     const ct = (resp.headers.get("content-type") || "").toLowerCase();
     if (!ct.includes("text/html") && !ct.includes("application/xhtml")) return [];
     const html = (await resp.text()).slice(0, 22e4);
-    const extracted = [];
-    const seen = /* @__PURE__ */ new Set();
-    const addCandidate = (rawSrc, alt = "") => {
-      const trimmed = rawSrc.trim().replace(/&amp;/g, "&");
-      if (!trimmed || trimmed.startsWith("data:")) return;
-      try {
-        const resolved = new URL(trimmed, pageUrl).toString();
-        if (!resolved.startsWith("http")) return;
-        if (isSpamOrLogoImageUrl(resolved, alt)) return;
-        const canonical = normalizeImageCanonicalKey(resolved, alt);
-        if (seen.has(canonical)) return;
-        seen.add(canonical);
-        extracted.push({ url: resolved, alt: alt.trim(), pageUrl, pageTitle });
-      } catch {
-      }
-    };
-    const metaRegex = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
-    let m;
-    while ((m = metaRegex.exec(html)) !== null) {
-      addCandidate(m[1], pageTitle);
-    }
-    const metaReverseRegex = /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]*>/gi;
-    while ((m = metaReverseRegex.exec(html)) !== null) {
-      addCandidate(m[1], pageTitle);
-    }
-    const imgRegex = /<img\b[^>]*>/gi;
-    while ((m = imgRegex.exec(html)) !== null && extracted.length < 10) {
-      const tag = m[0];
-      const srcMatch = /\b(?:data-lazy-src|data-src|src)=["']([^"']+)["']/i.exec(tag);
-      if (!srcMatch) continue;
-      const altMatch = /\balt=["']([^"']*)["']/i.exec(tag);
-      const widthMatch = /\bwidth=["']?(\d+)/i.exec(tag);
-      if (widthMatch && Number(widthMatch[1]) > 0 && Number(widthMatch[1]) < 150) {
-        continue;
-      }
-      addCandidate(srcMatch[1], altMatch?.[1] || pageTitle);
-    }
-    return extracted;
+    return extractEditorialImageUrlsFromHtml(html, pageUrl, pageTitle);
   } catch {
     return [];
   }
@@ -3677,14 +4181,14 @@ Retorne EXCLUSIVAMENTE um array JSON v\xE1lido com at\xE9 5 refer\xEAncias encon
     const response = await generateContentWithRetry(
       ai,
       {
-        model: PRIMARY_GEMINI_MODEL,
+        model: FALLBACK_GEMINI_MODEL,
         contents: prompt,
         config: {
           tools: [{ googleSearch: {} }],
           thinkingConfig: { thinkingLevel: ThinkingLevel3.LOW }
         }
       },
-      { signal, timeoutMs: 14e3, enableModelFallback: true }
+      { signal, timeoutMs: 12e3, enableModelFallback: false }
     );
     const directCandidates = [];
     const groundedPages = [];
@@ -3831,11 +4335,14 @@ async function searchMedicalImages(ai, ctx) {
   }
   const allScored = Array.from(dedupedMap.values());
   const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
-  const minThreshold = maxScore >= 24 ? 14 : 6;
+  const minThreshold = maxScore >= 28 ? 18 : 12;
   const ranked = allScored.filter((c) => (c.relevanceScore ?? 0) >= minThreshold).sort((a, b) => {
     const aSvg = Boolean(a.isSvg);
     const bSvg = Boolean(b.isSvg);
     if (aSvg !== bSvg) return aSvg ? 1 : -1;
+    const aGif = /\.gif(?:\?|$)/i.test(a.thumbUrl || a.fullUrl);
+    const bGif = /\.gif(?:\?|$)/i.test(b.thumbUrl || b.fullUrl);
+    if (aGif !== bGif) return aGif ? 1 : -1;
     return (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0);
   }).slice(0, 12).map(({ isSvg: _omitSvg, relevanceScore: _omitScore, ...rest }) => rest);
   return {
@@ -3873,7 +4380,7 @@ function attachRequestAbort(req, res, timeoutMs) {
 function createMediaRouter() {
   const router = express2.Router();
   router.post("/media/search-medical-images", async (req, res) => {
-    const { signal, cleanup } = attachRequestAbort(req, res, 18e3);
+    const { signal, cleanup } = attachRequestAbort(req, res, 28e3);
     try {
       const {
         query = "",

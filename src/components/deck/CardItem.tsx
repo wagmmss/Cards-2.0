@@ -7,11 +7,13 @@ import {
   Edit3,
   Image as ImageIcon,
   Search,
+  Sparkles,
   Trash2,
   Zap,
 } from 'lucide-react';
 import {
   CanonicalCard,
+  CardAuditVerdict,
   CardLintResult,
   CardType,
   MedicalImageResult,
@@ -51,7 +53,14 @@ interface CardItemProps {
   deckImageUsage: DeckImageUsageMap;
   onToggleSingleCardType: (card: CanonicalCard) => void;
   onAutoRepairSingleCard: (cardId: number) => void;
+  onAutoRepairSingleCardWithAi?: (
+    cardId: number,
+    targetField?: 'question' | 'answer' | 'hint' | 'topic',
+    fieldInstruction?: string
+  ) => void;
+  isAiRepairing?: boolean;
   onOpenImagePicker: (card: CanonicalCard) => void;
+  onOpenPdfGallery?: (cardId: number, tab?: 'extracted' | 'browse') => void;
   onToggleEditing: (cardId: number) => void;
   onDeleteCard: (cardId: number) => void;
   onRemoveMissingMediaFromCard: (cardId: number) => void;
@@ -83,6 +92,29 @@ interface CardItemProps {
   onRefreshQuickGallery: (card: CanonicalCard) => void;
 }
 
+const AUDIT_VERDICT_CYCLE: CardAuditVerdict[] = ['keep', 'rebuild', 'split', 'prune'];
+const AUDIT_VERDICT_UI: Record<
+  CardAuditVerdict,
+  { label: string; cls: string }
+> = {
+  keep: {
+    label: 'Auditoria: Bom (Manter)',
+    cls: 'bg-emerald-950/70 border-emerald-700/70 text-emerald-300',
+  },
+  rebuild: {
+    label: 'Auditoria: Refazer do Zero',
+    cls: 'bg-amber-950/70 border-amber-600/80 text-amber-200',
+  },
+  split: {
+    label: 'Auditoria: Desmembrar',
+    cls: 'bg-indigo-950/70 border-indigo-600/80 text-indigo-200',
+  },
+  prune: {
+    label: 'Auditoria: Podar',
+    cls: 'bg-red-950/70 border-red-700/80 text-red-200',
+  },
+};
+
 export const CardItem: React.FC<CardItemProps> = ({
   card,
   index,
@@ -106,7 +138,10 @@ export const CardItem: React.FC<CardItemProps> = ({
   deckImageUsage,
   onToggleSingleCardType,
   onAutoRepairSingleCard,
+  onAutoRepairSingleCardWithAi,
+  isAiRepairing = false,
   onOpenImagePicker,
+  onOpenPdfGallery,
   onToggleEditing,
   onDeleteCard,
   onRemoveMissingMediaFromCard,
@@ -290,6 +325,26 @@ export const CardItem: React.FC<CardItemProps> = ({
               <span>Sem legenda &lt;i&gt;</span>
             </span>
           )}
+
+          {card.auditVerdict && (
+            <button
+              type="button"
+              onClick={() => {
+                const idx = AUDIT_VERDICT_CYCLE.indexOf(card.auditVerdict!);
+                const next = AUDIT_VERDICT_CYCLE[(idx + 1) % AUDIT_VERDICT_CYCLE.length];
+                onUpdateCard({ ...card, auditVerdict: next });
+              }}
+              title="Clique para alterar o veredito da auditoria antes de reconstruir o deck"
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[11px] font-semibold cursor-pointer ${
+                AUDIT_VERDICT_UI[card.auditVerdict].cls
+              }`}
+            >
+              <span>{AUDIT_VERDICT_UI[card.auditVerdict].label}</span>
+              {typeof card.auditScore === 'number' && (
+                <span className="font-mono opacity-80">({card.auditScore}/10)</span>
+              )}
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2.5">
@@ -306,6 +361,19 @@ export const CardItem: React.FC<CardItemProps> = ({
             >
               <Zap className="w-3 h-3" />
               <span>Reparar ({lint.warnings.length})</span>
+            </button>
+          )}
+
+          {onAutoRepairSingleCardWithAi && (
+            <button
+              type="button"
+              disabled={isAiRepairing}
+              onClick={() => onAutoRepairSingleCardWithAi(card.id)}
+              title="Reescreve este card com IA segundo diretrizes Matuschak & Nielsen e material anexado"
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-sky-300 bg-sky-950/60 border border-sky-700/60 hover:bg-sky-900/70 disabled:opacity-50 rounded transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-3 h-3" />
+              <span>{isAiRepairing ? 'Reescrevendo...' : 'Reescrever com IA'}</span>
             </button>
           )}
 
@@ -342,6 +410,48 @@ export const CardItem: React.FC<CardItemProps> = ({
         </div>
       </div>
 
+      {/* Prompt to pick manually from Apostila PDF Gallery when Web images were strictly rejected */}
+      {card.needsManualImage && !hasAnyImage && !hasMissingMedia && (
+        <div className="px-3.5 py-2 rounded-lg bg-indigo-950/50 border border-indigo-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-indigo-200">
+            <ImageIcon className="w-4 h-4 text-indigo-400 shrink-0" />
+            <span>
+              Nenhuma imagem automática passou na validação clínica — escolha ou recorte direto da Apostila.
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onOpenPdfGallery && (
+              <button
+                type="button"
+                onClick={() => onOpenPdfGallery(card.id, 'extracted')}
+                className="px-2.5 py-1 text-xs font-semibold text-slate-950 bg-indigo-300 hover:bg-indigo-200 rounded cursor-pointer"
+              >
+                Escolher na Apostila / Recortar PDF
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onUpdateCard({ ...card, needsManualImage: false })}
+              className="px-2 py-1 text-[11px] text-slate-300 hover:text-white cursor-pointer"
+            >
+              Manter só texto
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Audit Verdict Reason Box */}
+      {card.auditVerdict && card.auditReason && (
+        <div className="px-3 py-1.5 rounded-md bg-slate-900/70 border border-slate-800 text-[11px] text-slate-300">
+          <strong className="text-slate-100">Parecer da Auditoria:</strong> {card.auditReason}
+          {card.auditTargetConcept && (
+            <span className="ml-2 text-sky-300">
+              · Alvo: {card.auditTargetConcept}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Alert Box if automatic Google/Web search did not find a match */}
       {hasMissingMedia && (
         <div className="px-3.5 py-2.5 rounded-lg bg-red-950/50 border border-red-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
@@ -358,6 +468,16 @@ export const CardItem: React.FC<CardItemProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            {onOpenPdfGallery && (
+              <button
+                type="button"
+                onClick={() => onOpenPdfGallery(card.id, 'extracted')}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-950 bg-indigo-300 hover:bg-indigo-200 rounded cursor-pointer"
+              >
+                <ImageIcon className="w-3 h-3" />
+                <span>Escolher na Apostila</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onOpenImagePicker(card)}
@@ -381,40 +501,62 @@ export const CardItem: React.FC<CardItemProps> = ({
 
       {/* Other Linter Warnings List */}
       {!lint.isValid && (
-        <div className="px-3 py-2 rounded-md bg-amber-950/40 border border-amber-800/70 space-y-1">
+        <div className="px-3 py-2 rounded-md bg-amber-950/40 border border-amber-800/70 space-y-1.5">
           {lint.warnings.map((w, wIdx) => {
             const isError = w.severity === 'error';
+            const rewriteField: 'question' | 'answer' | 'hint' | 'topic' =
+              w.field === 'question' ||
+              w.field === 'answer' ||
+              w.field === 'hint' ||
+              w.field === 'topic'
+                ? w.field
+                : 'hint';
             return (
               <div
                 key={`${w.code}-${wIdx}`}
-                className={`flex items-start gap-1.5 text-xs ${
+                className={`flex items-start justify-between gap-2 text-xs ${
                   isError ? 'text-red-200' : 'text-amber-200'
                 }`}
               >
-                <AlertTriangle
-                  className={`w-3 h-3 shrink-0 mt-0.5 ${
-                    isError ? 'text-red-400' : 'text-amber-400'
-                  }`}
-                />
-                <span>
-                  <strong
-                    className={`font-mono ${
-                      isError ? 'text-red-300' : 'text-amber-300'
+                <div className="flex items-start gap-1.5 min-w-0">
+                  <AlertTriangle
+                    className={`w-3 h-3 shrink-0 mt-0.5 ${
+                      isError ? 'text-red-400' : 'text-amber-400'
                     }`}
-                  >
-                    [{w.field}]
-                  </strong>{' '}
-                  <span
-                    className={`inline-block px-1 py-0 mr-1 rounded text-[10px] font-mono ${
-                      isError
-                        ? 'bg-red-950/80 text-red-300 border border-red-800/70'
-                        : 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
-                    }`}
-                  >
-                    {isError ? 'Bloqueio Estrutural' : 'Sugestão Pedagógica'}
+                  />
+                  <span>
+                    <strong
+                      className={`font-mono ${
+                        isError ? 'text-red-300' : 'text-amber-300'
+                      }`}
+                    >
+                      [{w.field}]
+                    </strong>{' '}
+                    <span
+                      className={`inline-block px-1 py-0 mr-1 rounded text-[10px] font-mono ${
+                        isError
+                          ? 'bg-red-950/80 text-red-300 border border-red-800/70'
+                          : 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                      }`}
+                    >
+                      {isError ? 'Bloqueio Estrutural' : 'Sugestão Pedagógica'}
+                    </span>
+                    {w.message}
                   </span>
-                  {w.message}
-                </span>
+                </div>
+                {onAutoRepairSingleCardWithAi && (
+                  <button
+                    type="button"
+                    disabled={isAiRepairing}
+                    onClick={() =>
+                      onAutoRepairSingleCardWithAi(card.id, rewriteField, w.message)
+                    }
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-medium text-sky-300 bg-sky-950/70 hover:bg-sky-900/80 border border-sky-700/60 disabled:opacity-50 rounded shrink-0 cursor-pointer transition-colors"
+                  >
+                    <Sparkles className="w-2.5 h-2.5" />
+                    <span>{isAiRepairing ? 'Reescrevendo...' : 'Reescrever com IA'}</span>
+                  </button>
+                )}
               </div>
             );
           })}
@@ -440,6 +582,7 @@ export const CardItem: React.FC<CardItemProps> = ({
           onSearchSubmit={() => onSearchImagesSubmit(card)}
           onAttachImage={onAttachImage}
           onRemoveCardImages={onRemoveCardImages}
+          onOpenPdfGallery={onOpenPdfGallery}
           onClose={onCloseImagePicker}
         />
       )}

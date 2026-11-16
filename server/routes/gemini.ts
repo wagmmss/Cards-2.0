@@ -7,6 +7,7 @@ import {
   buildFullCardsDigest,
   extractErrorDetails,
   extractJsonBlock,
+  FALLBACK_GEMINI_MODEL,
   formatGeminiError,
   generateContentWithRetry,
   INTERNATO_SYSTEM_INSTRUCTION,
@@ -280,7 +281,7 @@ function formatPdfImagesCatalogBlock(pdfImagesCatalog: unknown): string {
     return '';
   }
   const lines = pdfImagesCatalog
-    .slice(0, 45)
+    .slice(0, 120)
     .map((item) => {
       const rec = (item || {}) as Record<string, unknown>;
       const id = sanitizeCardTextForPrompt(rec.id, 60);
@@ -321,12 +322,88 @@ function sanitizeReturnedNotes(
       const copy: Record<string, unknown> = { ...n };
       delete copy.sources;
       const rawType = String(copy.type || 'basic').trim().toLowerCase();
-      copy.type = rawType === 'cloze' ? 'cloze' : 'basic';
+      const qStr = String(copy.question || '');
+      const aStr = String(copy.answer || '').trim();
+      const hasSilentCloze = /\{\{c\d+::[\s\S]+?\}\}/.test(qStr) && !aStr;
+      copy.type = rawType === 'cloze' || hasSilentCloze ? 'cloze' : 'basic';
       if (copy.type === 'cloze') {
         copy.answer = '';
       }
       return copy;
     });
+}
+
+export interface NormalizedAuditVerdictItem {
+  cardId: number;
+  verdict: 'keep' | 'rebuild' | 'split' | 'prune';
+  score: number;
+  reason: string;
+  clinicalIssue?: string;
+  targetConcept: string;
+  priority: 'P1' | 'P2' | 'P3' | 'P4';
+  suggestedType: 'basic' | 'cloze';
+}
+
+export function applyDeterministicAuditGuard(
+  c: Record<string, unknown>,
+  existing?: NormalizedAuditVerdictItem
+): NormalizedAuditVerdictItem {
+  const cid = Number(c.id);
+  const plainQ = String(c.question || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const plainA = String(c.answer || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const plainHint = String(c.hint || '')
+    .replace(/<table[\s\S]*?<\/table>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/Coment[áa]rio:/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const hasVaguePrompt =
+    !/\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+minuto\s+zero|diagn[oó]stic[ao])\b/i.test(plainQ) &&
+    /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|como\s+conduzir|o\s+que\s+fazer)\s*\?\s*$/i.test(plainQ);
+  const isPassivePrompt = /^\s*(?:o\s+que\s+[eé]\s+|defina\s+|fale\s+sobre\s+)/i.test(plainQ);
+  const hasOrphanDeixis =
+    !/<img\b/i.test(`${String(c.question || '')} ${String(c.hint || '')}`) &&
+    /\b(?:ecg|tra[çc]ado|exame|imagem|rx|usg|tc|ctg)\s+(?:abaixo|acima|em\s+anexo)\b/i.test(plainQ);
+  const hasMissingBasicAnswer = String(c.type || 'basic').toLowerCase() === 'basic' && !plainA;
+  const hasShortComment = plainHint.length < 100;
+
+  const deterministicRebuildReason = hasOrphanDeixis
+    ? 'Referência visual ("abaixo"/"em anexo") sem imagem anexada.'
+    : hasMissingBasicAnswer
+    ? 'Card basic com resposta vazia.'
+    : hasVaguePrompt
+    ? 'Comando vago sem janela temporal ou linha terapêutica.'
+    : isPassivePrompt
+    ? 'Definição passiva sem vinheta ou decisão clínica.'
+    : hasShortComment
+    ? `Comentário muito curto (${plainHint.length} chars) sem contraste diferencial adequado.`
+    : '';
+
+  if (existing) {
+    if (existing.verdict === 'keep' && deterministicRebuildReason) {
+      return {
+        ...existing,
+        verdict: 'rebuild',
+        score: Math.min(existing.score, 5),
+        reason: `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.`,
+      };
+    }
+    return existing;
+  }
+  const validPriorities = new Set(['P1', 'P2', 'P3', 'P4']);
+  return {
+    cardId: cid,
+    verdict: deterministicRebuildReason ? 'rebuild' : 'keep',
+    score: deterministicRebuildReason ? 5 : 8,
+    reason: deterministicRebuildReason
+      ? `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.`
+      : 'Mantido após auditoria geral.',
+    targetConcept: sanitizeCardTextForPrompt(c.topic, 140) || 'Conceito clínico do card.',
+    priority: (validPriorities.has(String(c.priority || '').toUpperCase())
+      ? String(c.priority).toUpperCase()
+      : 'P2') as 'P1' | 'P2' | 'P3' | 'P4',
+    suggestedType: (c.type === 'cloze' ? 'cloze' : 'basic') as 'basic' | 'cloze',
+  };
 }
 
 export function createGeminiRouter(): express.Router {
@@ -450,13 +527,14 @@ Organize a resposta em tópicos objetivos por eixo, sempre citando a fonte e o a
             groundedSearchQueries.length > 0 ||
             groundedDossierText.length > 120;
         } catch (searchErr) {
-          if (signal.aborted || !isRetryableGeminiError(searchErr)) {
+          if (signal.aborted) {
             throw searchErr;
           }
           console.warn(
-            '[clinical-map] Stage 1 googleSearch failed with retryable error, proceeding to Stage 2:',
+            '[clinical-map] Stage 1 googleSearch failed, falling back gracefully to Stage 2 (PDFs + internal knowledge):',
             extractErrorDetails(searchErr)
           );
+          googleSearchUsed = false;
         }
       }
 
@@ -504,7 +582,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido (sem comentários fora do JSON) no
     }
   ]
 }
-Gere entre 10 e 16 itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
+Gere entre ${Array.isArray(pdfs) && pdfs.length > 0 || String(existingJsonSummary || '').trim() ? '12 e 20' : '10 e 16'} itens distribuídos em P1, P2, P3 e P4 de acordo com o perfil "${effectiveProfile}", cobrindo integralmente os sub-eixos clínicos e de exames complementares do tema (ex.: se cardiologia/ECG, cubra paredes do IAM, supra vs infra, TPSV, FA/Flutter, BAVs, BRD/BRE, WPW/Brugada e emergências metabólicas) e escolhendo fluidamente targetCardType ("basic" para decisão clínica/diferencial/mecanismo/imagem e "cloze" para critérios numéricos/limiares/doses em âncora), sem cota percentual rígida.`;
 
       const result = await withGeminiKeyRotation(async (ai, keyFp) => {
         const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
@@ -679,6 +757,208 @@ Retorne EXCLUSIVAMENTE um JSON válido:
     }
   });
 
+  // Passo 1c — Auditoria Card-a-Card de Baralho Antigo (Keep / Rebuild / Split / Prune)
+  router.post('/audit-deck', async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 180_000);
+    try {
+      const {
+        deckKey = 'tema_clinico_internato',
+        cards = [],
+        clinicalMap = null,
+        pdfs = [],
+        model: requestedModel,
+      } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
+
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error:
+            'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
+        });
+      }
+
+      const inputCards = Array.isArray(cards) ? cards : [];
+      if (inputCards.length === 0) {
+        return res.json({
+          deckKey,
+          overallSummary: 'Nenhum card prévio enviado para auditoria.',
+          counts: { keep: 0, rebuild: 0, split: 0, prune: 0 },
+          items: [],
+        });
+      }
+
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ''} ${clinicalMap?.specialty || ''}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+      const checkedMapItems = Array.isArray(clinicalMap?.items)
+        ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
+        : [];
+      const cardsDigest = buildFullCardsDigest(
+        inputCards.slice(0, 140).map((c: Record<string, unknown>) => ({
+          id: c.id,
+          type: c.type,
+          priority: c.priority,
+          topic: c.topic,
+          question: c.question,
+          answer: c.answer,
+          hint: c.hint,
+        }))
+      );
+
+      const prompt = `Você é o Auditor Chefe de Qualidade Clínica e Pedagógica (Matuschak & Nielsen + Diretrizes Médicas Brasileiras) avaliando UM BARALHO EXISTENTE para o tema "${deckKey}".
+Analise cada card abaixo individualmente comparando-o com os PDFs anexados, o Mapa Clínico P1–P4 e as diretrizes atualizadas.
+
+${profilePromptBlock}${guidelinesBlock}
+MAPA CLÍNICO P1–P4 DE REFERÊNCIA:
+${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : 'Avalie conforme matriz P1–P4 do tema.'}
+
+CARDS EXISTENTES PARA JULGAMENTO (JULGUE TODOS OS ${Math.min(140, inputCards.length)} CARDS):
+${cardsDigest}
+
+CRITÉRIOS DE VEREDITO POR CARD ("verdict"):
+- "keep": Card já está excelente (nota >= 8/10): decisão atômica clara, clinicamente atualizada e correta segundo os PDFs/diretrizes, sem spoiler, sem lista disfarçada, "hint" com ≥ 120 chars visíveis e contraste diferencial, E com tag <img ...> caso o tópico exija reconhecimento visual (ECG/RX/USG/TC/CTG/lesão). NUNCA atribua "keep" a pergunta vaga ("Qual a conduta?", "Qual o manejo?", "O que fazer?"), definição passiva ("O que é X?"), card sem imagem em reconhecimento visual ou comentário raso (< 110 chars).
+- "rebuild": Card cobre um conceito clínico útil/importante, PORÉM está fraco (pergunta vaga como "Qual a conduta?", "Qual o manejo?", "O que fazer?", definição passiva "O que é...", resposta longa/lista, spoiler no enunciado/tópico, dose ou critério desatualizado/impreciso, comentário raso ou exame visual sem <img>). DEVE SER REFEITO DO ZERO!
+- "split": Card mistura 2 ou mais decisões clínicas diferentes no mesmo card (ex.: diagnóstico + tratamento, parede + artéria, achado + antiarrítmico, ou múltiplos esquemas/critérios) e precisa ser desdobrado em cards atômicos separados.
+- "prune": Card é duplicata exata de outro card melhor no deck, é trivial sem impacto clínico ou viola o Filtro Negativo (história da medicina, genética de bancada sem conduta).
+
+Retorne EXCLUSIVAMENTE um objeto JSON válido:
+{
+  "overallSummary": "Resumo executivo de 1 a 2 frases sobre a qualidade atual do deck e o que precisa ser reconstruído.",
+  "items": [
+    {
+      "cardId": 171000101,
+      "verdict": "rebuild",
+      "score": 4,
+      "reason": "Pergunta vaga e cloze longo; misturando 1ª linha e dose em lista.",
+      "clinicalIssue": "Esquema ou critério desatualizado/impreciso (opcional se não houver erro clínico).",
+      "targetConcept": "Conduta ou critério exato que este card deveria testar (1 frase clara).",
+      "priority": "P1",
+      "suggestedType": "basic"
+    }
+  ]
+}`;
+
+      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: 'application/json',
+              maxOutputTokens: 32768,
+              thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+            },
+          },
+          { signal, timeoutMs: 140_000, enableModelFallback: true }
+        );
+      }, signal);
+
+      if (res.writableEnded) return;
+      const rawText = response.text || '{}';
+      const { items: rawItems } = parseOrRecoverJsonArrayField(rawText, 'items', [
+        'cardId',
+        'verdict',
+      ]);
+
+      let overallSummary = '';
+      try {
+        const full = JSON.parse(extractJsonBlock(rawText)) as { overallSummary?: unknown };
+        overallSummary = String(full?.overallSummary || '').trim();
+      } catch {
+        const sumMatch = rawText.match(/"overallSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (sumMatch?.[1]) {
+          try {
+            overallSummary = JSON.parse(`"${sumMatch[1]}"`);
+          } catch {
+            overallSummary = sumMatch[1];
+          }
+        }
+      }
+
+      const validVerdicts = new Set(['keep', 'rebuild', 'split', 'prune']);
+      const validPriorities = new Set(['P1', 'P2', 'P3', 'P4']);
+      const itemMap = new Map<number, {
+        cardId: number;
+        verdict: 'keep' | 'rebuild' | 'split' | 'prune';
+        score: number;
+        reason: string;
+        clinicalIssue?: string;
+        targetConcept: string;
+        priority: 'P1' | 'P2' | 'P3' | 'P4';
+        suggestedType: 'basic' | 'cloze';
+      }>();
+
+      for (const raw of rawItems) {
+        const cardId = Number(raw.cardId);
+        if (!Number.isFinite(cardId)) continue;
+        const vRaw = String(raw.verdict || 'rebuild').toLowerCase().trim();
+        const verdict = (validVerdicts.has(vRaw) ? vRaw : 'rebuild') as
+          | 'keep'
+          | 'rebuild'
+          | 'split'
+          | 'prune';
+        const pRaw = String(raw.priority || 'P2').toUpperCase().trim();
+        const priority = (validPriorities.has(pRaw) ? pRaw : 'P2') as 'P1' | 'P2' | 'P3' | 'P4';
+        const scoreNum = Number(raw.score);
+        const score = Number.isFinite(scoreNum)
+          ? Math.max(0, Math.min(10, Math.round(scoreNum)))
+          : verdict === 'keep'
+            ? 8
+            : 5;
+        itemMap.set(cardId, {
+          cardId,
+          verdict,
+          score,
+          reason: sanitizeCardTextForPrompt(raw.reason, 220) || 'Avaliado pela auditoria clínica.',
+          ...(raw.clinicalIssue
+            ? { clinicalIssue: sanitizeCardTextForPrompt(raw.clinicalIssue, 180) }
+            : {}),
+          targetConcept:
+            sanitizeCardTextForPrompt(raw.targetConcept, 200) ||
+            'Conceito clínico central do card.',
+          priority,
+          suggestedType: raw.suggestedType === 'cloze' ? 'cloze' : 'basic',
+        });
+      }
+
+      const normalizedItems = inputCards.map((c: Record<string, unknown>) =>
+        applyDeterministicAuditGuard(c, itemMap.get(Number(c.id)))
+      );
+
+      const counts = { keep: 0, rebuild: 0, split: 0, prune: 0 };
+      for (const it of normalizedItems) {
+        counts[it.verdict]++;
+      }
+
+      return res.json({
+        deckKey,
+        overallSummary:
+          overallSummary ||
+          `Auditoria concluída: ${counts.keep} mantido(s), ${counts.rebuild} para refazer do zero, ${counts.split} para desmembrar e ${counts.prune} para podar.`,
+        counts,
+        items: normalizedItems,
+        modelUsed: response.modelUsed,
+      });
+    } catch (error: unknown) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao auditar qualidade dos cards existentes.'),
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
   // Passo 2 — Recriar Deck JSON Canônico em Lotes (Preservando IDs FSRS e Reconstruindo do Zero)
   router.post('/generate-deck', async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 300_000);
@@ -754,9 +1034,16 @@ Retorne EXCLUSIVAMENTE um JSON válido:
           throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
         }
         const rawCardsSummary = buildFullCardsDigest(subsetCards);
+        const hasAuditedRebuilds = subsetCards.some(
+          (c) => c.auditVerdict === 'rebuild' || c.auditVerdict === 'split'
+        );
+        const auditedRebuildRule = hasAuditedRebuilds
+          ? `\n- REGRA DE RECONSTRUÇÃO DO ZERO (AUDITORIA ATIVA): Para os cards marcados com [AUDITORIA: rebuild/split → REFAZER DO ZERO], o texto antigo foi intencionalmente ocultado para evitar paráfrase viciada. Crie um flashcard 100% NOVO a partir dos PDFs anexados, das Diretrizes Verificadas e do "Conceito-Alvo", preservando o "id" FSRS original (e usando novo ID >= ${subsetNewIdStart} apenas se "split" exigir desdobramento em 2 decisões distintas).`
+          : '';
+
         const batchInstruction = isBatchMode
           ? `MODO DE RECONSTRUÇÃO PROFUNDA EM LOTE (${batchIndex + 1}/${totalBatches} — ${subsetCards.length} cards neste lote):
-- PROIBIDO PARÁFRASE COSMÉTICA DE CLOZES FRACOS: Reconstrua cada conceito válido **DO ZERO** segundo Andy Matuschak & Michael Nielsen (esforço real de recuperação, anti-pattern-matching, raciocínio causal "por que / como", precisão clínica).
+- PROIBIDO PARÁFRASE COSMÉTICA DE CLOZES FRACOS: Reconstrua cada conceito válido **DO ZERO** segundo Andy Matuschak & Michael Nielsen (esforço real de recuperação, anti-pattern-matching, raciocínio causal "por que / como", precisão clínica).${auditedRebuildRule}
 - ESCOPO ESTRITO DO LOTE (ZERO COLISÃO ENTRE LOTES PARALELOS):
   * Trabalhe EXCLUSIVAMENTE sobre os conceitos presentes nos ${subsetCards.length} cards originais DESTE lote. **PROIBIDO criar cards novos para lacunas globais do Mapa Clínico P1–P4 ausentes deste lote** — a auditoria global pós-lotes adicionará automaticamente todas as lacunas do Mapa Clínico após a convergência dos lotes, evitando duplicatas entre lotes paralelos!
   * Só crie ID novo (a partir de ${subsetNewIdStart}) se um único card complexo DESTE lote precisar ser desmembrado em 2 decisões clínicas distintas.
@@ -769,7 +1056,7 @@ Retorne EXCLUSIVAMENTE um JSON válido:
   * Mantenha com seu "id" FSRS original todos os conceitos clínicos verdadeiramente distintos de P1–P4.
   * PODA ATIVA DE DUPLICATAS: Se dois cards neste lote ou no ÍNDICE GLOBAL DE TODOS OS LOTES testarem exatamente a MESMA conduta/alvo redundante (ex.: múltiplos cards fechando "{{c1::48 a 72 horas}}" para retorno, ou dois cards distintos cobrando a mesma prescrição de alta de autoinjetor de adrenalina), **EXCLUA o ID duplicado** neste lote ou diferencie explicitamente o alvo clínico. Também exclua cards reprovados pelo Filtro Negativo.`
           : `MODO DE GERAÇÃO INTEGRAL DO BARALHO (${subsetCards.length} cards originais fornecidos):
-- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos clínicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Clínico P1–P4.`;
+- Reconstrua o baralho com rigor Matuschak & Nielsen preservando os IDs FSRS dos conceitos clínicos distintos, podando duplicatas reais e criando novos IDs a partir de ${subsetNewIdStart} para cobrir integralmente o Mapa Clínico P1–P4.${auditedRebuildRule}`;
 
         const pdfCatalogBlock = formatPdfImagesCatalogBlock(pdfImagesCatalog);
         const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
@@ -809,7 +1096,7 @@ CHECKLIST DE VALIDAÇÃO ANTES DE GERAR CADA CARD:
 5. Duplo Salto Cognitivo Implícito: NUNCA faça pergunta composta ("Qual o diagnóstico e a conduta?"). Apresente o caso clínico e pergunte apenas 1 decisão atômica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre parênteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <i>Legenda</i> ou <img ...>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases (180 a 300 caracteres visíveis no comentário textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório.
+8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <i>Legenda</i> ou <img ...>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases (180 a 300 caracteres visíveis no comentário textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório. Para escores, critérios numéricos ou pareamento parede×derivações×artéria, inclua APÓS o comentário uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> (≤ 4 colunas; não conta nos 310 chars). Valide termos bioquímicos (ex.: calemia = potássio, nunca "litemia").
 9. NÃO inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
@@ -979,7 +1266,7 @@ TAREFA CIRÚRGICA:
   * Raciocínio visual proativo: se a lacuna envolve exame/lesão/traçado/algoritmo que ganhe retenção com imagem, use <img src="pdfimg:ID_EXATO"> (se presente no catálogo acima) ou <img src="buscar_imagem: query clínica específica"> na "question" ("image_mode": "recognition") ou no início do "hint" ("image_mode": "feedback"). NUNCA invente arquivos locais.
   * Se "basic": "question" <= 45–50 palavras (vinheta ou pergunta causal), "answer" com 1 a 12 palavras terminado em ponto final (.), sem ";".
   * Se "cloze": exatamente 1 lacuna {{c1::...}} (1 a 5 palavras) e "answer": "".
-  * "hint": comece com "<b>Comentário:</b> " (precedido por <i>Legenda</i> ou <img ...><br> quando aplicável), tenha entre 180 e 300 caracteres visíveis (medidos APÓS "<b>Comentário:</b> ", teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema.
+  * "hint": comece com "<b>Comentário:</b> " (precedido por <i>Legenda</i> ou <img ...><br> quando aplicável), tenha entre 180 e 300 caracteres visíveis (medidos APÓS "<b>Comentário:</b> " excluindo <table>, teto de 320), destaque termos-chave em <b>negrito</b> e traga contraste diferencial real pertinente ao tema. Inclua <table class="med-table"> compacta após o comentário sempre que houver escore, critérios ou tabela topográfica. Valide terminologia clínica estrita (ex.: calemia = K+, nunca "litemia").
 - Se TODOS os conceitos do Mapa Clínico já possuírem card próprio dedicado acima, retorne "notes": [].
 - NUNCA duplique conceitos já cobertos nos cards existentes acima.
 - NÃO inclua o campo "sources".
@@ -1030,11 +1317,19 @@ Retorne EXCLUSIVAMENTE um JSON válido:
     }
   });
 
-  // Auto-Reparar Avisos com IA (Reescrita Cirúrgica apenas dos cards sinalizados)
+  // Auto-Reparar Avisos com IA (Reescrita Cirúrgica apenas dos cards sinalizados, fundamentada no Mapa Clínico + PDFs)
   router.post('/repair-cards', async (req, res) => {
     const { signal, cleanup } = createRequestAbortSignal(req, res, 180_000);
     try {
-      const { flaggedCards = [], deckKey = 'internato_deck', model: requestedModel } = req.body || {};
+      const {
+        flaggedCards = [],
+        deckKey = 'internato_deck',
+        clinicalMap = null,
+        pdfs = [],
+        targetField = '',
+        fieldInstruction = '',
+        model: requestedModel,
+      } = req.body || {};
       const activeModel = resolveGeminiModel(requestedModel);
 
       if (parseGeminiApiKeys().length === 0) {
@@ -1045,17 +1340,33 @@ Retorne EXCLUSIVAMENTE um JSON válido:
         });
       }
 
-      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html).
-Mantenha rigorosamente o mesmo "id" numérico e qualquer tag de mídia válida de cada card. NÃO inclua o campo "sources".
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+      const checkedItems = Array.isArray(clinicalMap?.items)
+        ? clinicalMap.items
+            .filter((i: { checked?: boolean }) => i.checked !== false)
+            .slice(0, 20)
+            .map((i: { priority?: unknown; subtopic?: unknown; concept?: unknown }) =>
+              `- [${String(i.priority || 'P2')}] ${sanitizeCardTextForPrompt(i.subtopic, 60)}: ${sanitizeCardTextForPrompt(i.concept, 150)}`
+            )
+            .join('\n')
+        : '';
+      const targetFieldBlock = targetField
+        ? `\nFOCO SOLICITADO PELO USUÁRIO: Concentre a reescrita no campo "${String(targetField)}"${fieldInstruction ? ` (motivo: "${sanitizeCardTextForPrompt(fieldInstruction, 220)}")` : ''}, preservando os demais campos já válidos e mantendo coerência total entre pergunta, resposta e comentário.`
+        : '';
+
+      const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html) e/ou pela Verificação Final.
+Mantenha rigorosamente o mesmo "id" numérico e qualquer tag de mídia válida (como __EMBEDDED_DATA_URI_*__) de cada card, A MENOS que o card faça referência visual sem imagem — nesse caso insira <img src="buscar_imagem: query clínica precisa"> ou remova a referência órfã. NÃO inclua o campo "sources".
+${guidelinesBlock}${checkedItems ? `\nMAPA CLÍNICO DO DECK "${deckKey}":\n${checkedItems}\n` : ''}${targetFieldBlock}
 
 REGRAS DE CORREÇÃO CIRÚRGICA (MATUSCHAK & NIELSEN):
-- **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/critérios...?", "Cite...") ou a resposta tem múltiplos itens/ponto-e-vírgula, isole 1 único atributo/decisão determinante.
+- **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/critérios...?", "Cite...") ou a resposta tem múltiplos itens/ponto-e-vírgula, isole 1 único atributo/decisão determinante. Se for pergunta composta ("Qual a parede e a artéria?", "Qual o diagnóstico e antiarrítmico?"), mantenha apenas 1 alvo atômico.
 - **Salience & Anti-Passivo (Nielsen):** Se a pergunta é uma definição inerte ("O que é X?") ou binária ("Sim/Não"), transforme em um prompt de saliência ancorado em cenário clínico ou mecanismo causal.
-- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (cenário clínico com decisão inequívoca ou prompt causal/diferencial de Nielsen & Matuschak); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo. Use "basic" ou "cloze" livremente conforme o que melhor encaixar para o card.
+- **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (com janela temporal explícita: "imediata", "inicial", "de 1ª escolha" — NUNCA "Qual a conduta?"); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo.
 - **Cloze Atômico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposição pendurada no final, SEM "::dica", e "answer" DEVE ser "".
-- **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre parênteses na "question" -> remova imediatamente a palavra/radical da resposta (ex.: "Manobras" quando a resposta é "Manobra de...") mantendo formato "Tema - Subtema".
+- **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre parênteses na "question" -> remova imediatamente a palavra/radical da resposta mantendo formato "Tema - Subtema".
+- **Precisão Terminológica & Tabelas:** Corrija imprecisões clínicas (ex.: calemia = potássio, nunca litemia). Se o card explicar escore ou correlação topográfica, mantenha ou adicione <table class="med-table"> compacta (≤ 4 colunas) APÓS o texto de <b>Comentário:</b>.
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (→, ≥, ≤).
-- "hint": DEVE conter "<b>Comentário:</b> ", ter entre 180 e 295 caracteres visíveis APÓS o prefixo "<b>Comentário:</b> " (PROIBIDO passar de 320 caracteres visíveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
+- "hint": DEVE conter "<b>Comentário:</b> ", ter entre 180 e 295 caracteres visíveis APÓS o prefixo "<b>Comentário:</b> " (excluindo <table>; PROIBIDO passar de 320 chars visíveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
 
 CARDS SINALIZADOS E SEUS AVISOS:
 ${JSON.stringify(flaggedCards, null, 2)}
@@ -1075,24 +1386,24 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
   ]
 }`;
 
-      const response = await withGeminiKeyRotation(
-        (ai) =>
-          generateContentWithRetry(
-            ai,
-            {
-              model: activeModel,
-              contents: prompt,
-              config: {
-                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-                responseMimeType: 'application/json',
-                maxOutputTokens: 65536,
-                thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
-              },
+      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: 'application/json',
+              maxOutputTokens: 65536,
+              thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
             },
-            { signal, timeoutMs: 135_000, enableModelFallback: true }
-          ),
-        signal
-      );
+          },
+          { signal, timeoutMs: 135_000, enableModelFallback: true }
+        );
+      }, signal);
 
       if (res.writableEnded) return;
       const rawText = response.text || '{}';
@@ -1257,7 +1568,7 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
 
   // Validação Multimodal com Gemini Flash — Inspeciona pixels reais da imagem (PDF ou Web)
   router.post('/validate-image', async (req, res) => {
-    const { signal, cleanup } = createRequestAbortSignal(req, res, 35_000);
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 42_000);
     let mediaReachableRaster = false;
     try {
       const {
@@ -1331,7 +1642,9 @@ Retorne EXCLUSIVAMENTE um JSON válido no formato:
         });
       }
 
-      const activeModel = resolveGeminiModel(requestedModel);
+      const activeModel = requestedModel
+        ? resolveGeminiModel(requestedModel)
+        : FALLBACK_GEMINI_MODEL;
       const safeMode = imageMode === 'recognition' ? 'recognition' : 'feedback';
 
       const prompt = `Você é um preceptor médico auditando visualmente uma imagem candidata a ser anexada a um flashcard do Internato.
@@ -1345,14 +1658,17 @@ CONTEXTO DO FLASHCARD:
 - Comentário: "${sanitizeCardTextForPrompt(cardHint, 180)}"
 ${captionHint ? `- Legenda/nota extraída próxima à figura: "${sanitizeCardTextForPrompt(captionHint, 140)}"` : ''}
 
-REGRAS DE INSPEÇÃO VISUAL:
-1. "detectedModality": nomeie a modalidade real visível nos pixels (ex.: "usg", "videolaparoscopia", "ecg", "radiografia", "tomografia", "ctg", "dermatoscopia", "histologia", "fluxograma", "foto_clinica", "esquema", "irrelevante_logo").
+REGRAS ESTRITAS DE INSPEÇÃO VISUAL:
+1. "detectedModality": nomeie a modalidade real visível nos pixels (ex.: "usg", "videolaparoscopia", "ecg_12_derivacoes", "ecg_tira_ritmo", "ecocardiograma", "radiografia", "tomografia", "ctg", "dermatoscopia", "histologia", "fluxograma", "foto_clinica", "esquema_desenho", "irrelevante_logo").
 2. "isCompatible":
-   - Retorne FALSE se houver conflito de modalidade entre o que o card solicita/descreve e o que aparece na imagem (ex.: card pede USG/ultrassonografia e a imagem é videolaparoscopia/cirurgia, ou card pede ECG e a imagem é anatomia/retrato/logo/capa de aula).
-   - Retorne FALSE se a imagem for ilegível, logomarca, retrato de autor, texto puro genérico sem valor clínico ou claramente de outra doença incompatível.
-   - Retorne TRUE apenas se os pixels realmente representarem uma figura clínica compatível e útil para este card.
-3. "conflictReason": explicação objetiva curta caso isCompatible=false (ou "" se compatível).
-4. "visualLegend": descreva fielmente em Português do Brasil (entre 8 e 24 palavras, MÍNIMO 6 palavras, sem iniciar com "Legenda visual:") APENAS o que está visível na imagem real. Se mode="recognition", descreva os achados visuais sem entregar o termo diagnóstico da resposta esperada.`;
+   - Retorne FALSE se houver conflito de modalidade (ex.: card pede ECG e a imagem é ecocardiograma/modo-M, anatomia, retrato, logo ou capa de aula; ou card pede USG e a imagem é laparoscopia).
+   - Retorne FALSE se o card testa uma **patologia/alteração específica** (ex.: IAM com supra, Flutter atrial, WPW, BAVT, Brugada, pneumotórax, hipercalemia), MAS os pixels mostrarem um **exame NORMAL/FISIOLÓGICO** (ex.: ECG em ritmo sinusal normal sem alteração) ou de **OUTRA patologia diferente** (ex.: hemibloqueio anterior esquerdo quando o card pede IAM anterior; BRD quando o card pede BRE; FA quando o card pede Flutter).
+   - Retorne FALSE se modo="${safeMode}" for "recognition" e a imagem for **ilustração/esquema vetorial/cartoon** em vez de exame diagnóstico real, OU se o **diagnóstico/resposta aparecer escrito em texto grande legível como spoiler nos pixels**.
+   - Retorne FALSE se a imagem for ilegível, borrada, logomarca ou texto puro genérico.
+   - Retorne TRUE apenas se os pixels mostrarem inequivocamente o exame/achado clínico compatível e útil para este card.
+3. "visualScore": nota inteira de 1 a 10 da qualidade didática e precisão diagnóstica da imagem (9–10 = ECG de 12 derivações ou exame real nítido demonstrando o achado exato sem texto spoiler; 6–8 = tira de ritmo/exame aceitável demonstrando a patologia; 1–5 = imagem fraca, ambígua, cortada ou incompatível).
+4. "conflictReason": explicação objetiva curta caso isCompatible=false (ou "" se compatível).
+5. "visualLegend": descreva fielmente em Português do Brasil (entre 8 e 24 palavras, MÍNIMO 6 palavras, sem iniciar com "Legenda visual:") APENAS o que está visível nos pixels reais. Se mode="recognition", descreva a morfologia visual sem entregar o diagnóstico final da resposta esperada.`;
 
       const result = await withGeminiKeyRotation(
         (ai) =>
@@ -1380,14 +1696,15 @@ REGRAS DE INSPEÇÃO VISUAL:
                   properties: {
                     detectedModality: { type: Type.STRING },
                     isCompatible: { type: Type.BOOLEAN },
+                    visualScore: { type: Type.INTEGER },
                     conflictReason: { type: Type.STRING },
                     visualLegend: { type: Type.STRING },
                   },
-                  required: ['detectedModality', 'isCompatible', 'visualLegend'],
+                  required: ['detectedModality', 'isCompatible', 'visualScore', 'visualLegend'],
                 },
               },
             },
-            { signal, timeoutMs: 22_000, enableModelFallback: true }
+            { signal, timeoutMs: 15_000, enableModelFallback: true }
           ),
         signal
       );
@@ -1396,12 +1713,19 @@ REGRAS DE INSPEÇÃO VISUAL:
       const parsed = JSON.parse(extractJsonBlock(result.text || '{}')) as {
         detectedModality?: unknown;
         isCompatible?: unknown;
+        visualScore?: unknown;
         conflictReason?: unknown;
         visualLegend?: unknown;
       };
 
       const detectedModality = String(parsed.detectedModality || 'clinical_image').trim().slice(0, 60);
       const isCompatible = parsed.isCompatible === true;
+      const rawScore = Number(parsed.visualScore);
+      const visualScore = Number.isFinite(rawScore)
+        ? Math.max(1, Math.min(10, Math.round(rawScore)))
+        : isCompatible
+        ? 7
+        : 2;
       const conflictReason = String(parsed.conflictReason || '').trim().slice(0, 220);
       const visualLegend = String(parsed.visualLegend || '')
         .replace(/^legenda\s+visual\s*:\s*/i, '')
@@ -1413,6 +1737,7 @@ REGRAS DE INSPEÇÃO VISUAL:
         reachable: true,
         isSvg: false,
         isCompatible,
+        visualScore,
         detectedModality,
         conflictReason,
         visualLegend,
@@ -1425,11 +1750,225 @@ REGRAS DE INSPEÇÃO VISUAL:
         fallback: true,
         reachable: mediaReachableRaster,
         isSvg: false,
-        isCompatible: mediaReachableRaster,
+        isCompatible: false,
         detectedModality: mediaReachableRaster ? 'unverified' : 'unreachable',
-        conflictReason: mediaReachableRaster ? '' : 'Falha ao validar imagem.',
+        conflictReason: mediaReachableRaster
+          ? 'Falha ao validar imagem por visão computacional.'
+          : 'Falha ao validar imagem.',
         visualLegend: '',
         error: formatGeminiError(error, 'Falha na validação multimodal da imagem.'),
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  // Verificação Holística Final do Baralho Montado (Cobertura P1–P4 + Acurácia + Mídia)
+  router.post('/verify-deck', async (req, res) => {
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 160_000);
+    try {
+      const {
+        deckKey = 'tema_clinico_internato',
+        cards = [],
+        clinicalMap = null,
+        pdfs = [],
+        model: requestedModel,
+      } = req.body || {};
+      const activeModel = resolveGeminiModel(requestedModel);
+
+      if (parseGeminiApiKeys().length === 0) {
+        return res.status(200).json({
+          fallback: true,
+          error:
+            'Chave GEMINI_API_KEY não configurada no ambiente. Configure sua chave no painel Settings > Secrets.',
+        });
+      }
+
+      const inputCards = Array.isArray(cards) ? cards : [];
+      if (inputCards.length === 0) {
+        return res.json({
+          overallScore: 0,
+          approved: false,
+          mapCoveragePct: 0,
+          summary: 'Baralho vazio — nenhum card disponível para verificação.',
+          clinicalAccuracyNotes: [],
+          missingConcepts: [],
+          weakCardFixes: [],
+        });
+      }
+
+      const effectiveProfile = resolveEffectiveDomainProfile(
+        clinicalMap?.profile,
+        deckKey,
+        `${clinicalMap?.themeTitle || ''} ${clinicalMap?.specialty || ''}`
+      );
+      const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
+      const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
+      const checkedMapItems = Array.isArray(clinicalMap?.items)
+        ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
+        : [];
+
+      const deckSummary = inputCards
+        .slice(0, 140)
+        .map((c: Record<string, unknown>) => {
+          const hasImg = /<img\b/i.test(`${String(c.question || '')} ${String(c.hint || '')}`);
+          return `- ID:${c.id} [${c.type === 'cloze' ? 'cloze' : 'basic'}${c.priority ? ` ${String(c.priority)}` : ''}]${hasImg ? ` [IMG:${String(c.image_mode || 'feedback')}]` : ''} | Topic: "${sanitizeCardTextForPrompt(c.topic, 100)}" | Q: "${sanitizeCardTextForPrompt(c.question, 650)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 200)}"` : ''} | Hint: "${sanitizeCardTextForPrompt(c.hint, 850)}"`;
+        })
+        .join('\n');
+
+      const prompt = `Você é o Preceptor Revisor Final auditando se o baralho montado para "${deckKey}" está COMPLETO, ADEQUADO, CLINICAMENTE CORRETO e pronto para estudo no Anki (FSRS).
+
+${profilePromptBlock}${guidelinesBlock}
+MAPA CLÍNICO P1–P4 APROVADO:
+${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : 'Avalie cobertura integral do tema.'}
+
+BARALHO FINAL MONTADO (${inputCards.length} cards):
+${deckSummary}
+
+AVALIE RIGOROSAMENTE:
+1. Cobertura do Mapa Clínico P1–P4 (quais conceitos críticos realmente ficaram descobertos em "missingConcepts").
+2. Acurácia clínica frente às Diretrizes Verificadas e PDFs anexados (doses, critérios, condutas).
+3. Rigor pedagógico Matuschak & Nielsen e adequação clínica das imagens/legendas ("weakCardFixes" — liste apenas cards que realmente tenham falha clínica, ambiguidade ou incompatibilidade entre o achado descrito na legenda e o tema do card. NOTA IMPORTANTE: tags <img src="https://..." data-anki-file="..."> e src="[IMAGEM_EMBUTIDA]" representam imagens médicas JÁ validadas e resolvidas que serão empacotadas localmente no .apkg — NUNCA aponte "URL externa" como problema e NUNCA peça para trocar uma URL resolvida de volta para "buscar_imagem:").
+4. "overallScore" de 0 a 10 e "approved": true somente se overallScore >= 8 e não houver lacunas P1 críticas descobertas.
+
+Retorne EXCLUSIVAMENTE um objeto JSON válido:
+{
+  "overallScore": 9,
+  "approved": true,
+  "mapCoveragePct": 95,
+  "summary": "Síntese objetiva da qualidade final do baralho.",
+  "clinicalAccuracyNotes": ["Observação objetiva sobre alinhamento com diretrizes/PDFs."],
+  "missingConcepts": [
+    {
+      "priority": "P1",
+      "subtopic": "Subtema sem spoiler",
+      "concept": "Conceito ausente que precisa de 1 card dedicado",
+      "recommendedType": "basic"
+    }
+  ],
+  "weakCardFixes": [
+    {
+      "cardId": 171000101,
+      "issue": "Problema clínico ou ambiguidade detectada",
+      "fixInstruction": "Instrução cirúrgica exata para corrigir o card"
+    }
+  ]
+}`;
+
+      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+        const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+        parts.push({ text: prompt });
+        return generateContentWithRetry(
+          ai,
+          {
+            model: activeModel,
+            contents: { parts },
+            config: {
+              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+              responseMimeType: 'application/json',
+              maxOutputTokens: 16384,
+              thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+            },
+          },
+          { signal, timeoutMs: 135_000, enableModelFallback: true }
+        );
+      }, signal);
+
+      if (res.writableEnded) return;
+      const rawText = response.text || '{}';
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(extractJsonBlock(rawText)) as Record<string, unknown>;
+      } catch {
+        const { items: recoveredMissing } = parseOrRecoverJsonArrayField(
+          rawText,
+          'missingConcepts',
+          ['concept']
+        );
+        const { items: recoveredFixes } = parseOrRecoverJsonArrayField(
+          rawText,
+          'weakCardFixes',
+          ['cardId', 'issue']
+        );
+        const scoreMatch = rawText.match(/"overallScore"\s*:\s*(\d+(?:\.\d+)?)/);
+        const covMatch = rawText.match(/"mapCoveragePct"\s*:\s*(\d+(?:\.\d+)?)/);
+        const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        parsed = {
+          overallScore: scoreMatch ? Number(scoreMatch[1]) : 7,
+          approved: false,
+          mapCoveragePct: covMatch ? Number(covMatch[1]) : 80,
+          summary: sumMatch?.[1] || 'Verificação final recuperada parcialmente.',
+          clinicalAccuracyNotes: [],
+          missingConcepts: recoveredMissing,
+          weakCardFixes: recoveredFixes,
+        };
+      }
+
+      const validPriorities = new Set(['P1', 'P2', 'P3', 'P4']);
+      const missingConcepts = Array.isArray(parsed.missingConcepts)
+        ? parsed.missingConcepts
+            .filter((m): m is Record<string, unknown> => Boolean(m && typeof m === 'object' && (m as Record<string, unknown>).concept))
+            .map((m) => {
+              const p = String(m.priority || 'P2').toUpperCase();
+              return {
+                priority: (validPriorities.has(p) ? p : 'P2') as 'P1' | 'P2' | 'P3' | 'P4',
+                subtopic: sanitizeCardTextForPrompt(m.subtopic || deckKey, 90),
+                concept: sanitizeCardTextForPrompt(m.concept, 220),
+                recommendedType: (m.recommendedType === 'cloze' ? 'cloze' : 'basic') as 'basic' | 'cloze',
+              };
+            })
+        : [];
+
+      const weakCardFixes = Array.isArray(parsed.weakCardFixes)
+        ? parsed.weakCardFixes
+            .filter((f): f is Record<string, unknown> => Boolean(f && typeof f === 'object' && Number.isFinite(Number((f as Record<string, unknown>).cardId))))
+            .map((f) => ({
+              cardId: Number(f.cardId),
+              issue: sanitizeCardTextForPrompt(f.issue, 200),
+              fixInstruction: sanitizeCardTextForPrompt(f.fixInstruction, 240),
+            }))
+            .filter(
+              (f) =>
+                !(
+                  /\b(?:url\s+externa|links?\s+externos?|links?\s+mortos?)\b/i.test(f.issue) &&
+                  /buscar_imagem:/i.test(f.fixInstruction)
+                )
+            )
+        : [];
+
+      const overallScore = Number.isFinite(Number(parsed.overallScore))
+        ? Math.max(0, Math.min(10, Math.round(Number(parsed.overallScore) * 10) / 10))
+        : 8;
+      const mapCoveragePct = Number.isFinite(Number(parsed.mapCoveragePct))
+        ? Math.max(0, Math.min(100, Math.round(Number(parsed.mapCoveragePct))))
+        : 85;
+      const approved =
+        typeof parsed.approved === 'boolean'
+          ? parsed.approved
+          : overallScore >= 8 && missingConcepts.filter((m) => m.priority === 'P1').length === 0;
+
+      return res.json({
+        overallScore,
+        approved,
+        mapCoveragePct,
+        summary:
+          sanitizeCardTextForPrompt(parsed.summary, 350) ||
+          `Baralho avaliado com nota ${overallScore}/10 e ${mapCoveragePct}% de cobertura do Mapa Clínico.`,
+        clinicalAccuracyNotes: Array.isArray(parsed.clinicalAccuracyNotes)
+          ? parsed.clinicalAccuracyNotes
+              .map((n) => sanitizeCardTextForPrompt(n, 220))
+              .filter(Boolean)
+              .slice(0, 8)
+          : [],
+        missingConcepts,
+        weakCardFixes,
+        modelUsed: response.modelUsed,
+      });
+    } catch (error: unknown) {
+      if (res.writableEnded) return;
+      return res.status(200).json({
+        fallback: true,
+        error: formatGeminiError(error, 'Erro ao realizar verificação final do baralho.'),
       });
     } finally {
       cleanup();

@@ -122,8 +122,19 @@ export const ClinicalMapSection: React.FC<ClinicalMapSectionProps> = ({
         Boolean(onDeepenGuidelines)) && (
         <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2.5 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="font-semibold text-sky-400">
-              Síntese de Diretrizes (Google Search Grounding)
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="font-semibold text-sky-400">
+                Síntese de Diretrizes
+              </div>
+              {clinicalMap.googleSearchUsed ? (
+                <span className="px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-950/70 border border-emerald-700/60 text-emerald-300">
+                  Web Grounding Ativo
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 text-[10px] font-medium rounded bg-slate-800/90 border border-slate-700 text-slate-300">
+                  Base Local / PDFs (Sem Web Grounding)
+                </span>
+              )}
             </div>
             {onDeepenGuidelines && (
               <form

@@ -404,8 +404,13 @@ export function extractCommentVisibleText(hint: string): string {
   if (!hint) return '';
   let cleaned = hint.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, ' ');
   cleaned = cleaned.replace(/<table[\s\S]*?<\/table>/gi, ' ');
+  cleaned = cleaned.replace(/<table\b[\s\S]*$/gi, ' ');
+  cleaned = cleaned.replace(/^(?:\s*<img\b[^>]*>\s*(?:<br\s*\/?>\s*)*)+/i, ' ');
   const parts = cleaned.split(/Coment[áa]rio:/i);
-  const afterComment = parts.length > 1 ? parts.slice(1).join('Comentário:') : cleaned;
+  const afterComment =
+    parts.length > 1
+      ? parts.slice(1).join('Comentário:')
+      : cleaned.replace(/^\s*<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, ' ');
   return stripHtml(afterComment);
 }
 
@@ -465,7 +470,9 @@ export function resolveLocalMediaFilename(
   if (attrMatch && attrMatch[1]) {
     const cleanAttr = attrMatch[1]
       .trim()
-      .replace(/[\s"<>|?*\\/]+/g, '_');
+      .replace(/[\s"<>|?*\\/]+/g, '_')
+      .replace(/_{2,}/g, '_')
+      .replace(/^_+|_+$/g, '');
     if (cleanAttr) return cleanAttr;
   }
 
@@ -1423,6 +1430,12 @@ const DIAGNOSTIC_MODALITY_PATTERNS: Array<{
       /\b(?:ecg|eletrocardiograma|eletrocardiogr[aá]fic[ao]|electrocardiogra(?:m|phy))\b/i,
   },
   {
+    modality: 'ECOCARDIOGRAMA',
+    label: 'Ecocardiograma / Doppler Cardíaco',
+    pattern:
+      /\b(?:ecocardiograma|ecocardiografia|ecocardiogr[aá]fic[ao]|echocardiogra(?:m|phy)|ecodoppler\s+card[ií]aco|modo[\s-]?m)\b/i,
+  },
+  {
     modality: 'CTG',
     label: 'CTG / Cardiotocografia',
     pattern:
@@ -2089,7 +2102,16 @@ export function lintCard(
     }
 
     const visQ = stripHtml(questionText);
-    if (/\bqual\s+(?:é\s+)?a\s+conduta\s*\?\s*$/i.test(visQ)) {
+    const hasTemporalOrLineQualifier =
+      /\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+manuten[cç][aã]o|de\s+minuto\s+zero|(?:conduta|abordagem|manejo|proped[êe]utica|medida)\s+(?:diagn[oó]stic[ao]|terap[êe]utic[ao]|profil[áa]tic[ao]))\b/i.test(
+        visQ
+      );
+    if (
+      !hasTemporalOrLineQualifier &&
+      /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|\bcomo\s+conduzir|\bo\s+que\s+fazer)\s*\?\s*$/i.test(
+        visQ
+      )
+    ) {
       warnings.push({
         code: 'VAGUE_TEMPORAL_WINDOW',
         field: 'question',
@@ -2131,7 +2153,7 @@ export function lintCard(
   const questionMarkCount = (qWithoutVf.match(/\?/g) || []).length;
   const compoundRegex1 = /\bqual\b[^?]{3,65}\be\s+(?:qual|quais|como|quando|onde)\b/i;
   const compoundRegex2 =
-    /\bqual\s+(?:é\s+)?(?:o|a|os|as)?\s*(?:diagn[oó]stico|hip[oó]tese|agente|etiologia|classifica[cç][aã]o|est[aá]gio)\s+e\s+(?:qual\s+)?(?:a\s+|o\s+)?(?:conduta|tratamento|manejo|exame|droga|terapia)\b/i;
+    /\b(?:qual|quais)\s+(?:é\s+|são\s+)?(?:o|a|os|as)?\s*(?:diagn[oó]stico|hip[oó]tese|agente|etiologia|classifica[cç][aã]o|est[aá]gio|achado|parede|mecanismo|escore)(?:\s+[a-zà-ú0-9_-]+){0,3}\s+e\s+(?:qual\s+)?(?:a\s+|o\s+|os\s+|as\s+)?(?:conduta|tratamento|manejo|exame|droga|f[áa]rmaco|terapia|antiarr[ií]tmico|ant[ií]doto|dose|art[eé]ria|interven[cç][aã]o)\b/i;
   const hasCompoundQuestion =
     questionMarkCount > 1 ||
     compoundRegex1.test(visibleQuestion) ||
@@ -2304,6 +2326,81 @@ export function lintCard(
     }
   }
 
+  if (!hasAnyImg && !card.isResolvingImage) {
+    const hasOrphanVisualDeixis =
+      /\b(?:tra[çc]ado|ecg|eletrocardiograma|exame|imagem|figura|foto|radiografia|rx|tc|tomografia|rm|resson[aâ]ncia|usg|ultrassom|ultrassonografia|ctg|cardiotocografia|l[aâ]mina|partograma|quadro\s+visual)\s+(?:abaixo|acima|ao\s+lado|em\s+anexo|anex[ao]|mostrad[ao]|apresentad[ao]|a\s+seguir)\b/i.test(
+        visibleQuestion
+      ) ||
+      /\b(?:abaixo|acima)\s*,?\s*(?:observa-se|nota-se|evidencia-se|v[êe]-se)\b/i.test(
+        visibleQuestion
+      );
+    if (hasOrphanVisualDeixis) {
+      warnings.push({
+        code: 'ORPHAN_VISUAL_REFERENCE',
+        field: 'question',
+        severity: 'error',
+        message:
+          'Enunciado faz referência visual ("abaixo"/"acima"/"em anexo") sem nenhuma tag <img> anexada.',
+      });
+    }
+  }
+
+  // Validate HTML tables (<table class="med-table">) structure & placement
+  if (/<table\b/i.test(questionText)) {
+    warnings.push({
+      code: 'TABLE_MALFORMED',
+      field: 'question',
+      severity: 'error',
+      message: 'Tabelas HTML não devem ficar na pergunta; mova <table class="med-table"> para o campo "hint".',
+    });
+  }
+  if (/<table\b/i.test(answerText)) {
+    warnings.push({
+      code: 'TABLE_MALFORMED',
+      field: 'answer',
+      severity: 'error',
+      message: 'Tabelas HTML não devem ficar na resposta; mova <table class="med-table"> para o campo "hint".',
+    });
+  }
+  if (/<table\b|<\/table>/i.test(hintText)) {
+    const openTables = (hintText.match(/<table\b/gi) || []).length;
+    const closeTables = (hintText.match(/<\/table>/gi) || []).length;
+    const openTr = (hintText.match(/<tr\b/gi) || []).length;
+    const closeTr = (hintText.match(/<\/tr>/gi) || []).length;
+    const openCell = (hintText.match(/<t[dh]\b/gi) || []).length;
+    const closeCell = (hintText.match(/<\/t[dh]>/gi) || []).length;
+    const hasHeaderCell = /<th\b/i.test(hintText);
+    const rows = hintText.match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+    const maxCols = rows.reduce((max, row) => {
+      const cells = (row.match(/<t[dh]\b/gi) || []).length;
+      return Math.max(max, cells);
+    }, 0);
+
+    if (
+      openTables === 0 ||
+      openTables !== closeTables ||
+      openTr === 0 ||
+      openTr !== closeTr ||
+      openCell !== closeCell ||
+      !hasHeaderCell
+    ) {
+      warnings.push({
+        code: 'TABLE_MALFORMED',
+        field: 'hint',
+        severity: 'error',
+        message:
+          'Tabela HTML malformada no hint: garanta tags fechadas (<table>, <tr>, <th>, <td>) e cabeçalho <th>.',
+      });
+    } else if (maxCols > 5) {
+      warnings.push({
+        code: 'TABLE_MALFORMED',
+        field: 'hint',
+        severity: 'warning',
+        message: `Tabela no hint com ${maxCols} colunas (máx. recomendado: 4–5 colunas para leitura móvel no Anki).`,
+      });
+    }
+  }
+
   if (hasAnyImg) {
     const legendEntries = extractVisualLegendEntries(card);
     const hasValidLegend = legendEntries.some((entry) => entry.wordCount >= MIN_VISUAL_LEGEND_WORDS);
@@ -2317,6 +2414,20 @@ export function lintCard(
           legendEntries.length === 0
             ? `[IMAGE_MISSING_LEGEND] Imagem sem legenda descritiva em <i>...</i> (mín. ${MIN_VISUAL_LEGEND_WORDS} palavras) associada ao card.`
             : `[IMAGE_MISSING_LEGEND] Legenda visual em <i>...</i> muito curta (${bestCount}/${MIN_VISUAL_LEGEND_WORDS} palavras descritivas mínimas).`,
+      });
+    } else if (
+      legendEntries.every((e) =>
+        /^Achado visual complementar do exame clínico para correlação diagnóstica/i.test(
+          e.descriptiveText
+        )
+      )
+    ) {
+      warnings.push({
+        code: 'RECOGNITION_MISMATCH',
+        field: 'hint',
+        severity: 'warning',
+        message:
+          'Legenda visual genérica detectada; descreva o achado real visível na imagem (≥ 6 palavras).',
       });
     }
 
@@ -2481,6 +2592,22 @@ export function removeMissingMediaFromCard(
     if (hadImgInQuestion || hadImgInHint) {
       hint = hint.replace(/^<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, '').trim();
     }
+    // Clean orphaned visual deictic phrases when all images were stripped
+    question = question
+      .replace(
+        /\b(?:realiza|submete-se\s+a|apresenta)\s+(?:o|a|ao)\s+(?:tra[çc]ado|ecg|eletrocardiograma|exame|rx|radiografia|tc|tomografia|rm|resson[aâ]ncia|usg|ultrassom|ultrassonografia|ctg|cardiotocografia)\s+(?:abaixo|acima|ao\s+lado|em\s+anexo|anex[ao]|mostrad[ao]|apresentad[ao]|a\s+seguir)\b/gi,
+        (m) => m.replace(/\s+(?:abaixo|acima|ao\s+lado|em\s+anexo|anex[ao]|mostrad[ao]|apresentad[ao]|a\s+seguir)\b/gi, '')
+      )
+      .replace(
+        /\b(tra[çc]ado|ecg|eletrocardiograma|exame|imagem|figura|foto|radiografia|rx|tc|tomografia|rm|resson[aâ]ncia|usg|ultrassom|ultrassonografia|ctg|cardiotocografia|l[aâ]mina|partograma)\s+(?:abaixo|acima|ao\s+lado|em\s+anexo|anex[ao]|mostrad[ao]|apresentad[ao]|a\s+seguir)\b/gi,
+        '$1 clínico'
+      )
+      .replace(
+        /\b(?:abaixo|acima)\s*,?\s*(observa-se|nota-se|evidencia-se|v[êe]-se)\b/gi,
+        '$1'
+      )
+      .replace(/\s{2,}/g, ' ')
+      .trim();
   } else if (card.image_mode === 'recognition' && !stillHasImgInQuestion) {
     nextImageMode = undefined;
     if (hadImgInQuestion) {
@@ -2621,12 +2748,18 @@ export function reconcileDeckIdsAndMedia(
     const preservedHash = card.last_synced_hash || originalCard?.last_synced_hash;
     const preservedPriority = card.priority || originalCard?.priority;
 
+    const hasClozeMarkup = /\{\{c\d+::[\s\S]+?\}\}/.test(question);
+    const normalizedType: 'basic' | 'cloze' =
+      card.type === 'cloze' || (hasClozeMarkup && !String(card.answer || '').trim())
+        ? 'cloze'
+        : 'basic';
+
     return {
       ...card,
       id: preservedId,
       deck_key: cleanDeckKey,
-      type: card.type === 'cloze' ? 'cloze' : 'basic',
-      answer: card.type === 'cloze' ? '' : card.answer,
+      type: normalizedType,
+      answer: normalizedType === 'cloze' ? '' : card.answer,
       question,
       hint,
       tags: cardTags,
@@ -2962,8 +3095,12 @@ function sanitizeTopicAgainstSpoiler(
  * or mutating semantic Matuschak/Nielsen violations (which are preserved for AI repair).
  */
 export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
+  const hasSilentCloze =
+    /\{\{c\d+::[\s\S]+?\}\}/.test(card.question || '') && !String(card.answer || '').trim();
   const cardType: 'basic' | 'cloze' =
-    String(card.type || 'basic').toLowerCase() === 'cloze' ? 'cloze' : 'basic';
+    String(card.type || 'basic').toLowerCase() === 'cloze' || hasSilentCloze
+      ? 'cloze'
+      : 'basic';
   const mediaInQuestion = extractMediaFromString(card.question || '');
   let question = replaceLatexWithUnicode((card.question || '').trim());
   let answer = replaceLatexWithUnicode((card.answer || '').trim());
@@ -2998,13 +3135,13 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
 
   // 3. Fix compound question ("Qual o diagnóstico e a conduta?") -> atomic question with closed temporal window
   question = question.replace(
-    /qual\s+(?:é\s+)?(?:o\s+|a\s+)?(?:diagn[oó]stico|classifica[cç][aã]o|hip[oó]tese)\s+e\s+(?:qual\s+)?(?:a\s+|o\s+)?(conduta|tratamento|manejo|droga|interven[cç][aã]o)(?:\s+imediata)?/gi,
+    /qual\s+(?:é\s+)?(?:o\s+|a\s+)?(?:diagn[oó]stico|classifica[cç][aã]o|hip[oó]tese|achado|parede|mecanismo)(?:\s+[a-zà-ú0-9_-]+){0,2}\s+e\s+(?:qual\s+)?(?:a\s+|o\s+)?(conduta|tratamento|manejo|droga|f[áa]rmaco|antiarr[ií]tmico|interven[cç][aã]o)(?:\s+imediata|\s+de\s+escolha)?/gi,
     'Qual a $1 imediata de primeira escolha'
   );
 
-  // 4. Fix vague temporal window ("Qual a conduta?") even if followed by media tags
+  // 4. Fix vague temporal window ("Qual a conduta?", "Qual o manejo?") even if followed by media tags
   question = question.replace(
-    /\bqual\s+(?:é\s+)?a\s+conduta\s*\?(?=\s*(?:<[^>]+>\s*)*$)/i,
+    /\b(?:qual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|como\s+conduzir|o\s+que\s+fazer)\s*\?(?=\s*(?:<[^>]+>\s*)*$)/i,
     'Qual é a conduta imediata de primeira escolha?'
   );
 
@@ -3112,11 +3249,16 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     .replace(/\[BUSCAR\s+IMAGEM[^\]]*\]\s*/gi, '');
 
   const audioBlocks = hint.match(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi) || [];
-  const hintWithoutAudio = hint.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, '').trim();
+  const tableBlocks = hint.match(/<table\b[\s\S]*?<\/table>/gi) || [];
+  const hintWithoutAudioOrTable = hint
+    .replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, '')
+    .replace(/<table\b[\s\S]*?<\/table>/gi, '')
+    .replace(/(?:<br\s*\/?>\s*){3,}/gi, '<br><br>')
+    .trim();
 
   // Preserve leading <img> and visual <i>legend</i> before <b>Comentário:</b>
   const { legendPrefix, bodyHint } = splitLeadingMediaAndLegend(
-    hintWithoutAudio,
+    hintWithoutAudioOrTable,
     topic,
     card.image_mode
   );
@@ -3140,8 +3282,9 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
     textHint = truncateCommentHtmlPreservingWords(textHint, MAX_COMMENT_CHARS);
   }
 
+  const tableSuffix = tableBlocks.length > 0 ? `<br><br>${tableBlocks.map((t) => t.trim()).join('<br><br>')}` : '';
   const audioSuffix = audioBlocks[0] ? `<br>${audioBlocks[0].trim()}` : '';
-  hint = `${legendPrefix}${textHint}${audioSuffix}`.trim();
+  hint = `${legendPrefix}${textHint}${tableSuffix}${audioSuffix}`.trim();
 
   return {
     ...card,

@@ -22,6 +22,8 @@ interface InputPanelProps {
   onAddPdfs: (files: UploadedPdfFile[]) => void;
   onRemovePdf: (index: number) => void;
   onClearPdfs: () => void;
+  extractedImagesCount?: number;
+  onOpenPdfGallery?: (tab?: 'extracted' | 'browse') => void;
   localMediaAssets?: Record<string, string>;
   onAddLocalMedia?: (assets: Record<string, string>) => void;
   onClearLocalMedia?: () => void;
@@ -36,10 +38,15 @@ interface InputPanelProps {
   useGoogleSearch: boolean;
   onToggleGoogleSearch: (val: boolean) => void;
   onGenerateClinicalMap: () => void;
+  onAuditExistingDeck?: () => void;
   onRecreateCanonicalDeck: () => void;
+  onRunFullPipeline?: () => void;
   onLoadGenericSample: () => void;
+  hasExistingCards?: boolean;
   isGeneratingMap: boolean;
+  isAuditingDeck?: boolean;
   isGeneratingDeck: boolean;
+  isRunningFullPipeline?: boolean;
   guidCount: number;
   onImportGuidRegistry: (jsonText: string) => void;
   onExportGuidRegistry: () => void;
@@ -50,6 +57,8 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   onAddPdfs,
   onRemovePdf,
   onClearPdfs,
+  extractedImagesCount = 0,
+  onOpenPdfGallery,
   localMediaAssets = {},
   onAddLocalMedia,
   onClearLocalMedia,
@@ -64,10 +73,15 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   useGoogleSearch,
   onToggleGoogleSearch,
   onGenerateClinicalMap,
+  onAuditExistingDeck,
   onRecreateCanonicalDeck,
+  onRunFullPipeline,
   onLoadGenericSample,
+  hasExistingCards = false,
   isGeneratingMap,
+  isAuditingDeck = false,
   isGeneratingDeck,
+  isRunningFullPipeline = false,
   guidCount,
   onImportGuidRegistry,
   onExportGuidRegistry,
@@ -291,17 +305,30 @@ export const InputPanel: React.FC<InputPanelProps> = ({
 
         {pdfs.length > 0 && (
           <div className="mt-2 border border-slate-800 rounded-lg bg-[#0B0F17] overflow-hidden">
-            <div className="px-3.5 py-1.5 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+            <div className="px-3.5 py-1.5 bg-slate-900/80 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
               <span>
-                <strong className="text-slate-200">{pdfs.length}</strong> documento(s) prontos para síntese conjunta
+                <strong className="text-slate-200">{pdfs.length}</strong> documento(s) ·{' '}
+                <strong className="text-sky-300">{extractedImagesCount}</strong> figura(s) extraída(s)
               </span>
-              <button
-                type="button"
-                onClick={onClearPdfs}
-                className="text-slate-400 hover:text-red-400 cursor-pointer"
-              >
-                Remover todos
-              </button>
+              <div className="flex items-center gap-3">
+                {onOpenPdfGallery && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenPdfGallery('extracted')}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-950/80 border border-indigo-700/70 text-indigo-200 hover:bg-indigo-900/80 font-medium cursor-pointer"
+                  >
+                    <ImageIcon className="w-3 h-3" />
+                    <span>Galeria da Apostila &amp; Recortar ({extractedImagesCount})</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onClearPdfs}
+                  className="text-slate-400 hover:text-red-400 cursor-pointer"
+                >
+                  Remover todos
+                </button>
+              </div>
             </div>
             <ul className="divide-y divide-slate-800 max-h-40 overflow-y-auto">
               {pdfs.map((pdf, index) => (
@@ -480,35 +507,65 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         )}
       </div>
 
-      {/* Row 4: Clean 2-Step Action Bar */}
-      <div className="pt-1 flex flex-wrap items-center justify-end gap-3">
+      {/* Row 4: Full Pipeline + Step-by-Step Action Bar */}
+      <div className="pt-1 flex flex-wrap items-center justify-end gap-2.5">
+        {hasExistingCards && onAuditExistingDeck && (
+          <button
+            type="button"
+            onClick={onAuditExistingDeck}
+            disabled={isGeneratingMap || isAuditingDeck || isGeneratingDeck || isRunningFullPipeline}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-200 bg-amber-950/60 border border-amber-700/70 rounded-lg hover:bg-amber-900/70 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Layers className="w-3.5 h-3.5 text-amber-400" />
+            <span>
+              {isAuditingDeck ? 'Julgando Cards...' : 'Julgar Deck Atual (IA)'}
+            </span>
+          </button>
+        )}
+
         <button
           type="button"
           onClick={onGenerateClinicalMap}
-          disabled={isGeneratingMap || isGeneratingDeck}
-          className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          disabled={isGeneratingMap || isAuditingDeck || isGeneratingDeck || isRunningFullPipeline}
+          className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <Layers className="w-3.5 h-3.5 text-sky-400" />
           <span>
             {isGeneratingMap
-              ? 'Gerando Mapa Clínico...'
-              : 'Passo 1: Gerar Mapa Clínico (P1 a P4) + Diretrizes'}
+              ? 'Gerando Mapa...'
+              : 'Passo 1: Mapa Clínico P1–P4'}
           </span>
         </button>
 
         <button
           type="button"
           onClick={onRecreateCanonicalDeck}
-          disabled={isGeneratingMap || isGeneratingDeck}
-          className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          disabled={isGeneratingMap || isAuditingDeck || isGeneratingDeck || isRunningFullPipeline}
+          className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-sky-200 bg-sky-950/70 border border-sky-700/70 rounded-lg hover:bg-sky-900/70 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
-          <Sparkles className="w-3.5 h-3.5" />
+          <Sparkles className="w-3.5 h-3.5 text-sky-400" />
           <span>
             {isGeneratingDeck
               ? 'Recriando Deck JSON...'
-              : 'Passo 2: Recriar Deck JSON Canônico'}
+              : 'Passo 2: Recriar Deck JSON'}
           </span>
         </button>
+
+        {onRunFullPipeline && (
+          <button
+            type="button"
+            onClick={onRunFullPipeline}
+            disabled={isGeneratingMap || isAuditingDeck || isGeneratingDeck || isRunningFullPipeline}
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>
+              {isRunningFullPipeline
+                ? 'Executando Pipeline Completo...'
+                : 'Executar Pipeline Completo (Planejar → Julgar → Refazer → Confirmar)'}
+            </span>
+          </button>
+        )}
       </div>
     </section>
   );

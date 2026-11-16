@@ -159,7 +159,7 @@ export async function searchMedicalImagesApi(
           hint: params.hint || '',
           preferGoogleGrounding: params.preferGoogleGrounding ?? true,
         }),
-        timeoutMs: 22_000,
+        timeoutMs: 32_000,
         signal,
       }
     );
@@ -172,6 +172,7 @@ export async function searchMedicalImagesApi(
 export interface ValidateCardImageResponse {
   validated: boolean;
   isCompatible: boolean;
+  visualScore?: number;
   reachable?: boolean;
   isSvg?: boolean;
   detectedModality: string;
@@ -201,7 +202,7 @@ export async function validateCardImageApi(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
-        timeoutMs: 28_000,
+        timeoutMs: 40_000,
         signal,
       }
     );
@@ -219,6 +220,67 @@ export async function validateCardImageApi(
       visualLegend: '',
     };
   }
+}
+
+export async function auditDeckApi(
+  params: {
+    deckKey: string;
+    cards: Array<{
+      id: number;
+      type: string;
+      topic: string;
+      question: string;
+      answer: string;
+      hint: string;
+      priority?: string;
+    }>;
+    clinicalMap?: import('../types/deck').ClinicalMapResponse | null;
+    pdfs: Array<Record<string, unknown>>;
+    model?: string;
+  },
+  signal?: AbortSignal
+): Promise<import('../types/deck').DeckAuditReport> {
+  return fetchJsonWithTimeout<import('../types/deck').DeckAuditReport>(
+    '/api/gemini/audit-deck',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      timeoutMs: 120_000,
+      signal,
+    }
+  );
+}
+
+export async function verifyDeckApi(
+  params: {
+    deckKey: string;
+    cards: Array<{
+      id: number;
+      type: string;
+      topic: string;
+      question: string;
+      answer: string;
+      hint: string;
+      image_mode?: string;
+      priority?: string;
+    }>;
+    clinicalMap?: import('../types/deck').ClinicalMapResponse | null;
+    pdfs: Array<Record<string, unknown>>;
+    model?: string;
+  },
+  signal?: AbortSignal
+): Promise<import('../types/deck').DeckFinalVerificationReport> {
+  return fetchJsonWithTimeout<import('../types/deck').DeckFinalVerificationReport>(
+    '/api/gemini/verify-deck',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      timeoutMs: 120_000,
+      signal,
+    }
+  );
 }
 
 export function extractCardImagesWithMeta(

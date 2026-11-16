@@ -3,7 +3,6 @@ import {
   extractJsonBlock,
   FALLBACK_GEMINI_MODEL,
   generateContentWithRetry,
-  PRIMARY_GEMINI_MODEL,
 } from './geminiClient';
 
 export interface MedicalImageCandidate {
@@ -388,6 +387,45 @@ export function scoreImageRelevance(
     score -= 90;
   }
 
+  // 4b) Penalize Echocardiogram / M-mode / Doppler when card expects ECG tracing
+  const expectsEcgQuery =
+    /\b(?:ecg|ekg|electrocardiogra\w*|eletrocardiogra\w*|stemi|flutter|fibrillation|brugada|wpw|delta\s+wave|bundle\s+branch|peaked\s+t\s+wave|av\s+block|torsades)\b/i.test(
+      queryContextText
+    ) &&
+    !/\b(?:echocardiogra\w*|ecocardiogra\w*|doppler|m[-\s]?mode)\b/i.test(queryContextText);
+  if (
+    expectsEcgQuery &&
+    /\b(?:echocardiogra\w*|ecocardiogra\w*|echopedia|m[-\s]?mode|doppler|ultrasound|sonogram|sonography)\b/i.test(
+      candidateText
+    )
+  ) {
+    score -= 85;
+  }
+
+  // 4c) Penalize normal sinus/healthy ECGs when query asks for a specific arrhythmia or ischemia pathology
+  const expectsPathology =
+    /\b(?:stemi|infarction|ischemia|flutter|fibrillation|block|wpw|brugada|hyperkalemia|vt|svt|torsades|supradesnivelamento|infradesnivelamento|arritmia|bloqueio|taquicardia)\b/i.test(
+      queryContextText
+    ) && !/\b(?:normal\s+sinus|ritmo\s+sinusal\s+normal)\b/i.test(queryContextText);
+  const normalEcgRegex =
+    /\b(?:normal\s+(?:sinus|ecg|ekg|12[-\s]?lead|rhythm)|sinus\s+rhythm\s+normal|healthy\s+control)\b/i;
+  if (expectsPathology && normalEcgRegex.test(candidate.title || '')) {
+    score -= 45;
+  } else if (
+    expectsPathology &&
+    normalEcgRegex.test(candidateText) &&
+    answerHits + enHits < 2
+  ) {
+    score -= 32;
+  }
+
+  // 4d) Penalize animated GIFs (usually flashing schematics/loops unsuitable for static clinical Anki prompts)
+  const cleanThumbLower = (candidate.thumbUrl || '').split('?')[0].toLowerCase();
+  const cleanFullLower = (candidate.fullUrl || '').split('?')[0].toLowerCase();
+  if (/\.gif$/i.test(cleanThumbLower) || /\.gif$/i.test(cleanFullLower)) {
+    score -= 45;
+  }
+
   return score;
 }
 
@@ -482,7 +520,7 @@ Exemplo de saída: ["right bundle branch block ECG", "RBBB V1 ECG LITFL"]`,
           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
         },
       },
-      { signal, timeoutMs: 8500, enableModelFallback: false }
+      { signal, timeoutMs: 4500, enableModelFallback: false }
     );
 
     const parsed = JSON.parse(extractJsonBlock(res.text || '[]'));
@@ -915,6 +953,86 @@ async function validateCandidateImageUrl(
   }
 }
 
+export function extractEditorialImageUrlsFromHtml(
+  html: string,
+  pageUrl: string,
+  pageTitle = ''
+): Array<{ url: string; alt: string; pageUrl: string; pageTitle: string }> {
+  const extracted: Array<{ url: string; alt: string; pageUrl: string; pageTitle: string }> = [];
+  const seen = new Set<string>();
+
+  const addCandidate = (rawSrc: string, alt = '') => {
+    const trimmed = rawSrc.trim().replace(/&amp;/g, '&');
+    if (!trimmed || trimmed.startsWith('data:')) return;
+    try {
+      const resolved = new URL(trimmed, pageUrl).toString();
+      if (!resolved.startsWith('http')) return;
+      if (isSpamOrLogoImageUrl(resolved, alt)) return;
+      const canonical = normalizeImageCanonicalKey(resolved, alt);
+      if (seen.has(canonical)) return;
+      seen.add(canonical);
+      extracted.push({ url: resolved, alt: alt.trim(), pageUrl, pageTitle });
+    } catch {
+      // Ignore malformed URLs
+    }
+  };
+
+  // Prefer editorial content containers (<main>, <article>, <figure>) over navigation/sidebars
+  const mainMatch = html.match(/<main\b[^>]*>[\s\S]*?<\/main>/i)?.[0] || '';
+  const articleMatches = (html.match(/<article\b[^>]*>[\s\S]*?<\/article>/gi) || []).join(' ');
+  const figureMatches = (html.match(/<figure\b[^>]*>[\s\S]*?<\/figure>/gi) || []).join(' ');
+  const cleanedBodyFallback = html
+    .replace(/<(nav|aside|footer|header)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
+  const editorialHtml =
+    [figureMatches, articleMatches, mainMatch].filter((s) => s.length > 80).join(' ') ||
+    cleanedBodyFallback;
+
+  const scanImgTags = (sourceHtml: string) => {
+    const imgRegex = /<img\b[^>]*>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = imgRegex.exec(sourceHtml)) !== null && extracted.length < 10) {
+      const tag = m[0];
+      const srcMatch = /\b(?:data-lazy-src|data-src|src)=["']([^"']+)["']/i.exec(tag);
+      if (!srcMatch) continue;
+      const altMatch = /\balt=["']([^"']*)["']/i.exec(tag);
+      const widthMatch = /\bwidth=["']?(\d+)/i.exec(tag);
+      if (widthMatch && Number(widthMatch[1]) > 0 && Number(widthMatch[1]) < 150) {
+        continue;
+      }
+      addCandidate(srcMatch[1], altMatch?.[1] || pageTitle);
+    }
+  };
+
+  scanImgTags(editorialHtml);
+  if (extracted.length === 0 && editorialHtml !== cleanedBodyFallback) {
+    scanImgTags(cleanedBodyFallback);
+  }
+
+  const isLikelySiteCard = (u: string) =>
+    /(?:default|site[-_]?image|og[-_]?default|social[-_]?card|share[-_]?img|brand|header|masthead|cropped-)/i.test(
+      u
+    );
+  let m: RegExpExecArray | null;
+  const metaRegex =
+    /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
+  while ((m = metaRegex.exec(html)) !== null) {
+    if (!isLikelySiteCard(m[1])) {
+      addCandidate(m[1], pageTitle);
+    }
+  }
+  const metaReverseRegex =
+    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]*>/gi;
+  while ((m = metaReverseRegex.exec(html)) !== null) {
+    if (!isLikelySiteCard(m[1])) {
+      addCandidate(m[1], pageTitle);
+    }
+  }
+
+  return extracted;
+}
+
 async function extractImagesFromMedicalWebPage(
   pageUrl: string,
   pageTitle = '',
@@ -935,51 +1053,7 @@ async function extractImagesFromMedicalWebPage(
     if (!ct.includes('text/html') && !ct.includes('application/xhtml')) return [];
 
     const html = (await resp.text()).slice(0, 220000);
-    const extracted: Array<{ url: string; alt: string; pageUrl: string; pageTitle: string }> = [];
-    const seen = new Set<string>();
-
-    const addCandidate = (rawSrc: string, alt = '') => {
-      const trimmed = rawSrc.trim().replace(/&amp;/g, '&');
-      if (!trimmed || trimmed.startsWith('data:')) return;
-      try {
-        const resolved = new URL(trimmed, pageUrl).toString();
-        if (!resolved.startsWith('http')) return;
-        if (isSpamOrLogoImageUrl(resolved, alt)) return;
-        const canonical = normalizeImageCanonicalKey(resolved, alt);
-        if (seen.has(canonical)) return;
-        seen.add(canonical);
-        extracted.push({ url: resolved, alt: alt.trim(), pageUrl, pageTitle });
-      } catch {
-        // Ignore malformed URLs
-      }
-    };
-
-    const metaRegex =
-      /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = metaRegex.exec(html)) !== null) {
-      addCandidate(m[1], pageTitle);
-    }
-    const metaReverseRegex =
-      /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image|og:image:secure_url)["'][^>]*>/gi;
-    while ((m = metaReverseRegex.exec(html)) !== null) {
-      addCandidate(m[1], pageTitle);
-    }
-
-    const imgRegex = /<img\b[^>]*>/gi;
-    while ((m = imgRegex.exec(html)) !== null && extracted.length < 10) {
-      const tag = m[0];
-      const srcMatch = /\b(?:data-lazy-src|data-src|src)=["']([^"']+)["']/i.exec(tag);
-      if (!srcMatch) continue;
-      const altMatch = /\balt=["']([^"']*)["']/i.exec(tag);
-      const widthMatch = /\bwidth=["']?(\d+)/i.exec(tag);
-      if (widthMatch && Number(widthMatch[1]) > 0 && Number(widthMatch[1]) < 150) {
-        continue;
-      }
-      addCandidate(srcMatch[1], altMatch?.[1] || pageTitle);
-    }
-
-    return extracted;
+    return extractEditorialImageUrlsFromHtml(html, pageUrl, pageTitle);
   } catch {
     return [];
   }
@@ -1017,14 +1091,14 @@ Retorne EXCLUSIVAMENTE um array JSON válido com até 5 referências encontradas
     const response = await generateContentWithRetry(
       ai,
       {
-        model: PRIMARY_GEMINI_MODEL,
+        model: FALLBACK_GEMINI_MODEL,
         contents: prompt,
         config: {
           tools: [{ googleSearch: {} }],
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         },
       },
-      { signal, timeoutMs: 14_000, enableModelFallback: true }
+      { signal, timeoutMs: 12_000, enableModelFallback: false }
     );
 
     const directCandidates: Array<{
@@ -1231,15 +1305,18 @@ export async function searchMedicalImages(
 
   const allScored = Array.from(dedupedMap.values());
   const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
-  const minThreshold = maxScore >= 24 ? 14 : 6;
+  const minThreshold = maxScore >= 28 ? 18 : 12;
 
   const ranked = allScored
     .filter((c) => (c.relevanceScore ?? 0) >= minThreshold)
     .sort((a, b) => {
-      // Raster always outranks schematic SVG unless score gap is extreme
+      // Static raster (jpg/png/webp) always outranks animated GIF and schematic SVG
       const aSvg = Boolean(a.isSvg);
       const bSvg = Boolean(b.isSvg);
       if (aSvg !== bSvg) return aSvg ? 1 : -1;
+      const aGif = /\.gif(?:\?|$)/i.test(a.thumbUrl || a.fullUrl);
+      const bGif = /\.gif(?:\?|$)/i.test(b.thumbUrl || b.fullUrl);
+      if (aGif !== bGif) return aGif ? 1 : -1;
       return (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0);
     })
     .slice(0, 12)

@@ -84,6 +84,7 @@ export async function readMultipleDocumentFiles(
           size: file.size,
           mimeType: 'application/pdf',
           base64Data,
+          rawArrayBuffer: buffer ?? undefined,
           docRole: inferDocRole(file.name),
           extractedImages,
         };

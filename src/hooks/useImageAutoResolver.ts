@@ -44,6 +44,32 @@ interface ValidatedImageSelection {
   hadRejection: boolean;
 }
 
+function isGifCandidate(cand: MedicalImageResult): boolean {
+  return /\.gif(?:\?|$|#)|animated|giphy/i.test(
+    `${cand.fullUrl || ''} ${cand.thumbUrl || ''} ${cand.title || ''}`
+  );
+}
+
+function computeCandidateCompositeScore(
+  cand: MedicalImageResult,
+  visualScore: number,
+  isRawSvg: boolean,
+  isRasterizedSvg: boolean
+): number {
+  const haystack = `${cand.fullUrl || ''} ${cand.thumbUrl || ''} ${cand.source || ''} ${cand.title || ''}`;
+  let score = visualScore * 10;
+  if (cand.fromMaterial) score += 8;
+  if (/litfl|lifeinthefastlane|12[-_\s]?lead|ecg|ecgguide|healio/i.test(haystack)) {
+    score += 6;
+  }
+  if (/holter|schematic|cartoon|vector|animated|\.gif/i.test(haystack)) {
+    score -= 18;
+  }
+  if (isRawSvg) score -= 35;
+  else if (isRasterizedSvg) score -= 12;
+  return score;
+}
+
 async function pickValidatedUniqueCandidate(params: {
   card: CanonicalCard;
   candidates: MedicalImageResult[];
@@ -52,44 +78,28 @@ async function pickValidatedUniqueCandidate(params: {
   model?: GeminiModelOption;
   signal: AbortSignal;
 }): Promise<ValidatedImageSelection | null> {
-  const { card, candidates, usedImageKeys, imageMode, model, signal } = params;
+  const { card, candidates, usedImageKeys, imageMode, model: _model, signal } = params;
   const cleanQ = stripHtml(card.question);
   const cleanA = stripHtml(card.answer);
   const cleanH = stripHtml(card.hint);
   const expectedText = `${card.topic} ${cleanQ} ${cleanA}`;
 
-  const availableCandidates = candidates.filter((cand) => {
+  const rawAvailable = candidates.filter((cand) => {
     const keys = getImageCandidateTrackingKeys(cand);
     return !keys.some((k) => usedImageKeys.has(k));
   });
 
-  if (availableCandidates.length === 0) return null;
+  if (rawAvailable.length === 0) return null;
 
+  // Prefer static raster candidates over animated GIFs unless GIFs are all that exist
+  const nonGif = rawAvailable.filter((c) => !isGifCandidate(c));
+  const orderedAvailable =
+    nonGif.length > 0 ? [...nonGif, ...rawAvailable.filter((c) => isGifCandidate(c))] : rawAvailable;
+
+  // Fast pre-filter for obvious cross-modality conflicts on candidate metadata
+  const prefiltered: Array<{ cand: MedicalImageResult; keys: string[] }> = [];
   let hadRejection = false;
-  let bestRasterFallback: {
-    cand: MedicalImageResult;
-    keys: string[];
-    visualLegend: string;
-    imageVerified: boolean;
-  } | null = null;
-  let bestSvgFallback: {
-    cand: MedicalImageResult;
-    keys: string[];
-    visualLegend: string;
-    imageVerified: boolean;
-  } | null = null;
-
-  // Inspect up to 5 top unique candidates (material candidates first, then Web candidates)
-  for (const cand of availableCandidates.slice(0, 5)) {
-    if (signal.aborted) return null;
-
-    const candKeys = getImageCandidateTrackingKeys(cand);
-    // Re-check atomic availability right before async call
-    if (candKeys.some((k) => usedImageKeys.has(k))) {
-      continue;
-    }
-
-    // Fast pre-filter for obvious cross-modality conflicts on candidate metadata
+  for (const cand of orderedAvailable) {
     if (
       hasLocalModalityConflict(
         expectedText,
@@ -100,103 +110,146 @@ async function pickValidatedUniqueCandidate(params: {
       hadRejection = true;
       continue;
     }
+    prefiltered.push({ cand, keys: getImageCandidateTrackingKeys(cand) });
+  }
 
-    // Atomically reserve keys before awaiting Gemini Flash pixel inspection
-    for (const k of candKeys) usedImageKeys.add(k);
+  if (prefiltered.length === 0) return null;
 
-    const candidateImageUrl = cand.thumbUrl || cand.fullUrl;
+  interface ScoredHit {
+    cand: MedicalImageResult;
+    keys: string[];
+    visualLegend: string;
+    imageVerified: boolean;
+    isRawSvg: boolean;
+    visualScore: number;
+    compositeScore: number;
+  }
 
-    try {
-      const validation = await validateCardImageApi(
-        {
-          imageSource: candidateImageUrl,
-          cardTopic: card.topic,
-          cardQuestion: cleanQ,
-          cardAnswer: cleanA,
-          cardHint: cleanH,
-          imageMode,
-          captionHint: cand.description || cand.title,
-          model,
-        },
-        signal
-      );
+  const evaluateBatch = async (
+    batch: Array<{ cand: MedicalImageResult; keys: string[] }>
+  ): Promise<ScoredHit[]> => {
+    const reserved: Array<{ cand: MedicalImageResult; keys: string[] }> = [];
+    for (const item of batch) {
+      if (item.keys.some((k) => usedImageKeys.has(k))) continue;
+      for (const k of item.keys) usedImageKeys.add(k);
+      reserved.push(item);
+    }
+    if (reserved.length === 0) return [];
 
-      if (signal.aborted) {
-        for (const k of candKeys) usedImageKeys.delete(k);
-        return null;
-      }
+    const results = await Promise.all(
+      reserved.map(async ({ cand, keys }) => {
+        const candidateImageUrl = cand.thumbUrl || cand.fullUrl;
+        try {
+          const validation = await validateCardImageApi(
+            {
+              imageSource: candidateImageUrl,
+              cardTopic: card.topic,
+              cardQuestion: cleanQ,
+              cardAnswer: cleanA,
+              cardHint: cleanH,
+              imageMode,
+              captionHint: cand.description || cand.title,
+            },
+            signal
+          );
 
-      if (!validation.isCompatible || validation.reachable === false) {
-        // Release keys so another card with matching modality can still use this figure if appropriate
-        for (const k of candKeys) usedImageKeys.delete(k);
-        hadRejection = true;
-        continue;
-      }
+          if (signal.aborted || !validation.isCompatible || validation.reachable === false) {
+            hadRejection = true;
+            return null;
+          }
 
-      const isAiVerified = Boolean(validation.validated && !validation.fallback);
-      const isRawSvg = Boolean(
-        validation.isSvg ||
-          /\.svg(?:\?|$)|image\/svg\+xml/i.test(candidateImageUrl)
-      );
-      const isRasterizedSvg = /\.svg\.png(?:\?|$)/i.test(candidateImageUrl);
+          const isAiVerified = Boolean(validation.validated && !validation.fallback);
+          const isRawSvg = Boolean(
+            validation.isSvg || /\.svg(?:\?|$)|image\/svg\+xml/i.test(candidateImageUrl)
+          );
+          const isRasterizedSvg = /\.svg\.png(?:\?|$)/i.test(candidateImageUrl);
+          const visualScore =
+            typeof validation.visualScore === 'number'
+              ? validation.visualScore
+              : isAiVerified
+                ? 7
+                : 4;
 
-      if (isAiVerified && !isRawSvg && !isRasterizedSvg) {
-        const alternatives = availableCandidates.filter((alt) => {
-          if (alt.id === cand.id) return true;
-          const altKeys = getImageCandidateTrackingKeys(alt);
-          return !altKeys.some((k) => usedImageKeys.has(k));
-        });
+          return {
+            cand,
+            keys,
+            visualLegend: validation.visualLegend || '',
+            imageVerified: isAiVerified,
+            isRawSvg,
+            visualScore,
+            compositeScore: computeCandidateCompositeScore(
+              cand,
+              visualScore,
+              isRawSvg,
+              isRasterizedSvg
+            ),
+          } satisfies ScoredHit;
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            throw err;
+          }
+          hadRejection = true;
+          return null;
+        }
+      })
+    );
 
-        return {
-          chosen: cand,
-          visualLegend: validation.visualLegend || '',
-          imageVerified: true,
-          alternatives: alternatives.slice(0, 6),
-          hadRejection,
-        };
-      }
+    // Release all tentatively reserved keys first; caller will re-acquire the winner only
+    for (const item of reserved) {
+      for (const k of item.keys) usedImageKeys.delete(k);
+    }
 
-      // Release key tentatively and record best fallback so remaining candidates (real raster/verified) can still win
-      for (const k of candKeys) usedImageKeys.delete(k);
-      if (!isRawSvg && (!bestRasterFallback || (isAiVerified && !bestRasterFallback.imageVerified))) {
-        bestRasterFallback = {
-          cand,
-          keys: candKeys,
-          visualLegend: validation.visualLegend || '',
-          imageVerified: isAiVerified,
-        };
-      } else if (!bestSvgFallback) {
-        bestSvgFallback = {
-          cand,
-          keys: candKeys,
-          visualLegend: validation.visualLegend || '',
-          imageVerified: isAiVerified && !isRawSvg,
-        };
-      }
-    } catch (err) {
-      for (const k of candKeys) usedImageKeys.delete(k);
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return null;
-      }
-      hadRejection = true;
+    return results.filter((r): r is ScoredHit => r !== null);
+  };
+
+  let scoredHits: ScoredHit[] = [];
+  try {
+    // Evaluate Top-2 first; if a crisp static raster achieves visualScore >= 8, skip extra RPM calls
+    scoredHits = await evaluateBatch(prefiltered.slice(0, 2));
+    const hasStrongVerifiedRaster = scoredHits.some(
+      (h) => h.imageVerified && !h.isRawSvg && h.visualScore >= 8
+    );
+    if (!signal.aborted && !hasStrongVerifiedRaster && prefiltered.length > 2) {
+      const nextBatch = await evaluateBatch(prefiltered.slice(2, 4));
+      scoredHits = [...scoredHits, ...nextBatch];
+    }
+    const hasAnyVerifiedRaster = scoredHits.some((h) => h.imageVerified && !h.isRawSvg);
+    if (!signal.aborted && !hasAnyVerifiedRaster && prefiltered.length > 4) {
+      const fallbackBatch = await evaluateBatch(prefiltered.slice(4, 6));
+      scoredHits = [...scoredHits, ...fallbackBatch];
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return null;
     }
   }
 
-  for (const fallbackEntry of [bestRasterFallback, bestSvgFallback]) {
-    if (!fallbackEntry) continue;
-    if (fallbackEntry.keys.some((k) => usedImageKeys.has(k))) continue;
-    for (const k of fallbackEntry.keys) usedImageKeys.add(k);
+  if (signal.aborted || scoredHits.length === 0) return null;
 
-    const alternatives = availableCandidates.filter((alt) => {
-      if (alt.id === fallbackEntry.cand.id) return true;
+  // Strict "Sem Imagem > Imagem Ruim": NEVER auto-attach unverified Web/Google images
+  const eligibleHits = scoredHits.filter((h) => h.cand.fromMaterial || h.imageVerified);
+  if (eligibleHits.length === 0) return null;
+
+  eligibleHits.sort((a, b) => {
+    if (a.imageVerified !== b.imageVerified) return a.imageVerified ? -1 : 1;
+    if (a.isRawSvg !== b.isRawSvg) return a.isRawSvg ? 1 : -1;
+    return b.compositeScore - a.compositeScore;
+  });
+
+  for (const winner of eligibleHits) {
+    if (winner.keys.some((k) => usedImageKeys.has(k))) continue;
+    for (const k of winner.keys) usedImageKeys.add(k);
+
+    const alternatives = orderedAvailable.filter((alt) => {
+      if (alt.id === winner.cand.id) return true;
       const altKeys = getImageCandidateTrackingKeys(alt);
       return !altKeys.some((k) => usedImageKeys.has(k));
     });
 
     return {
-      chosen: fallbackEntry.cand,
-      visualLegend: fallbackEntry.visualLegend,
-      imageVerified: fallbackEntry.imageVerified,
+      chosen: winner.cand,
+      visualLegend: winner.visualLegend,
+      imageVerified: winner.imageVerified,
       alternatives: alternatives.slice(0, 6),
       hadRejection,
     };
@@ -250,13 +303,16 @@ export function useImageAutoResolver(params: {
   }, []);
 
   const autoResolveDeckMissingImages = useCallback(
-    async (targetCards: CanonicalCard[], availableNames: string[] = []) => {
+    async (
+      targetCards: CanonicalCard[],
+      availableNames: string[] = []
+    ): Promise<CanonicalCard[]> => {
       cancelAutoResolve();
 
       const cardsNeedingWebImage = targetCards.filter(
         (c) => extractUnresolvedLocalImages(c, availableNames).length > 0
       );
-      if (cardsNeedingWebImage.length === 0) return;
+      if (cardsNeedingWebImage.length === 0) return targetCards;
 
       const runId = ++activeRunIdRef.current;
       const controller = new AbortController();
@@ -267,6 +323,10 @@ export function useImageAutoResolver(params: {
 
       setIsAutoResolvingImages(true);
       const pendingIds = new Set(cardsNeedingWebImage.map((c) => c.id));
+      const updatedMap = new Map<number, CanonicalCard>(
+        targetCards.map((c) => [c.id, c])
+      );
+
       setCards((prev) =>
         prev.map((c) => (pendingIds.has(c.id) ? { ...c, isResolvingImage: true } : c))
       );
@@ -333,34 +393,33 @@ export function useImageAutoResolver(params: {
             if (picked) {
               resolvedCount++;
               cardUpdated = true;
-              setCards((prev) =>
-                prev.map((c) =>
-                  c.id === card.id
-                    ? {
-                        ...applyResolvedWebImageToCard(
-                          c,
-                          targetRef.filename,
-                          picked.chosen,
-                          picked.alternatives,
-                          picked.visualLegend || undefined
-                        ),
-                        imageVerified: picked.imageVerified,
-                      }
-                    : c
-                )
-              );
+              const nextCard: CanonicalCard = {
+                ...applyResolvedWebImageToCard(
+                  card,
+                  targetRef.filename,
+                  picked.chosen,
+                  picked.alternatives,
+                  picked.visualLegend || undefined
+                ),
+                imageVerified: picked.imageVerified,
+                needsManualImage: false,
+                isResolvingImage: false,
+              };
+              updatedMap.set(card.id, nextCard);
+              setCards((prev) => prev.map((c) => (c.id === card.id ? nextCard : c)));
             } else {
               // If no valid/compatible image passed validation (or only synthetic placeholders existed),
-              // strip the placeholder cleanly instead of forcing a conflicting image.
+              // strip the placeholder cleanly AND mark needsManualImage so user can pick from Apostila Gallery.
               leftTextOnlyCount++;
               cardUpdated = true;
-              setCards((prev) =>
-                prev.map((c) => {
-                  if (c.id !== card.id) return c;
-                  const cleaned = removeMissingMediaFromCard(c, availableNames);
-                  return { ...cleaned, isResolvingImage: false };
-                })
-              );
+              const cleaned = removeMissingMediaFromCard(card, availableNames);
+              const nextCard: CanonicalCard = {
+                ...cleaned,
+                isResolvingImage: false,
+                needsManualImage: true,
+              };
+              updatedMap.set(card.id, nextCard);
+              setCards((prev) => prev.map((c) => (c.id === card.id ? nextCard : c)));
             }
           } finally {
             if (!cardUpdated) {
@@ -392,7 +451,7 @@ export function useImageAutoResolver(params: {
           setIsAutoResolvingImages(false);
           if (resolvedCount > 0 && leftTextOnlyCount > 0) {
             showStatus(
-              `${resolvedCount} imagem(ns) validadas por visão computacional (1 por card); ${leftTextOnlyCount} card(s) mantido(s) apenas em texto por falta de correspondência compatível.`,
+              `${resolvedCount} imagem(ns) validadas por visão computacional (1 por card); ${leftTextOnlyCount} card(s) sinalizado(s) para escolha manual na Apostila.`,
               'success'
             );
           } else if (resolvedCount > 0) {
@@ -402,12 +461,14 @@ export function useImageAutoResolver(params: {
             );
           } else if (leftTextOnlyCount > 0) {
             showStatus(
-              `${leftTextOnlyCount} card(s) mantido(s) sem imagem após auditoria multimodal para evitar figuras incompatíveis.`,
+              `${leftTextOnlyCount} card(s) sinalizado(s) para escolha manual na Apostila para evitar imagens incompatíveis.`,
               'info'
             );
           }
         }
       }
+
+      return targetCards.map((c) => updatedMap.get(c.id) || c);
     },
     [cancelAutoResolve, materialImages, selectedModel, setCards, showStatus]
   );
@@ -487,7 +548,7 @@ export function useImageAutoResolver(params: {
         let attachedCount = 0;
         let matUsedCount = 0;
         let cursor = 0;
-        const CONCURRENCY = 2;
+        const CONCURRENCY = 3;
 
         const worker = async () => {
           while (cursor < suggestions.length) {

@@ -206,8 +206,8 @@ function drawPdfImageToCanvas(
 export async function extractImagesFromPdfBuffer(
   buffer: ArrayBuffer,
   pdfName: string,
-  maxPages = 55,
-  maxTotalImages = 45
+  maxPages = 220,
+  maxTotalImages = 300
 ): Promise<PdfExtractedImage[]> {
   if (typeof document === 'undefined' || !buffer || buffer.byteLength === 0) {
     return [];
@@ -254,6 +254,9 @@ export async function extractImagesFromPdfBuffer(
       const captionMatches = collectPageCaptionMatches(pageText);
       const opList = await page.getOperatorList().catch(() => null);
       const imageObjNames = new Set<string>();
+      const inlineImageObjs: RawPdfImageObj[] = [];
+      let formXObjectCount = 0;
+      let pathDrawCount = 0;
 
       if (opList) {
         for (let i = 0; i < opList.fnArray.length; i++) {
@@ -266,11 +269,27 @@ export async function extractImagesFromPdfBuffer(
             if (typeof name === 'string') {
               imageObjNames.add(name);
             }
+          } else if (fn === pdfjsLib.OPS.paintInlineImageXObject) {
+            const inlineObj = opList.argsArray[i]?.[0] as RawPdfImageObj | undefined;
+            if (inlineObj && (inlineObj.data || inlineObj.bitmap)) {
+              inlineImageObjs.push(inlineObj);
+            }
+          } else if (fn === pdfjsLib.OPS.paintFormXObjectBegin) {
+            formXObjectCount++;
+          } else if (
+            fn === pdfjsLib.OPS.constructPath ||
+            fn === pdfjsLib.OPS.stroke ||
+            fn === pdfjsLib.OPS.fill
+          ) {
+            pathDrawCount++;
           }
         }
       }
 
+      const hasVectorDiagramOps = formXObjectCount >= 1 || pathDrawCount >= 14;
       const candidates: RawPdfPageImageCandidate[] = [];
+      let figIdx = 0;
+
       if (imageObjNames.size > 0) {
         const vpLow = page.getViewport({ scale: 0.65 });
         const hiddenCanvas = document.createElement('canvas');
@@ -283,7 +302,6 @@ export async function extractImagesFromPdfBuffer(
             .promise.catch(() => undefined);
         }
 
-        let figIdx = 0;
         for (const objName of imageObjNames) {
           let imgObj = await getPageObjectWithTimeout(page.objs, objName, 2500);
           if (!imgObj && page.commonObjs) {
@@ -313,16 +331,66 @@ export async function extractImagesFromPdfBuffer(
         }
       }
 
-      // Pre-render vector/flowchart slide crop when <= 6 embedded XObjects exist (e.g. header/footer logos/watermarks)
-      // so Phase 2 can activate fallback cleanly after watermark signatures are filtered.
-      let fallbackCropCandidate: RawPdfPageImageCandidate | null = null;
-      if (
-        candidates.length <= 6 &&
-        hasClinicalFigurePageKeyword(pageText) &&
-        pageText.length < 4200
-      ) {
-        const vp = page.getViewport({ scale: 1.25 });
-        if (vp.width > 0 && vp.height > 0 && vp.width <= 2000 && vp.height <= 2200) {
+      for (const inlineObj of inlineImageObjs) {
+        const encoded = drawPdfImageToCanvas(inlineObj, 1050);
+        if (!encoded) continue;
+
+        figIdx++;
+        totalRawCandidates++;
+        candidates.push({
+          id: `pdf_${cleanBase}_p${pageNum}_f${figIdx}`,
+          pdfName,
+          pageNumber: pageNum,
+          width: encoded.width,
+          height: encoded.height,
+          dataUrl: encoded.dataUrl,
+          pageTextSnippet: '',
+          captionHint: '',
+          suggestedFilename: `${cleanBase}_p${pageNum}_fig${figIdx}.jpg`,
+          kind: 'embedded',
+          signature: encoded.signature,
+          byteLengthHint: encoded.dataUrl.length,
+        });
+      }
+
+      // Defer page_crop rendering until cross-page watermark counts are known across the whole PDF
+      pageBuffers.push({
+        pageNumber: pageNum,
+        pageText,
+        captionMatches,
+        candidates,
+        fallbackCropCandidate: null,
+        hasVectorDiagramOps,
+      });
+
+      page.cleanup();
+    }
+
+    // Compute cross-page watermark frequency (`pageCount >= 3`) BEFORE closing pdfDoc so pages
+    // whose >8 XObjects were all repeated logos/icons still receive an on-demand vector/table page_crop!
+    const rawSigPages = new Map<string, Set<number>>();
+    for (const pb of pageBuffers) {
+      for (const cand of pb.candidates) {
+        const set = rawSigPages.get(cand.signature) || new Set<number>();
+        set.add(pb.pageNumber);
+        rawSigPages.set(cand.signature, set);
+      }
+    }
+
+    for (const pb of pageBuffers) {
+      const survivingCount = pb.candidates.filter(
+        (cand) => (rawSigPages.get(cand.signature)?.size || 1) < 3
+      ).length;
+      const needsPageCrop =
+        hasClinicalFigurePageKeyword(pb.pageText) &&
+        pb.pageText.length < 12000 &&
+        (survivingCount === 0 || (Boolean(pb.hasVectorDiagramOps) && survivingCount <= 1));
+      if (!needsPageCrop) continue;
+
+      try {
+        const page = await pdfDoc.getPage(pb.pageNumber);
+        const vp = page.getViewport({ scale: 1.35 });
+        if (vp.width > 0 && vp.height > 0 && vp.width <= 2200 && vp.height <= 2500) {
           const pCanvas = document.createElement('canvas');
           pCanvas.width = Math.round(vp.width);
           pCanvas.height = Math.round(vp.height);
@@ -333,34 +401,27 @@ export async function extractImagesFromPdfBuffer(
             await page
               .render({ canvasContext: pCtx, canvas: pCanvas, viewport: vp })
               .promise.catch(() => undefined);
-            const dataUrl = pCanvas.toDataURL('image/jpeg', 0.82);
-            fallbackCropCandidate = {
-              id: `pdf_${cleanBase}_p${pageNum}_page`,
+            const dataUrl = pCanvas.toDataURL('image/jpeg', 0.84);
+            pb.fallbackCropCandidate = {
+              id: `pdf_${cleanBase}_p${pb.pageNumber}_page`,
               pdfName,
-              pageNumber: pageNum,
+              pageNumber: pb.pageNumber,
               width: pCanvas.width,
               height: pCanvas.height,
               dataUrl,
-              pageTextSnippet: pageText.slice(0, 1000),
-              captionHint: extractCaptionHint(pageText, 0, 1),
-              suggestedFilename: `${cleanBase}_p${pageNum}_slide.jpg`,
+              pageTextSnippet: pb.pageText.slice(0, 1000),
+              captionHint: extractCaptionHint(pb.pageText, 0, 1),
+              suggestedFilename: `${cleanBase}_p${pb.pageNumber}_slide.jpg`,
               kind: 'page_crop',
-              signature: `page_${pageNum}_${pCanvas.width}x${pCanvas.height}`,
+              signature: `page_${pb.pageNumber}_${pCanvas.width}x${pCanvas.height}`,
               byteLengthHint: dataUrl.length,
             };
           }
         }
+        page.cleanup();
+      } catch {
+        // Non-fatal fallback skip for this page
       }
-
-      pageBuffers.push({
-        pageNumber: pageNum,
-        pageText,
-        captionMatches,
-        candidates,
-        fallbackCropCandidate,
-      });
-
-      page.cleanup();
     }
 
     await loadingTask.destroy();
@@ -370,4 +431,80 @@ export async function extractImagesFromPdfBuffer(
   }
 
   return assignCaptionsAndFilterWatermarks(pageBuffers, maxTotalImages);
+}
+
+export function base64ToArrayBuffer(base64Data: string): ArrayBuffer {
+  const clean = (base64Data || '').includes(',') ? base64Data.split(',')[1] : base64Data;
+  const binary = atob(clean);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+export async function getPdfDocumentPageCount(buffer: ArrayBuffer): Promise<number> {
+  if (!buffer || buffer.byteLength === 0) return 0;
+  ensurePdfWorker();
+  const wasmUrl =
+    typeof window !== 'undefined' && window.location?.origin
+      ? new URL('/pdfjs-wasm/', window.location.origin).href
+      : undefined;
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buffer.slice(0)),
+    ...(wasmUrl ? { wasmUrl } : {}),
+  });
+  try {
+    const pdfDoc = await loadingTask.promise;
+    return pdfDoc.numPages;
+  } finally {
+    await loadingTask.destroy().catch(() => undefined);
+  }
+}
+
+export async function renderPdfPageToCanvas(
+  buffer: ArrayBuffer,
+  pageNumber: number,
+  canvas: HTMLCanvasElement,
+  scale = 1.5
+): Promise<{ width: number; height: number; pageText: string; numPages: number }> {
+  ensurePdfWorker();
+  const wasmUrl =
+    typeof window !== 'undefined' && window.location?.origin
+      ? new URL('/pdfjs-wasm/', window.location.origin).href
+      : undefined;
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buffer.slice(0)),
+    ...(wasmUrl ? { wasmUrl } : {}),
+  });
+  try {
+    const pdfDoc = await loadingTask.promise;
+    const safePage = Math.max(1, Math.min(pageNumber, pdfDoc.numPages));
+    const page = await pdfDoc.getPage(safePage);
+    const vp = page.getViewport({ scale });
+    canvas.width = Math.max(1, Math.round(vp.width));
+    canvas.height = Math.max(1, Math.round(vp.height));
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, canvas, viewport: vp }).promise;
+    }
+    const textContent = await page.getTextContent().catch(() => ({ items: [] }));
+    const pageText = (textContent.items as Array<{ str?: string }>)
+      .map((it) => it.str || '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    page.cleanup();
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      pageText,
+      numPages: pdfDoc.numPages,
+    };
+  } finally {
+    await loadingTask.destroy().catch(() => undefined);
+  }
 }

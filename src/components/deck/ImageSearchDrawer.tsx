@@ -30,6 +30,7 @@ interface ImageSearchDrawerProps {
     suggestedFilename?: string
   ) => void;
   onRemoveCardImages: (card: CanonicalCard) => void;
+  onOpenPdfGallery?: (cardId: number, tab?: 'extracted' | 'browse') => void;
   onClose: () => void;
 }
 
@@ -56,6 +57,7 @@ export const ImageSearchDrawer: React.FC<ImageSearchDrawerProps> = ({
   onSearchSubmit,
   onAttachImage,
   onRemoveCardImages,
+  onOpenPdfGallery,
   onClose,
 }) => {
   const currentSrcSet = new Set(
@@ -240,6 +242,15 @@ export const ImageSearchDrawer: React.FC<ImageSearchDrawerProps> = ({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {onOpenPdfGallery && (
+            <button
+              type="button"
+              onClick={() => onOpenPdfGallery(card.id, 'browse')}
+              className="px-2.5 py-1 text-[11px] font-semibold text-indigo-200 bg-indigo-950/70 hover:bg-indigo-900/80 border border-indigo-700/70 rounded cursor-pointer"
+            >
+              Galeria / Recortar PDF
+            </button>
+          )}
           {hasAnyImage && (
             <button
               type="button"

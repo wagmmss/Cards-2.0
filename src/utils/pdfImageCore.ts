@@ -26,11 +26,12 @@ export interface RawPdfPageBuffer {
   captionMatches: CaptionMatch[];
   candidates: RawPdfPageImageCandidate[];
   fallbackCropCandidate?: RawPdfPageImageCandidate | null;
+  hasVectorDiagramOps?: boolean;
 }
 
 export function hasClinicalFigurePageKeyword(pageText: string): boolean {
   if (!pageText) return false;
-  return /(?:\bfig\.?(?=\s*\d|\s|:|\b)|\b(?:figura|imagem|ecg|eletrocardiograma|tra[çc]ado|rx|radiografia|tomografia|ultrassom|ultrassonografia|usg|videolaparoscopia|laparoscopia|ctg|cardiotocografia|algoritmo|fluxograma|partograma|leopold|mcroberts|pelvimetria|hodge|de\s+lee|sinclitismo|est[áa]tica\s+fetal|mecanismo\s+de\s+parto|f[óo]rceps|v[áa]cuo\s+extrator|distocia|manobra)\b)/i.test(
+  return /(?:\bfig\.?(?=\s*\d|\s|:|\b)|\b(?:figura|imagem|quadro|tabela|escore|crit[eé]rios|ecg|eletrocardiograma|tra[çc]ado|supradesnivelamento|arritmia|rx|radiografia|tomografia|ultrassom|ultrassonografia|usg|videolaparoscopia|laparoscopia|ctg|cardiotocografia|algoritmo|fluxograma|partograma|leopold|mcroberts|pelvimetria|hodge|de\s+lee|sinclitismo|est[áa]tica\s+fetal|mecanismo\s+de\s+parto|f[óo]rceps|v[áa]cuo\s+extrator|distocia|manobra)\b)/i.test(
     pageText
   );
 }
@@ -121,12 +122,12 @@ export function extractCaptionHint(pageText: string, figZeroIdx = 0, totalFigs =
 /**
  * Pure Phase-2 post-processor: computes cross-page watermark signatures (`pageCount >= 3`) first,
  * activates vector/slide `page_crop` fallback when a clinical figure page has zero surviving embedded
- * images after watermark removal, and then assigns sequential `figZeroIdx` captions ONLY to surviving
- * images so institution logos never steal Figure 1/2 captions.
+ * images (or vector diagrams with minimal embedded raster clutter) after watermark removal, and then
+ * assigns sequential `figZeroIdx` captions ONLY to surviving images so institution logos never steal Figure 1/2 captions.
  */
 export function assignCaptionsAndFilterWatermarks(
   pageBuffers: RawPdfPageBuffer[],
-  maxTotalImages = 45
+  maxTotalImages = 300
 ): PdfExtractedImage[] {
   const sigPages = new Map<string, Set<number>>();
   for (const pageBuf of pageBuffers) {
@@ -167,12 +168,14 @@ export function assignCaptionsAndFilterWatermarks(
       survivingOnPage.push(item);
     }
 
-    if (
-      nonWatermarkCandidates.length === 0 &&
-      pageBuf.fallbackCropCandidate &&
+    const shouldActivatePageCrop =
+      Boolean(pageBuf.fallbackCropCandidate) &&
       hasClinicalFigurePageKeyword(pageBuf.pageText) &&
-      pageBuf.pageText.length < 4200
-    ) {
+      pageBuf.pageText.length < 12000 &&
+      (nonWatermarkCandidates.length === 0 ||
+        (Boolean(pageBuf.hasVectorDiagramOps) && nonWatermarkCandidates.length <= 1));
+
+    if (shouldActivatePageCrop && pageBuf.fallbackCropCandidate) {
       survivingOnPage.push(pageBuf.fallbackCropCandidate);
     }
 

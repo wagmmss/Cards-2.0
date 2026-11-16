@@ -415,12 +415,62 @@ test('Express routes: /api/gemini MAX_TOKENS split stride, cross-key PDF upload/
             })
           );
         }
+        if (contentsStr.includes('Card Vision Throw')) {
+          return new Response(
+            JSON.stringify({ error: { code: 400, message: 'Bad image input' } }),
+            { status: 400, headers: { 'content-type': 'application/json' } }
+          );
+        }
         return makeGeminiSseResponse(
           JSON.stringify({
             detectedModality: 'ctg',
             isCompatible: true,
             conflictReason: '',
             visualLegend: 'Legenda visual: Cardiotocografia evidenciando desaceleração tardia repetida após contração.',
+          })
+        );
+      }
+
+      // audit-deck scenario
+      if (contentsStr.includes('CARDS EXISTENTES PARA JULGAMENTO')) {
+        return makeGeminiSseResponse(
+          JSON.stringify({
+            overallSummary: '1 card bom e 1 card fraco para refazer do zero.',
+            items: [
+              {
+                cardId: 171000701,
+                verdict: 'keep',
+                score: 9,
+                reason: 'Decisão atômica e precisa.',
+                targetConcept: 'Conduta na parada secundária',
+                priority: 'P1',
+                suggestedType: 'basic',
+              },
+              {
+                cardId: 171000702,
+                verdict: 'rebuild',
+                score: 3,
+                reason: 'Pergunta vaga sem critério.',
+                targetConcept: 'Critério de fase ativa prolongada no partograma',
+                priority: 'P1',
+                suggestedType: 'basic',
+              },
+            ],
+          })
+        );
+      }
+
+      // verify-deck scenario
+      if (contentsStr.includes('BARALHO FINAL MONTADO')) {
+        return makeGeminiSseResponse(
+          JSON.stringify({
+            overallScore: 9,
+            approved: true,
+            mapCoveragePct: 95,
+            summary: 'Baralho completo e bem estruturado segundo Matuschak & Nielsen.',
+            clinicalAccuracyNotes: ['Doses e critérios obstétricos atualizados.'],
+            missingConcepts: [],
+            weakCardFixes: [],
           })
         );
       }
@@ -634,6 +684,93 @@ test('Express routes: /api/gemini MAX_TOKENS split stride, cross-key PDF upload/
     false,
     'Redirect SSRF target 127.0.0.1 must never be fetched'
   );
+  // 5) /api/gemini/audit-deck & /api/gemini/verify-deck & fail-closed /validate-image on Gemini failure
+  process.env.GEMINI_API_KEYS = 'mock-test-key-primary-0001';
+  const auditResp = (await (
+    await originalFetch(`${baseUrl}/api/gemini/audit-deck`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        deckKey: 'assistencia_parto',
+        cards: [
+          {
+            id: 171000701,
+            type: 'basic',
+            topic: 'Parto - Parada Secundária da Dilatação',
+            question: 'Parturiente em fase ativa com dilatação cervical mantida há 2 horas e contrações eficazes. Qual o diagnóstico intraparto?',
+            answer: 'Parada secundária da dilatação.',
+            hint: '<b>Comentário:</b> A <b>parada secundária da dilatação</b> exige 2 horas de dilatação estacionária na fase ativa com dinâmica adequada, diferente da <b>fase ativa prolongada</b>.',
+          },
+          { id: 171000702, type: 'basic', topic: 'Parto - Fase', question: 'O que fazer?', answer: 'Conduta.', hint: 'H' },
+        ],
+      }),
+    })
+  ).json()) as { counts?: { keep: number; rebuild: number }; items?: Array<Record<string, unknown>> };
+  assert.equal(auditResp.counts?.keep, 1);
+  assert.equal(auditResp.counts?.rebuild, 1);
+  assert.equal(auditResp.items?.length, 2);
+
+  const verifyResp = (await (
+    await originalFetch(`${baseUrl}/api/gemini/verify-deck`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        deckKey: 'assistencia_parto',
+        cards: [{ id: 171000701, type: 'basic', topic: 'Parto - Parada', question: 'Q?', answer: 'A.', hint: '<b>Comentário:</b> H.' }],
+      }),
+    })
+  ).json()) as { overallScore?: number; approved?: boolean; mapCoveragePct?: number };
+  assert.equal(verifyResp.overallScore, 9);
+  assert.equal(verifyResp.approved, true);
+  assert.equal(verifyResp.mapCoveragePct, 95);
+
+  const visionThrowVal = (await (
+    await originalFetch(`${baseUrl}/api/gemini/validate-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        imageSource: 'https://img.example.org/valid.png',
+        cardQuestion: 'Card Vision Throw',
+      }),
+    })
+  ).json()) as Record<string, unknown>;
+  assert.equal(visionThrowVal.validated, false);
+  assert.equal(visionThrowVal.isCompatible, false);
+  delete process.env.GEMINI_API_KEYS;
+});
+
+test('buildFullCardsDigest suppresses weak old Q/A/Hint for rebuild/split cards while preserving ID and valid images', async () => {
+  const { buildFullCardsDigest } = await import('./geminiClient');
+  const digest = buildFullCardsDigest([
+    {
+      id: 171000801,
+      type: 'basic',
+      topic: 'Parto - Vago',
+      question: 'TEXTO_ANTIGO_FRACO_NAO_COPIAR',
+      answer: 'RESPOSTA_ANTIGA_VAGA',
+      hint: '<img src="parto_fig1.jpg"><br><i>Legenda</i><br><br><b>Comentário:</b> ANTIGO_RUIM',
+      auditVerdict: 'rebuild',
+      auditReason: 'Enunciado vago e sem caso clínico.',
+      auditTargetConcept: 'Critério exato de fase ativa prolongada',
+      auditSuggestedType: 'basic',
+    },
+    {
+      id: 171000802,
+      type: 'cloze',
+      topic: 'Parto - Bom',
+      question: 'MANTEM_TEXTO_ORIGINAL {{c1::ocitocina}}.',
+      answer: '',
+      hint: '<b>Comentário:</b> MANTEM_HINT.',
+      auditVerdict: 'keep',
+    },
+  ]);
+
+  assert.equal(digest.includes('ID:171000801'), true);
+  assert.equal(digest.includes('REFAZER DO ZERO'), true);
+  assert.equal(digest.includes('TEXTO_ANTIGO_FRACO_NAO_COPIAR'), false);
+  assert.equal(digest.includes('RESPOSTA_ANTIGA_VAGA'), false);
+  assert.equal(digest.includes('parto_fig1.jpg'), true);
+  assert.equal(digest.includes('MANTEM_TEXTO_ORIGINAL'), true);
 });
 
 test('Deleted legacy component DeckToolbar.tsx does not exist on disk', () => {
@@ -686,5 +823,120 @@ test('parseOrRecoverClinicalMapJson recovers valid items from truncated /clinica
     ),
     'Ficha_Resumo_-_Pré-Natal_p8_fig1.png'
   );
+});
+
+test('applyDeterministicAuditGuard downgrades false keep verdicts on vague, orphan-visual, empty-answer, or short-comment cards', async () => {
+  const { applyDeterministicAuditGuard } = await import('./routes/gemini');
+
+  const vagueKeep = applyDeterministicAuditGuard(
+    {
+      id: 171009951,
+      type: 'basic',
+      priority: 'P1',
+      topic: 'Cardiologia - FA',
+      question: 'Paciente em PS com fibrilação atrial aguda. Qual é o manejo?',
+      answer: 'Controle de frequência.',
+      hint: '<b>Comentário:</b> O <b>controle de frequência cardíaca</b> com betabloqueador reduz sintomas na fase aguda sem instabilidade hemodinâmica.',
+    },
+    {
+      cardId: 171009951,
+      verdict: 'keep',
+      score: 9,
+      reason: 'Card bom',
+      targetConcept: 'FA aguda',
+      priority: 'P1',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(vagueKeep.verdict, 'rebuild');
+  assert.ok(vagueKeep.score <= 5);
+
+  const orphanVisualKeep = applyDeterministicAuditGuard(
+    {
+      id: 171009952,
+      type: 'basic',
+      priority: 'P1',
+      topic: 'Cardiologia - ECG',
+      question: 'Analise o ECG abaixo e identifique a parede acometida.',
+      answer: 'Parede anterior.',
+      hint: '<b>Comentário:</b> O <b>supradesnivelamento de V1-V4</b> traduz oclusão da artéria descendente anterior proximal com necessidade de angioplastia imediata.',
+    },
+    {
+      cardId: 171009952,
+      verdict: 'keep',
+      score: 8,
+      reason: 'Card bom',
+      targetConcept: 'IAM anterior',
+      priority: 'P1',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(orphanVisualKeep.verdict, 'rebuild');
+  assert.ok(orphanVisualKeep.score <= 5);
+
+  const shortHintKeep = applyDeterministicAuditGuard(
+    {
+      id: 171009953,
+      type: 'basic',
+      priority: 'P2',
+      topic: 'Cardiologia - Flutter',
+      question: 'Qual a frequência atrial típica no flutter atrial típico no ECG de 12 derivações?',
+      answer: 'Aproximadamente 300 bpm.',
+      hint: '<b>Comentário:</b> Frequência em torno de 300 bpm.',
+    },
+    {
+      cardId: 171009953,
+      verdict: 'keep',
+      score: 8,
+      reason: 'Ok',
+      targetConcept: 'Flutter atrial',
+      priority: 'P2',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(shortHintKeep.verdict, 'rebuild');
+  assert.ok(shortHintKeep.score <= 5);
+});
+
+test('generateContentWithRetry skips duplicate primary retries on 429 and routes subsequent calls directly to fallback during cooldown', async () => {
+  const { generateContentWithRetry, PRIMARY_GEMINI_MODEL, FALLBACK_GEMINI_MODEL } = await import(
+    './geminiClient'
+  );
+
+  const calledModels: string[] = [];
+  const fakeAi = {
+    models: {
+      generateContentStream: async (req: { model: string }) => {
+        calledModels.push(req.model);
+        if (req.model === PRIMARY_GEMINI_MODEL) {
+          throw new Error(
+            '429 RESOURCE_EXHAUSTED: GenerateRequestsPerMinutePerProjectPerModel-FreeTier, limit: 5, Please retry in 15.0s.'
+          );
+        }
+        return (async function* () {
+          yield { text: '{"ok":true}', candidates: [{ finishReason: 'STOP' }] };
+        })();
+      },
+    },
+  } as unknown as Parameters<typeof generateContentWithRetry>[0];
+
+  const first = await generateContentWithRetry(
+    fakeAi,
+    { model: PRIMARY_GEMINI_MODEL, contents: 'ping' },
+    { enableModelFallback: true, timeoutMs: 5000 }
+  );
+  assert.equal(first.modelUsed, FALLBACK_GEMINI_MODEL);
+  // Should try primary ONCE, jump immediately to fallback (NOT retry primary a 2nd time)
+  assert.deepEqual(calledModels, [PRIMARY_GEMINI_MODEL, FALLBACK_GEMINI_MODEL]);
+
+  // Second call during cooldown skips cooled primary completely without hitting 429 again
+  calledModels.length = 0;
+  const second = await generateContentWithRetry(
+    fakeAi,
+    { model: PRIMARY_GEMINI_MODEL, contents: 'ping2' },
+    { enableModelFallback: true, timeoutMs: 5000 }
+  );
+  assert.equal(second.modelUsed, FALLBACK_GEMINI_MODEL);
+  assert.deepEqual(calledModels, [FALLBACK_GEMINI_MODEL]);
 });
 
