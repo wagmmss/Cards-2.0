@@ -261,10 +261,11 @@ async function pickValidatedUniqueCandidate(params: {
 export function useImageAutoResolver(params: {
   materialImages: PdfExtractedImage[];
   selectedModel?: GeminiModelOption;
+  deckKey?: string;
   setCards: React.Dispatch<React.SetStateAction<CanonicalCard[]>>;
   showStatus: (message: string, tone?: 'info' | 'success' | 'error') => void;
 }) {
-  const { materialImages, selectedModel, setCards, showStatus } = params;
+  const { materialImages, selectedModel, deckKey, setCards, showStatus } = params;
   const [isAutoResolvingImages, setIsAutoResolvingImages] = useState(false);
   const [isSuggestingVisuals, setIsSuggestingVisuals] = useState(false);
 
@@ -371,6 +372,7 @@ export function useImageAutoResolver(params: {
                 question: cleanQuestion,
                 answer: cleanAnswer,
                 hint: cleanHint,
+                deckKey: sanitizeDeckKey(deckKey || 'internato_deck'),
                 preferGoogleGrounding: true,
               },
               controller.signal
@@ -578,6 +580,7 @@ export function useImageAutoResolver(params: {
                 question: cleanQ,
                 answer: cleanA,
                 hint: cleanH,
+                deckKey: cleanDeck,
                 preferGoogleGrounding: true,
               },
               controller.signal

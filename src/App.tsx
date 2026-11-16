@@ -93,6 +93,23 @@ export default function App() {
   }>({ open: false, cardId: null, tab: 'extracted' });
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<'info' | 'success' | 'error'>('info');
+  const [blockedImageFilenames, setBlockedImageFilenames] = useState<string[]>([]);
+
+  const handleBlockImageFilename = useCallback((rawSrc: string) => {
+    const clean = String(rawSrc || '')
+      .trim()
+      .split('?')[0]
+      .split('#')[0]
+      .split(/[\\/]/)
+      .pop()
+      ?.toLowerCase();
+    if (!clean) return;
+    setBlockedImageFilenames((prev) => (prev.includes(clean) ? prev : [...prev, clean]));
+  }, []);
+
+  const handleClearBlockedImages = useCallback(() => {
+    setBlockedImageFilenames([]);
+  }, []);
 
   const availableMediaNames = useMemo(
     () => Object.keys(localMediaAssets),
@@ -161,6 +178,7 @@ export default function App() {
   } = useImageAutoResolver({
     materialImages,
     selectedModel,
+    deckKey,
     setCards,
     showStatus,
   });
@@ -201,6 +219,7 @@ export default function App() {
     setCards,
     setCurationStats,
     availableMediaNames,
+    blockedImageFilenames,
     autoResolveDeckMissingImages,
     showStatus,
   });
@@ -367,7 +386,12 @@ export default function App() {
       extractedMeta,
       effectiveKey,
       activeMap,
-      { skipTemplateGapAdditions: true }
+      {
+        skipTemplateGapAdditions: true,
+        availableMediaNames,
+        preserveLocalAudio: true,
+        blockedImageFilenames,
+      }
     );
     setCards(curated);
     setCurationStats(stats);
@@ -380,7 +404,11 @@ export default function App() {
 
   const handleAutoRepairSingleCard = (cardId: number) => {
     setCards((prev) =>
-      prev.map((c) => (c.id === cardId ? surgicalRepairCardLocal(c) : c))
+      prev.map((c) =>
+        c.id === cardId
+          ? surgicalRepairCardLocal(c, { availableMediaNames, preserveLocalAudio: true })
+          : c
+      )
     );
   };
 
@@ -717,6 +745,9 @@ export default function App() {
           curationStats={curationStats}
           localMediaAssets={localMediaAssets}
           availableMediaNames={availableMediaNames}
+          blockedImageFilenames={blockedImageFilenames}
+          onBlockImageFilename={handleBlockImageFilename}
+          onClearBlockedImages={handleClearBlockedImages}
           onRemoveMissingMediaFromCard={handleRemoveMissingMediaFromCard}
           onRemoveAllMissingMedia={handleRemoveAllMissingMedia}
           onAutoResolveMissingImages={() =>

@@ -48,6 +48,7 @@ export function useBatchDeckGenerator(params: {
   setCards: React.Dispatch<React.SetStateAction<CanonicalCard[]>>;
   setCurationStats: React.Dispatch<React.SetStateAction<DeckCurationStats | null>>;
   availableMediaNames?: string[];
+  blockedImageFilenames?: string[];
   autoResolveDeckMissingImages: (
     cards: CanonicalCard[],
     names?: string[]
@@ -69,6 +70,7 @@ export function useBatchDeckGenerator(params: {
     setCards,
     setCurationStats,
     availableMediaNames,
+    blockedImageFilenames,
     autoResolveDeckMissingImages,
     showStatus,
   } = params;
@@ -602,7 +604,9 @@ export function useBatchDeckGenerator(params: {
       // Apply audit verdicts: keep intact, prune removed, send rebuild/split/unaudited to LLM
       const keptCards = rawSourceCards
         .filter((c) => c.auditVerdict === 'keep')
-        .map((c) => surgicalRepairCardLocal(c));
+        .map((c) =>
+          surgicalRepairCardLocal(c, { availableMediaNames, preserveLocalAudio: true })
+        );
       const cardsToProcess = rawSourceCards.filter(
         (c) => c.auditVerdict !== 'keep' && c.auditVerdict !== 'prune'
       );
@@ -830,7 +834,12 @@ export function useBatchDeckGenerator(params: {
           extractedMeta,
           effectiveKey,
           activeMap,
-          { skipTemplateGapAdditions: true }
+          {
+            skipTemplateGapAdditions: true,
+            availableMediaNames,
+            preserveLocalAudio: true,
+            blockedImageFilenames,
+          }
         );
         setCards(finalCurated);
         setCurationStats(finalStats);
@@ -1007,7 +1016,12 @@ export function useBatchDeckGenerator(params: {
       extractedMeta,
       effectiveKey,
       activeMap,
-      { skipTemplateGapAdditions: true }
+      {
+        skipTemplateGapAdditions: true,
+        availableMediaNames,
+        preserveLocalAudio: true,
+        blockedImageFilenames,
+      }
     );
     setCards(curatedAndRepaired);
     setCurationStats(stats);
@@ -1135,7 +1149,10 @@ export function useBatchDeckGenerator(params: {
             imageVerified: orig?.imageVerified,
             imageAlternatives: orig?.imageAlternatives,
           };
-          repairedById.set(rc.id, surgicalRepairCardLocal(mergedRaw));
+          repairedById.set(
+            rc.id,
+            surgicalRepairCardLocal(mergedRaw, { availableMediaNames, preserveLocalAudio: true })
+          );
         }
       }
 
@@ -1287,7 +1304,10 @@ export function useBatchDeckGenerator(params: {
           imageVerified: targetCard.imageVerified,
           imageAlternatives: targetCard.imageAlternatives,
         };
-        const finalCard = surgicalRepairCardLocal(mergedRaw);
+        const finalCard = surgicalRepairCardLocal(mergedRaw, {
+          availableMediaNames,
+          preserveLocalAudio: true,
+        });
         const nextDeck = cards.map((c) => (c.id === cardId ? finalCard : c));
         setCards(nextDeck);
 
@@ -1303,7 +1323,10 @@ export function useBatchDeckGenerator(params: {
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
-        const locallyFixed = surgicalRepairCardLocal(targetCard);
+        const locallyFixed = surgicalRepairCardLocal(targetCard, {
+          availableMediaNames,
+          preserveLocalAudio: true,
+        });
         setCards((prev) => prev.map((c) => (c.id === cardId ? locallyFixed : c)));
         const msg = err instanceof Error ? err.message : 'erro inesperado';
         showStatus(
@@ -1499,7 +1522,10 @@ export function useBatchDeckGenerator(params: {
               });
               if (!fixResp?.fallback && Array.isArray(fixResp.repairedCards)) {
                 const fixedById = new Map(
-                  fixResp.repairedCards.map((r) => [r.id, surgicalRepairCardLocal(r)])
+                  fixResp.repairedCards.map((r) => [
+                    r.id,
+                    surgicalRepairCardLocal(r, { availableMediaNames, preserveLocalAudio: true }),
+                  ])
                 );
                 workingCards = workingCards.map((c) =>
                   fixedById.has(c.id) ? { ...c, ...fixedById.get(c.id)! } : c
@@ -1563,7 +1589,12 @@ export function useBatchDeckGenerator(params: {
           extractedMeta,
           effectiveKey,
           activeMap,
-          { skipTemplateGapAdditions: true }
+          {
+            skipTemplateGapAdditions: true,
+            availableMediaNames,
+            preserveLocalAudio: true,
+            blockedImageFilenames,
+          }
         );
         setCards(reCurated);
         setCurationStats(reStats);

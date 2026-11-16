@@ -3652,6 +3652,7 @@ export function curateAndRebalanceDeck(
     skipTemplateGapAdditions?: boolean;
     availableMediaNames?: Iterable<string>;
     preserveLocalAudio?: boolean;
+    blockedImageFilenames?: Iterable<string>;
   }
 ): { cards: CanonicalCard[]; stats: DeckCurationStats } {
   const safeMetadata: ExtractedDeckMetadata = metadata || {
@@ -3680,6 +3681,7 @@ export function curateAndRebalanceDeck(
   const repairOptions = {
     availableMediaNames: options?.availableMediaNames,
     preserveLocalAudio: options?.preserveLocalAudio,
+    blockedImageFilenames: options?.blockedImageFilenames,
   };
   const initialRepaired = inputCards.map((c) => surgicalRepairCardLocal(c, repairOptions));
 

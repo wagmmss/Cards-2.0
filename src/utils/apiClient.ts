@@ -141,6 +141,7 @@ export async function searchMedicalImagesApi(
     question?: string;
     answer?: string;
     hint?: string;
+    deckKey?: string;
     preferGoogleGrounding?: boolean;
   },
   signal?: AbortSignal
@@ -157,6 +158,7 @@ export async function searchMedicalImagesApi(
           question: params.question || '',
           answer: params.answer || '',
           hint: params.hint || '',
+          deckKey: params.deckKey || '',
           preferGoogleGrounding: params.preferGoogleGrounding ?? true,
         }),
         timeoutMs: 32_000,

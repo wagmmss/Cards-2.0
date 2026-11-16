@@ -102,6 +102,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           question: stripHtml(currentCard.question),
           answer: stripHtml(currentCard.answer),
           hint: stripHtml(currentCard.hint),
+          deckKey: cleanDeckKey,
           preferGoogleGrounding: true,
         }),
       });

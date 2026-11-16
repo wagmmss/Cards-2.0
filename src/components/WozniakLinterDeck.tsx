@@ -32,6 +32,7 @@ import {
   lintCard,
   lintDeck,
   resolveLocalMediaFilename,
+  runInternatoSelfAudit,
   stripHtml,
 } from '../utils/wozniakLinter';
 import { CardItem } from './deck/CardItem';
@@ -48,6 +49,9 @@ interface WozniakLinterDeckProps {
   curationStats?: DeckCurationStats | null;
   localMediaAssets?: Record<string, string>;
   availableMediaNames?: string[];
+  blockedImageFilenames?: string[];
+  onBlockImageFilename?: (src: string) => void;
+  onClearBlockedImages?: () => void;
   onRemoveMissingMediaFromCard: (cardId: number) => void;
   onRemoveAllMissingMedia: () => void;
   onAutoResolveMissingImages: () => void;
@@ -96,6 +100,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   curationStats,
   localMediaAssets,
   availableMediaNames = [],
+  blockedImageFilenames = [],
+  onBlockImageFilename,
+  onClearBlockedImages,
   onRemoveMissingMediaFromCard,
   onRemoveAllMissingMedia,
   onAutoResolveMissingImages,
@@ -159,6 +166,14 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const deckAudit = useMemo(
     () => lintDeck(cards, availableMediaNames, cleanDeckKey),
     [cards, availableMediaNames, cleanDeckKey]
+  );
+
+  const internatoAudit = useMemo(
+    () =>
+      runInternatoSelfAudit(cards, availableMediaNames, cleanDeckKey, {
+        blockedImageFilenames,
+      }),
+    [cards, availableMediaNames, cleanDeckKey, blockedImageFilenames]
   );
 
   const lintMap = new Map<number, CardLintResult>();
@@ -295,6 +310,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           question: stripHtml(questionText),
           answer: stripHtml(answerText),
           hint: stripHtml(hintText),
+          deckKey: cleanDeckKey,
           preferGoogleGrounding: true,
         }),
       });
@@ -331,6 +347,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           question: stripHtml(card.question),
           answer: stripHtml(card.answer),
           hint: stripHtml(card.hint),
+          deckKey: cleanDeckKey,
           preferGoogleGrounding: true,
         }),
       });
@@ -466,6 +483,11 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   };
 
   const handleRemoveCardImages = (card: CanonicalCard) => {
+    const removedSrcs = Array.from(
+      `${card.question || ''} ${card.hint || ''}`.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)
+    ).map((m) => m[1]);
+    removedSrcs.forEach((src) => onBlockImageFilename?.(src));
+
     const cleanQ = card.question.replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '').trim();
     const cleanHint = card.hint
       .replace(/\s*(?:<br\s*\/?>\s*)*<img\b[^>]*>/gi, '')
@@ -591,6 +613,59 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
               <span>
                 <strong>{modalityConflictCount}</strong> conflito(s) de modalidade exame×legenda
               </span>
+            )}
+          </div>
+        )}
+
+        {(internatoAudit.internatoWarnings.length > 0 ||
+          internatoAudit.blockedImagesFound.length > 0 ||
+          blockedImageFilenames.length > 0 ||
+          internatoAudit.practicalScenarioCount > 0) && (
+          <div className="px-3.5 py-2 rounded-lg bg-[#0B0F17] border border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300 tabular-nums">
+            <span
+              className={`font-semibold ${
+                internatoAudit.passed ? 'text-emerald-400' : 'text-amber-300'
+              }`}
+            >
+              Autoauditoria Internato-First:
+            </span>
+            <span>
+              Cenários práticos:{' '}
+              <strong className="text-slate-100">{internatoAudit.practicalScenarioCount}</strong>/
+              {cards.length}
+            </span>
+            {internatoAudit.internatoWarnings.length > 0 && (
+              <>
+                <span aria-hidden="true" className="text-slate-600">·</span>
+                <span className="text-amber-300">
+                  <strong>{internatoAudit.internatoWarnings.length}</strong> alerta(s) de raciocínio/R1
+                </span>
+              </>
+            )}
+            {internatoAudit.blockedImagesFound.length > 0 && (
+              <>
+                <span aria-hidden="true" className="text-slate-600">·</span>
+                <span className="text-rose-400 font-medium">
+                  <strong>{internatoAudit.blockedImagesFound.length}</strong> imagem(ns) descartada(s) detectada(s)
+                </span>
+              </>
+            )}
+            {blockedImageFilenames.length > 0 && (
+              <>
+                <span aria-hidden="true" className="text-slate-600">·</span>
+                <span className="text-slate-400">
+                  <strong>{blockedImageFilenames.length}</strong> imagem(ns) bloqueada(s) na sessão
+                  {onClearBlockedImages && (
+                    <button
+                      type="button"
+                      onClick={onClearBlockedImages}
+                      className="ml-1.5 underline text-sky-300 hover:text-sky-200 cursor-pointer"
+                    >
+                      limpar
+                    </button>
+                  )}
+                </span>
+              </>
             )}
           </div>
         )}

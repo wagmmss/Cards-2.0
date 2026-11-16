@@ -1461,6 +1461,36 @@ function lintCard(card, availableMediaNames) {
         message: 'Em cards cloze, o campo "answer" deve ser estritamente vazio ("").'
       });
     }
+    if (/\b(?:[eé]\s+definid[ao]\s+(?:como|pela|por)|corresponde\s+[àa]o?\s+est[áa]gio|comp[õo]e\s+a\s+(?:tr[íi]ade|p[êe]ntade)|s[ãa]o\s+os\s+dois\s+par[âa]metros|classifica-se\s+como)\b/i.test(
+      stripHtml(questionText)
+    )) {
+      warnings.push({
+        code: "CLOZE_DEFINITIONAL_PASSIVE",
+        field: "question",
+        severity: "warning",
+        message: "Cloze definicional passivo detectado: avalie converter em caso cl\xEDnico (basic) de pronto-socorro/enfermaria ou podar se redundante."
+      });
+    }
+  }
+  const plainQuestionText = stripHtml(questionText);
+  const plainAnswerText = stripHtml(answerText);
+  if (cardType === "basic" && /^\s*Por\s+que\b/i.test(plainQuestionText) && !/\b(?:conduta|tratamento|exame|esquema|dose|prescri[çc][ãa]o|cirurgia)\b/i.test(plainQuestionText)) {
+    warnings.push({
+      code: "THEORETICAL_WHY_QUESTION",
+      field: "question",
+      severity: "warning",
+      message: 'Pergunta te\xF3rica "Por que..." sem decis\xE3o cl\xEDnica pr\xE1tica: avalie podar ou converter em conduta de plant\xE3o.'
+    });
+  }
+  if (/\b(?:hepaticojejunostomia|dreno\s+de\s+kehr|ileotiflectomia|ileocecectomia|diverticulectomia|linfadenectomia|csendes|colectomia\s+direita\s+oncol[óo]gica)\b/i.test(
+    `${plainQuestionText} ${plainAnswerText}`
+  )) {
+    warnings.push({
+      code: "POSSIBLE_R1_NICHE",
+      field: "question",
+      severity: "warning",
+      message: "Poss\xEDvel conte\xFAdo de t\xE9cnica operat\xF3ria/subespecialidade R1+: avalie podar pela Doutrina Internato-First."
+    });
   }
   const visibleQuestion = stripHtml(stripClozeMarkup(questionText));
   const qWithoutVf = visibleQuestion.replace(/\[?\s*verdadeiro\s+ou\s+falso\??\s*\]?/gi, "");
@@ -2289,6 +2319,7 @@ function resolveGeminiModel(requestedModel) {
 async function generateContentWithRetry(ai, params, options = {}) {
   const { signal, timeoutMs = 15e4, enableModelFallback = true } = options;
   const baseModel = params.model || PRIMARY_GEMINI_MODEL;
+  const alternateModel = baseModel === FALLBACK_GEMINI_MODEL ? PRIMARY_GEMINI_MODEL : FALLBACK_GEMINI_MODEL;
   const baseThinking = params.config?.thinkingConfig?.thinkingLevel;
   const attemptPlans = [
     { model: baseModel, thinkingLevel: baseThinking, delayBeforeMs: 0 },
@@ -2299,12 +2330,12 @@ async function generateContentWithRetry(ai, params, options = {}) {
     },
     ...enableModelFallback ? [
       {
-        model: FALLBACK_GEMINI_MODEL,
+        model: alternateModel,
         thinkingLevel: ThinkingLevel.MEDIUM,
         delayBeforeMs: 2500
       },
       {
-        model: FALLBACK_GEMINI_MODEL,
+        model: alternateModel,
         thinkingLevel: ThinkingLevel.LOW,
         delayBeforeMs: 3500
       }

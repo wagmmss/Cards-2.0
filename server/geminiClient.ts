@@ -591,6 +591,8 @@ export async function generateContentWithRetry(
   const { signal, timeoutMs = 150_000, enableModelFallback = true } = options;
 
   const baseModel = params.model || PRIMARY_GEMINI_MODEL;
+  const alternateModel =
+    baseModel === FALLBACK_GEMINI_MODEL ? PRIMARY_GEMINI_MODEL : FALLBACK_GEMINI_MODEL;
   const baseThinking = params.config?.thinkingConfig?.thinkingLevel;
 
   const attemptPlans: Array<{
@@ -608,12 +610,12 @@ export async function generateContentWithRetry(
     ...(enableModelFallback
       ? [
           {
-            model: FALLBACK_GEMINI_MODEL,
+            model: alternateModel,
             thinkingLevel: ThinkingLevel.MEDIUM,
             delayBeforeMs: 2500,
           },
           {
-            model: FALLBACK_GEMINI_MODEL,
+            model: alternateModel,
             thinkingLevel: ThinkingLevel.LOW,
             delayBeforeMs: 3500,
           },
