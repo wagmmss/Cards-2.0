@@ -281,7 +281,9 @@ export default function App() {
     }
 
     try {
-      const meta = extractDeckMetadata(text);
+      const meta = extractDeckMetadata(text, {
+        availableMediaNames: Object.keys(localMediaAssets),
+      });
       setJsonError(null);
       setExtractedMeta(meta);
       setCurationStats(null);

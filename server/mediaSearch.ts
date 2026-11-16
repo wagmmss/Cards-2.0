@@ -3,7 +3,9 @@ import {
   extractJsonBlock,
   FALLBACK_GEMINI_MODEL,
   generateContentWithRetry,
+  parseGeminiApiKeys,
 } from './geminiClient';
+import { searchLocalMediaArchive } from './localMediaIndex';
 
 export interface MedicalImageCandidate {
   id: string;
@@ -14,6 +16,7 @@ export interface MedicalImageCandidate {
   suggestedFilename: string;
   defaultLegend: string;
   source: string;
+  fromMaterial?: boolean;
   isSvg?: boolean;
   relevanceScore?: number;
 }
@@ -24,6 +27,7 @@ export interface SearchMedicalImagesContext {
   question?: string;
   answer?: string;
   hint?: string;
+  deckKey?: string;
   preferGoogleGrounding?: boolean;
   signal?: AbortSignal;
 }
@@ -1232,6 +1236,141 @@ Retorne EXCLUSIVAMENTE um array JSON válido com até 5 referências encontradas
  * aplica deduplicação canônica (inclusive resoluções diferentes do mesmo arquivo Wikimedia) e
  * ordena pelo score clínico de relevância (modalidade, léxico PT/EN, confiabilidade da fonte e raster vs SVG).
  */
+async function searchOpeniMedicalImages(
+  enQueries: string[],
+  rawSearch: string,
+  signal?: AbortSignal
+): Promise<MedicalImageCandidate[]> {
+  if (signal?.aborted) return [];
+  const q = (enQueries[0] || rawSearch || '').trim();
+  if (!q) return [];
+
+  try {
+    const url = new URL('https://openi.nlm.nih.gov/api/search');
+    url.searchParams.set('m', '1');
+    url.searchParams.set('n', '8');
+    url.searchParams.set('query', q);
+    if (/\b(x[\s_-]?ray|radiograph|chest)\b/i.test(q)) url.searchParams.set('it', 'x');
+    else if (/\b(ct|computed tomography|tomography)\b/i.test(q)) url.searchParams.set('it', 'c');
+    else if (/\b(mri|magnetic resonance)\b/i.test(q)) url.searchParams.set('it', 'm');
+    else if (/\b(ultrasound|sonography|echocardiogram|doppler)\b/i.test(q)) url.searchParams.set('it', 'u');
+
+    const resp = await fetch(url.toString(), {
+      headers: { 'User-Agent': WIKIMEDIA_USER_AGENT, Accept: 'application/json' },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(7000)]) : AbortSignal.timeout(7000),
+    });
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as {
+      list?: Array<{
+        uid?: string;
+        title?: string;
+        imgLarge?: string;
+        imgThumb?: string;
+        imgGrid150?: string;
+        pmcid?: string;
+        Problems?: string;
+      }>;
+    };
+
+    const results: MedicalImageCandidate[] = [];
+    for (let idx = 0; idx < (data.list || []).length; idx++) {
+      const item = data.list![idx];
+      const rawLarge = (item.imgLarge || item.imgThumb || '').trim();
+      if (!rawLarge) continue;
+      const fullUrl = rawLarge.startsWith('http')
+        ? rawLarge
+        : `https://openi.nlm.nih.gov${rawLarge.startsWith('/') ? '' : '/'}${rawLarge}`;
+      const rawThumb = (item.imgThumb || item.imgGrid150 || rawLarge).trim();
+      const thumbUrl = rawThumb.startsWith('http')
+        ? rawThumb
+        : `https://openi.nlm.nih.gov${rawThumb.startsWith('/') ? '' : '/'}${rawThumb}`;
+
+      if (isSpamOrLogoImageUrl(fullUrl)) continue;
+      const title = (item.title || q).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
+      const baseSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 42);
+      results.push({
+        id: `openi-${item.uid || idx}-${Date.now()}`,
+        title: title || q,
+        thumbUrl,
+        fullUrl,
+        description: (item.Problems || title || `Imagem científica Open-i/NIH referente a ${q}.`).slice(0, 180),
+        suggestedFilename: `openi_${baseSlug || `med_${idx + 1}`}.jpg`,
+        defaultLegend: `Exame médico indexado (Open-i/NIH) compatível com ${q}.`,
+        source: 'Open-i (NLM/NIH)',
+        isSvg: false,
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+async function searchSerperMedicalImages(
+  enQueries: string[],
+  rawSearch: string,
+  signal?: AbortSignal
+): Promise<MedicalImageCandidate[]> {
+  if (signal?.aborted) return [];
+  const apiKey = (process.env.SERPER_API_KEY || '').trim();
+  if (!apiKey) return [];
+
+  const q = (enQueries[0] || rawSearch || '').trim();
+  if (!q) return [];
+
+  try {
+    const resp = await fetch('https://google.serper.dev/images', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ q, num: 8 }),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as {
+      images?: Array<{
+        title?: string;
+        imageUrl?: string;
+        thumbnailUrl?: string;
+        domain?: string;
+        source?: string;
+        imageWidth?: number;
+        imageHeight?: number;
+      }>;
+    };
+
+    const results: MedicalImageCandidate[] = [];
+    for (let idx = 0; idx < (data.images || []).length; idx++) {
+      const item = data.images![idx];
+      const fullUrl = (item.imageUrl || '').trim();
+      if (!fullUrl.startsWith('http') || isSpamOrLogoImageUrl(fullUrl)) continue;
+      if (item.imageWidth && item.imageWidth < 150) continue;
+      const thumbUrl = (item.thumbnailUrl || fullUrl).trim();
+      const title = (item.title || q).replace(/\s+/g, ' ').trim().slice(0, 90);
+      const extMatch = fullUrl.match(/\.(png|jpe?g|webp)(?:\?|$)/i);
+      const ext = extMatch ? `.${extMatch[1].toLowerCase().replace('jpeg', 'jpg')}` : '.jpg';
+      const baseSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 42);
+      const sourceDomain = item.domain || item.source || 'Google Images';
+      results.push({
+        id: `serper-${idx}-${Date.now()}`,
+        title,
+        thumbUrl,
+        fullUrl,
+        description: `Imagem encontrada em ${sourceDomain} referente a ${rawSearch}.`.slice(0, 180),
+        suggestedFilename: `${baseSlug || `google_med_${idx + 1}`}${ext}`,
+        defaultLegend: `Exame ou imagem clínica (${sourceDomain}) referente a ${rawSearch}.`,
+        source: `Google Images Serper (${sourceDomain})`,
+        isSvg: isSvgImageUrl(fullUrl),
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 export async function searchMedicalImages(
   ai: GoogleGenAI | null,
   ctx: SearchMedicalImagesContext
@@ -1246,6 +1385,7 @@ export async function searchMedicalImages(
     question = '',
     answer = '',
     hint = '',
+    deckKey = '',
     preferGoogleGrounding = true,
     signal,
   } = ctx;
@@ -1261,49 +1401,97 @@ export async function searchMedicalImages(
     answer
   );
 
-  const [googleSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
-    preferGoogleGrounding
-      ? searchGoogleMedicalImagesViaGrounding(
-          ai,
-          rawSearch,
-          topic,
-          question,
-          enQueries,
-          signal
-        )
-      : Promise.resolve([]),
+  // Camada 1: Acervo Local (04_Mídias/) — instantâneo e custo zero
+  const localHits = searchLocalMediaArchive({
+    query: rawSearch,
+    topic,
+    question,
+    answer,
+    deckKey,
+    limit: 6,
+  }).map((hit, idx): MedicalImageCandidate => {
+    const localUrl = `/api/media/local-file?rel=${encodeURIComponent(hit.entry.relPath)}`;
+    return {
+      id: `local-${idx}-${hit.entry.filename}`,
+      title: hit.entry.captionHint.slice(0, 90),
+      thumbUrl: localUrl,
+      fullUrl: localUrl,
+      description: hit.entry.captionHint.slice(0, 180),
+      suggestedFilename: hit.entry.filename,
+      defaultLegend: `${hit.entry.captionHint.slice(0, 140)} (acervo local do curso).`,
+      source: 'Acervo Local (04_Mídias)',
+      fromMaterial: true,
+      isSvg: false,
+      relevanceScore: 30 + Math.min(25, hit.score),
+    };
+  });
+
+  // Camada 2: Fontes científicas/abertas gratuitas em paralelo (Open-i/NIH + Wikipedia + Wikimedia)
+  const [openiSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
+    searchOpeniMedicalImages(enQueries, rawSearch, signal),
     searchWikipediaMedicalImages(enQueries, rawSearch, signal),
     searchWikimediaCommonsMedical(enQueries, signal),
   ]);
 
-  const allCandidates: MedicalImageCandidate[] = [
-    ...(googleSettled.status === 'fulfilled' ? googleSettled.value : []),
+  const tier1And2: MedicalImageCandidate[] = [
+    ...localHits,
+    ...(openiSettled.status === 'fulfilled' ? openiSettled.value.slice(0, 8) : []),
     ...(wikipediaSettled.status === 'fulfilled' ? wikipediaSettled.value.slice(0, 8) : []),
     ...(wikimediaSettled.status === 'fulfilled' ? wikimediaSettled.value.slice(0, 8) : []),
   ];
 
-  // Canonical deduplication (prevents 800px vs 900px vs original visual duplicates)
-  const dedupedMap = new Map<string, MedicalImageCandidate>();
-  for (const candidate of allCandidates) {
-    if (!candidate) continue;
-    const key = normalizeImageCanonicalKey(candidate.thumbUrl || candidate.fullUrl, candidate.title);
-    const scored: MedicalImageCandidate = {
-      ...candidate,
-      relevanceScore: scoreImageRelevance(candidate, {
-        query: rawSearch,
-        topic,
-        question,
-        answer,
-        enQueries,
-      }),
-    };
-    const existing = dedupedMap.get(key);
-    if (!existing || (scored.relevanceScore ?? 0) > (existing.relevanceScore ?? 0)) {
-      dedupedMap.set(key, scored);
+  const scoreAndDedupe = (list: MedicalImageCandidate[]) => {
+    const deduped = new Map<string, MedicalImageCandidate>();
+    for (const candidate of list) {
+      if (!candidate) continue;
+      const key = candidate.fromMaterial
+        ? `local:${candidate.suggestedFilename.toLowerCase()}`
+        : normalizeImageCanonicalKey(candidate.thumbUrl || candidate.fullUrl, candidate.title);
+      const computedScore = candidate.fromMaterial
+        ? candidate.relevanceScore ?? 40
+        : scoreImageRelevance(candidate, {
+            query: rawSearch,
+            topic,
+            question,
+            answer,
+            enQueries,
+          });
+      const scored: MedicalImageCandidate = { ...candidate, relevanceScore: computedScore };
+      const existing = deduped.get(key);
+      if (!existing || (scored.relevanceScore ?? 0) > (existing.relevanceScore ?? 0)) {
+        deduped.set(key, scored);
+      }
+    }
+    return Array.from(deduped.values());
+  };
+
+  let allScored = scoreAndDedupe(tier1And2);
+  const strongCount = allScored.filter((c) => !c.isSvg && (c.relevanceScore ?? 0) >= 18).length;
+
+  // Camada 3: Google Imagens via Serper.dev somente se camadas 1+2 tiverem < 3 hits fortes
+  if (strongCount < 3) {
+    const serperResults = await searchSerperMedicalImages(enQueries, rawSearch, signal);
+    if (serperResults.length > 0) {
+      allScored = scoreAndDedupe([...allScored, ...serperResults]);
     }
   }
 
-  const allScored = Array.from(dedupedMap.values());
+  // Camada 4: Gemini googleSearch grounding somente como último recurso
+  const strongAfterCse = allScored.filter((c) => !c.isSvg && (c.relevanceScore ?? 0) >= 18).length;
+  if (preferGoogleGrounding && strongAfterCse < 3 && ai) {
+    const groundingResults = await searchGoogleMedicalImagesViaGrounding(
+      ai,
+      rawSearch,
+      topic,
+      question,
+      enQueries,
+      signal
+    );
+    if (groundingResults.length > 0) {
+      allScored = scoreAndDedupe([...allScored, ...groundingResults]);
+    }
+  }
+
   const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
   const minThreshold = maxScore >= 28 ? 18 : 12;
 

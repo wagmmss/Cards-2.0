@@ -153,7 +153,7 @@ export function inferDomainProfile(deckKey: string, textHint: string = ''): Doma
   }
 
   if (
-    /\b(emergencia|emergencias|urgencia|urgencias|sala vermelha|pcr|acls|pals|arritmia|arritmias|coronariana|coronarianas|sca|iam|choque|sepse|anafilaxia|avc|intoxicacao|cetoacidose|hemorragia pos parto|hpp|eclampsia|crise hipertensiva|parada cardiorrespiratoria)\b/.test(
+    /\b(emergencia|emergencias|urgencia|urgencias|sala vermelha|sala de parto|assistencia ao parto|parto|distocia|prolapso de cordao|descolamento prematuro|placenta previa|rotura uterina|pre eclampsia|sindrome hellp|sofrimento fetal|reanimacao neonatal|pcr|acls|pals|arritmia|arritmias|coronariana|coronarianas|sca|iam|choque|sepse|anafilaxia|avc|intoxicacao|cetoacidose|hemorragia pos parto|hpp|eclampsia|crise hipertensiva|parada cardiorrespiratoria)\b/.test(
       combined
     )
   ) {

@@ -696,7 +696,7 @@ test('Express routes: /api/gemini MAX_TOKENS split stride, cross-key PDF upload/
           {
             id: 171000701,
             type: 'basic',
-            topic: 'Parto - Parada Secundária da Dilatação',
+            topic: 'Parto - Distócia Funcional',
             question: 'Parturiente em fase ativa com dilatação cervical mantida há 2 horas e contrações eficazes. Qual o diagnóstico intraparto?',
             answer: 'Parada secundária da dilatação.',
             hint: '<b>Comentário:</b> A <b>parada secundária da dilatação</b> exige 2 horas de dilatação estacionária na fase ativa com dinâmica adequada, diferente da <b>fase ativa prolongada</b>.',

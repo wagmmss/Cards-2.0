@@ -1,12 +1,148 @@
 // server.ts
 import "dotenv/config";
 import express3 from "express";
-import path from "path";
+import path2 from "path";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 
 // server/routes/gemini.ts
+import fs2 from "fs";
 import express from "express";
+
+// server/localMediaIndex.ts
+import fs from "fs";
+import path from "path";
+var DEFAULT_LOCAL_MEDIA_ROOT = "/home/wagmoraes/Projetos IA/Criador de Cards/04_M\xEDdias";
+var IMAGE_EXT_RE = /\.(png|jpe?g|webp)$/i;
+var CACHE_TTL_MS = 6e4;
+var cachedRoot = "";
+var cachedAt = 0;
+var cachedEntries = [];
+function getLocalMediaRoot() {
+  const configured = (process.env.LOCAL_MEDIA_ROOT || "").trim();
+  const candidate = configured || DEFAULT_LOCAL_MEDIA_ROOT;
+  try {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return path.resolve(candidate);
+    }
+  } catch {
+  }
+  return null;
+}
+function tokenizeText(raw) {
+  return raw.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter((t) => t.length >= 3);
+}
+function loadManifestCaptions(dirPath) {
+  const map = /* @__PURE__ */ new Map();
+  try {
+    const entries = fs.readdirSync(dirPath);
+    for (const file of entries) {
+      if (!file.endsWith("_extraction_manifest.json")) continue;
+      const raw = fs.readFileSync(path.join(dirPath, file), "utf8");
+      const parsed = JSON.parse(raw);
+      const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.images) ? parsed.images : Array.isArray(parsed?.figures) ? parsed.figures : [];
+      for (const it of items) {
+        if (!it || typeof it !== "object") continue;
+        const fname = String(it.filename || it.file || it.name || "").trim();
+        const cap = String(it.caption || it.captionHint || it.description || it.context || "").trim();
+        if (fname && cap) {
+          map.set(fname.toLowerCase(), cap.slice(0, 220));
+        }
+      }
+    }
+  } catch {
+  }
+  return map;
+}
+function getLocalMediaIndex(forceRefresh = false) {
+  const root = getLocalMediaRoot();
+  if (!root) return [];
+  const now = Date.now();
+  if (!forceRefresh && cachedRoot === root && now - cachedAt < CACHE_TTL_MS && cachedEntries.length > 0) {
+    return cachedEntries;
+  }
+  const entries = [];
+  const walk = (dir, depth) => {
+    if (depth > 3) return;
+    let items = [];
+    try {
+      items = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const manifestCaptions = loadManifestCaptions(dir);
+    const relDir = path.relative(root, dir);
+    const deckFolder = relDir ? relDir.split(path.sep)[0] : "";
+    for (const item of items) {
+      const full = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (item.isFile() && IMAGE_EXT_RE.test(item.name)) {
+        const relPath = path.relative(root, full).split(path.sep).join("/");
+        const captionHint = manifestCaptions.get(item.name.toLowerCase()) || "";
+        const cleanName = item.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+        const searchTokens = Array.from(
+          new Set(tokenizeText(`${deckFolder} ${cleanName} ${captionHint}`))
+        );
+        entries.push({
+          relPath,
+          absPath: full,
+          filename: item.name,
+          deckFolder,
+          searchTokens,
+          captionHint: captionHint || cleanName
+        });
+      }
+    }
+  };
+  walk(root, 0);
+  cachedRoot = root;
+  cachedAt = now;
+  cachedEntries = entries;
+  return entries;
+}
+function resolveSafeLocalMediaPath(relPath) {
+  const root = getLocalMediaRoot();
+  if (!root || !relPath) return null;
+  const cleanRel = String(relPath).replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!cleanRel || cleanRel.includes("..")) return null;
+  const resolved = path.resolve(root, cleanRel);
+  if (!resolved.startsWith(root + path.sep)) return null;
+  try {
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      return resolved;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+function searchLocalMediaArchive(params) {
+  const index = getLocalMediaIndex();
+  if (index.length === 0) return [];
+  const queryTokens = new Set(
+    tokenizeText(`${params.query} ${params.topic || ""} ${params.answer || ""} ${params.question || ""}`)
+  );
+  if (queryTokens.size === 0) return [];
+  const cleanDeck = (params.deckKey || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_]+/g, "_");
+  const scored = [];
+  for (const entry of index) {
+    let overlap = 0;
+    for (const tok of entry.searchTokens) {
+      if (queryTokens.has(tok)) overlap++;
+    }
+    if (overlap === 0) continue;
+    let score = overlap * 10;
+    if (cleanDeck && entry.deckFolder.toLowerCase().includes(cleanDeck)) {
+      score += 18;
+    }
+    if (overlap >= 2) score += 8;
+    scored.push({ entry, score });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, params.limit || 6);
+}
+
+// server/routes/gemini.ts
 import { ThinkingLevel as ThinkingLevel2, Type } from "@google/genai";
 
 // src/utils/domainProfiles.ts
@@ -124,7 +260,7 @@ function inferDomainProfile(deckKey, textHint = "") {
   )) {
     return "cirurgico";
   }
-  if (/\b(emergencia|emergencias|urgencia|urgencias|sala vermelha|pcr|acls|pals|arritmia|arritmias|coronariana|coronarianas|sca|iam|choque|sepse|anafilaxia|avc|intoxicacao|cetoacidose|hemorragia pos parto|hpp|eclampsia|crise hipertensiva|parada cardiorrespiratoria)\b/.test(
+  if (/\b(emergencia|emergencias|urgencia|urgencias|sala vermelha|sala de parto|assistencia ao parto|parto|distocia|prolapso de cordao|descolamento prematuro|placenta previa|rotura uterina|pre eclampsia|sindrome hellp|sofrimento fetal|reanimacao neonatal|pcr|acls|pals|arritmia|arritmias|coronariana|coronarianas|sca|iam|choque|sepse|anafilaxia|avc|intoxicacao|cetoacidose|hemorragia pos parto|hpp|eclampsia|crise hipertensiva|parada cardiorrespiratoria)\b/.test(
     combined
   )) {
     return "emergencia";
@@ -145,6 +281,1542 @@ Molde de Salience Prompt para este perfil:
 - Comandos fechados recomendados (use ou adapte com a mesma precis\xE3o temporal/decis\xF3ria; proibido perguntar apenas "Qual a conduta?"):
 ${cfg.closedCommands.map((c) => `  * "${c}"`).join("\n")}`;
 }
+
+// src/utils/wozniakLinter.ts
+var MAX_CLOZE_WORDS = 5;
+var MAX_BASIC_ANSWER_WORDS = 15;
+var MAX_BASIC_ANSWER_CHARS = 110;
+var MAX_QUESTION_WORDS = 50;
+var MAX_COMMENT_CHARS = 320;
+var MIN_VISUAL_LEGEND_WORDS = 6;
+var DANGLING_STOPWORDS = /* @__PURE__ */ new Set([
+  "a",
+  "ao",
+  "aos",
+  "as",
+  "com",
+  "contra",
+  "da",
+  "das",
+  "de",
+  "do",
+  "dos",
+  "e",
+  "em",
+  "entre",
+  "na",
+  "nas",
+  "no",
+  "nos",
+  "o",
+  "os",
+  "ou",
+  "para",
+  "pela",
+  "pelas",
+  "pelo",
+  "pelos",
+  "por",
+  "que",
+  "se",
+  "sem",
+  "sob",
+  "sobre",
+  "um",
+  "uma"
+]);
+var PROHIBITED_CLOZE_HINTS = /* @__PURE__ */ new Set([
+  "f\xE1rmaco",
+  "farmaco",
+  "droga",
+  "conduta",
+  "classe",
+  "subst\xE2ncia",
+  "substancia",
+  "momento",
+  "tempo",
+  "dose",
+  "quantidade",
+  "n\xFAmero",
+  "numero",
+  "deriva\xE7\xF5es",
+  "derivacoes",
+  "valor",
+  "valores",
+  "crit\xE9rio",
+  "criterio",
+  "aumento",
+  "diminui\xE7\xE3o",
+  "diminuicao"
+]);
+var MEDICAL_UNITS_AND_STOPWORDS = /* @__PURE__ */ new Set([
+  "para",
+  "com",
+  "sem",
+  "por",
+  "que",
+  "dos",
+  "das",
+  "uma",
+  "como",
+  "mais",
+  "menos",
+  "qual",
+  "quais",
+  "onde",
+  "quando",
+  "caso",
+  "sobre",
+  "entre",
+  "apos",
+  "antes",
+  "anos",
+  "ano",
+  "dias",
+  "dia",
+  "meses",
+  "mes",
+  "horas",
+  "hora",
+  "minutos",
+  "minuto",
+  "segundos",
+  "segundo",
+  "grau",
+  "tipo",
+  "fase",
+  "nivel",
+  "risco",
+  "dose",
+  "doses",
+  "sao",
+  "este",
+  "esta",
+  "isto",
+  "esses",
+  "essas",
+  "pelo",
+  "pela",
+  "pelos",
+  "pelas",
+  "mmhg",
+  "bpm",
+  "cpm",
+  "mg",
+  "mcg",
+  "kg",
+  "ml",
+  "cm",
+  "mm",
+  "meq",
+  "meql",
+  "ui",
+  "se",
+  "ou",
+  "nao",
+  "sim",
+  "uso",
+  "via",
+  "oral",
+  "intravenosa",
+  "intramuscular",
+  "paciente",
+  "quadro",
+  "clinico",
+  "clinica",
+  "medica",
+  "medico",
+  "emergencia",
+  "urgencia",
+  "conduta",
+  "tratamento",
+  "manejo",
+  "exame",
+  "avaliacao",
+  "resposta",
+  "diagnostico",
+  "inicial",
+  "primeira",
+  "segunda",
+  "linha",
+  "escolha",
+  "sindrome",
+  "doenca",
+  "agudo",
+  "aguda",
+  "cronico",
+  "cronica",
+  "grave",
+  "leve",
+  "moderado",
+  "moderada"
+]);
+var SYNONYM_SPOILERS = {
+  adrenalina: ["epinefrina"],
+  epinefrina: ["adrenalina"],
+  noradrenalina: ["norepinefrina"],
+  norepinefrina: ["noradrenalina"],
+  vasopressina: ["adh"],
+  adh: ["vasopressina"],
+  pelvimetria: ["plano", "zero", "planos", "delee", "lee", "hodges", "bacia", "espinhas", "isquiaticas", "conjugata"],
+  pelvimetr: ["plano", "zero", "planos", "delee", "lee", "hodges", "bacia", "espinhas"],
+  plano: ["pelvimetria", "delee", "hodges"],
+  planos: ["pelvimetria", "plano", "zero", "delee", "hodges"],
+  manobra: ["manobras", "mcroberts", "rubin", "woods", "jacquemier", "zavanelli", "kristeller", "leopold", "ritgen", "brandt"],
+  manobras: ["manobra", "mcroberts", "rubin", "woods", "jacquemier", "zavanelli", "kristeller", "leopold", "ritgen", "brandt"]
+};
+function stripClozeMarkup(text) {
+  if (!text) return "";
+  return text.replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, inner) => {
+    return (inner || "").split("::")[0] || "";
+  });
+}
+function stripHtml(htmlText) {
+  if (!htmlText) return "";
+  const withoutAudio = htmlText.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, " ");
+  return withoutAudio.replace(/<\/?[a-zA-Z!][^>]*>/g, " ").replace(/&nbsp;/gi, " ").replace(/&le;/gi, "\u2264").replace(/&ge;/gi, "\u2265").replace(/&plusmn;/gi, "\xB1").replace(/&times;/gi, "\xD7").replace(/&divide;/gi, "\xF7").replace(/&deg;/gi, "\xB0").replace(/&rarr;/gi, "\u2192").replace(/&larr;/gi, "\u2190").replace(/&uarr;/gi, "\u2191").replace(/&darr;/gi, "\u2193").replace(/&ndash;/gi, "\u2013").replace(/&mdash;/gi, "\u2014").replace(/&alpha;/gi, "\u03B1").replace(/&beta;/gi, "\u03B2").replace(/&gamma;/gi, "\u03B3").replace(/&delta;/g, "\u03B4").replace(/&Delta;/g, "\u0394").replace(/&mu;|&micro;/gi, "\u03BC").replace(/&apos;|&#0*39;/gi, "'").replace(/&quot;/gi, '"').replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&#(\d+);/g, (_m, dec) => {
+    const code = Number(dec);
+    return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : "";
+  }).replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => {
+    const code = parseInt(hex, 16);
+    return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : "";
+  }).replace(/&amp;/gi, "&").replace(/\s+/g, " ").trim();
+}
+function extractCommentVisibleText(hint) {
+  if (!hint) return "";
+  let cleaned = hint.replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, " ");
+  cleaned = cleaned.replace(/<table[\s\S]*?<\/table>/gi, " ");
+  cleaned = cleaned.replace(/<table\b[\s\S]*$/gi, " ");
+  cleaned = cleaned.replace(/^(?:\s*<img\b[^>]*>\s*(?:<br\s*\/?>\s*)*)+/i, " ");
+  const parts = cleaned.split(/Coment[áa]rio:/i);
+  const afterComment = parts.length > 1 ? parts.slice(1).join("Coment\xE1rio:") : cleaned.replace(/^\s*<i>[\s\S]*?<\/i>(?:\s*<br\s*\/?>\s*)*/i, " ");
+  return stripHtml(afterComment);
+}
+function countWords(text) {
+  const cleaned = stripHtml(stripClozeMarkup(text));
+  if (!cleaned) return 0;
+  return cleaned.split(/\s+/).filter(Boolean).length;
+}
+function resolveLocalMediaFilename(rawImgTag, rawSrc, cardId, imgIndex = 0, deckKey = "deck") {
+  const cleanDeck = (deckKey || "deck").trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9_]+/g, "_") || "deck";
+  const attrMatch = rawImgTag.match(/\bdata-anki-file=["']([^"']+)["']/i);
+  if (attrMatch && attrMatch[1]) {
+    const cleanAttr = attrMatch[1].trim().replace(/[\s"<>|?*\\/]+/g, "_").replace(/_{2,}/g, "_").replace(/^_+|_+$/g, "");
+    if (cleanAttr) return cleanAttr;
+  }
+  const src = (rawSrc || "").trim();
+  if (src && !/^(?:https?:|data:|blob:|pdfimg:|buscar_imagem:|\/)/i.test(src)) {
+    const base = (src.split(/[\\/]/).pop() || src).trim();
+    return base.replace(/[\s"<>|?*]+/g, "_");
+  }
+  if (src.startsWith("data:image/svg")) {
+    return `${cleanDeck}_${cardId}_img${imgIndex + 1}.svg`;
+  }
+  if (src.startsWith("data:image/png")) {
+    return `${cleanDeck}_${cardId}_img${imgIndex + 1}.png`;
+  }
+  if (src.startsWith("data:image/webp")) {
+    return `${cleanDeck}_${cardId}_img${imgIndex + 1}.webp`;
+  }
+  if (src.startsWith("data:image/")) {
+    return `${cleanDeck}_${cardId}_img${imgIndex + 1}.jpg`;
+  }
+  if (/^https?:\/\//i.test(src)) {
+    try {
+      const u = new URL(src);
+      const rawLast = decodeURIComponent(u.pathname.split("/").pop() || "").replace(/^\d+px-/i, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+      if (rawLast && /\.(?:jpg|jpeg|png|svg|webp|gif)$/i.test(rawLast)) {
+        return rawLast.slice(0, 72);
+      }
+    } catch {
+    }
+  }
+  return `${cleanDeck}_${cardId}_img${imgIndex + 1}.jpg`;
+}
+function resolveLocalAudioFilename(rawTag, rawSrc, cardId, audioIndex = 0, deckKey = "deck") {
+  const cleanDeck = (deckKey || "deck").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_") || "deck";
+  const attrMatch = rawTag.match(/\bdata-anki-file=["']([^"']+)["']/i);
+  if (attrMatch && attrMatch[1]) {
+    const cleanAttr = attrMatch[1].trim().replace(/[\s"<>|?*\\/]+/g, "_");
+    if (cleanAttr) return cleanAttr;
+  }
+  const src = (rawSrc || "").trim();
+  if (src && !/^(?:https?:|data:|blob:|\/)/i.test(src)) {
+    const base = (src.split(/[\\/]/).pop() || src).trim();
+    return base.replace(/[\s"<>|?*]+/g, "_");
+  }
+  if (src.startsWith("data:audio/wav")) {
+    return `${cleanDeck}_${cardId}_audio${audioIndex + 1}.wav`;
+  }
+  if (src.startsWith("data:audio/ogg")) {
+    return `${cleanDeck}_${cardId}_audio${audioIndex + 1}.ogg`;
+  }
+  return `${cleanDeck}_${cardId}_audio${audioIndex + 1}.mp3`;
+}
+function extractCardMediaReferences(card, deckKey = "deck") {
+  const refs = [];
+  const fields = [
+    ["question", card.question || ""],
+    ["hint", card.hint || ""]
+  ];
+  for (const [fieldName, htmlText] of fields) {
+    let imgIdx = 0;
+    const imgRegex = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+    let m;
+    while ((m = imgRegex.exec(htmlText)) !== null) {
+      const fullTag = m[0];
+      const srcVal = m[1];
+      const filename = resolveLocalMediaFilename(fullTag, srcVal, card.id, imgIdx++, deckKey);
+      refs.push({
+        filename,
+        sourceUrl: srcVal,
+        field: fieldName,
+        kind: "image",
+        rawTag: fullTag
+      });
+    }
+    let audioIdx = 0;
+    const audioSourceRegex = /<audio\b[^>]*>[\s\S]*?<source\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/audio>/gi;
+    while ((m = audioSourceRegex.exec(htmlText)) !== null) {
+      const fullTag = m[0];
+      const srcVal = m[1];
+      const filename = resolveLocalAudioFilename(fullTag, srcVal, card.id, audioIdx++, deckKey);
+      refs.push({
+        filename,
+        sourceUrl: srcVal,
+        field: fieldName,
+        kind: "audio",
+        rawTag: fullTag
+      });
+    }
+    const directAudioRegex = /<audio\b(?![^>]*>[\s\S]*?<source\b)[^>]*\bsrc=["']([^"']+)["'][^>]*>(?:[\s\S]*?<\/audio>)?/gi;
+    while ((m = directAudioRegex.exec(htmlText)) !== null) {
+      const fullTag = m[0];
+      const srcVal = m[1];
+      const filename = resolveLocalAudioFilename(fullTag, srcVal, card.id, audioIdx++, deckKey);
+      refs.push({
+        filename,
+        sourceUrl: srcVal,
+        field: fieldName,
+        kind: "audio",
+        rawTag: fullTag
+      });
+    }
+    const soundBracketRegex = /\[sound:([^\]]+)\]/gi;
+    while ((m = soundBracketRegex.exec(htmlText)) !== null) {
+      const fullTag = m[0];
+      const srcVal = m[1].trim();
+      const filename = resolveLocalAudioFilename(fullTag, srcVal, card.id, audioIdx++, deckKey);
+      refs.push({
+        filename,
+        sourceUrl: srcVal,
+        field: fieldName,
+        kind: "audio",
+        rawTag: fullTag
+      });
+    }
+  }
+  return refs;
+}
+function normalizeForSpoiler(text) {
+  return stripHtml(text).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+var NON_SPOILER_ACRONYMS = /* @__PURE__ */ new Set([
+  "IV",
+  "EV",
+  "VO",
+  "IM",
+  "SC",
+  "DU",
+  "MG",
+  "ML",
+  "KG",
+  "CM",
+  "MM",
+  "UI",
+  "PA",
+  "FC",
+  "FR",
+  "PH",
+  "RN",
+  "DE",
+  "DA",
+  "DO",
+  "EM",
+  "NO",
+  "NA",
+  "OS",
+  "AS"
+]);
+function extractAcronymTokens(text) {
+  const plain = stripHtml(text);
+  const matches = plain.match(/\b[A-Z]{2,5}\b/g) || [];
+  return Array.from(new Set(matches.filter((tok) => !NON_SPOILER_ACRONYMS.has(tok))));
+}
+function extractCoreKeywords(text) {
+  const norm = normalizeForSpoiler(text);
+  if (!norm) return [];
+  return norm.split(/\s+/).filter((w) => w.length > 3 && !MEDICAL_UNITS_AND_STOPWORDS.has(w));
+}
+function stemsCollideForSpoiler(a, b) {
+  if (a.length < 4 || b.length < 4) return false;
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) >= 6) {
+    if (a.startsWith(b) || b.startsWith(a)) return true;
+    let common = 0;
+    const limit = Math.min(a.length, b.length);
+    while (common < limit && a[common] === b[common]) {
+      common++;
+    }
+    if (common >= 7) return true;
+  }
+  return false;
+}
+var PORTUGUESE_STEM_SUFFIXES = [
+  "amentos",
+  "amento",
+  "acoes",
+  "acao",
+  "icoes",
+  "icao",
+  "mente",
+  "idades",
+  "idade",
+  "ismos",
+  "ismo",
+  "istas",
+  "ista",
+  "ulares",
+  "ular",
+  "icos",
+  "icas",
+  "ico",
+  "ica",
+  "ores",
+  "oras",
+  "ador",
+  "adora",
+  "antes",
+  "ante",
+  "entes",
+  "ente",
+  "oes",
+  "aes",
+  "ais",
+  "eis",
+  "ois",
+  "es",
+  "is",
+  "os",
+  "as",
+  "s",
+  "a",
+  "o"
+];
+function stemPortugueseWord(word) {
+  const w = normalizeForSpoiler(word).replace(/\s+/g, "");
+  if (w.length <= 4) return w;
+  for (const suffix of PORTUGUESE_STEM_SUFFIXES) {
+    if (w.endsWith(suffix) && w.length - suffix.length >= 4) {
+      return w.slice(0, w.length - suffix.length);
+    }
+  }
+  return w;
+}
+function expandWithSynonyms(words) {
+  const out = /* @__PURE__ */ new Set();
+  for (const w of words) {
+    out.add(w);
+    const syns = SYNONYM_SPOILERS[w];
+    if (syns) {
+      syns.forEach((s) => out.add(s));
+    }
+  }
+  return out;
+}
+var DIAGNOSTIC_MODALITY_PATTERNS = [
+  {
+    modality: "USG",
+    label: "USG / Ultrassonografia",
+    pattern: /\b(?:usg|ultrassonografia|ultrassom|ultrassonogr[aá]fic[ao]|ecografia|ecogr[aá]fic[ao]|e-?fast|doppler|ultrasound|sonography)\b/i
+  },
+  {
+    modality: "ECOCARDIOGRAMA",
+    label: "Ecocardiograma",
+    pattern: /\b(?:ecocardiograma|ecocardiografia|ecocardiogr[aá]fic[ao]|echocardiogra(?:m|phy))\b/i
+  },
+  {
+    modality: "TC",
+    label: "TC / Tomografia Computadorizada",
+    pattern: /\b(?:tc|tomografia(?:\s+computadorizada)?|angiotomografia|angio-?tc|urotomografia|ct\s+scan|computed\s+tomography)\b/i
+  },
+  {
+    modality: "RM",
+    label: "RM / Resson\xE2ncia Magn\xE9tica",
+    pattern: /\b(?:rm|rnm|resson[aâ]ncia(?:\s+magn[eé]tica)?|colangiorresson[aâ]ncia|angiorresson[aâ]ncia|mri|magnetic\s+resonance)\b/i
+  },
+  {
+    modality: "RX",
+    label: "RX / Radiografia",
+    pattern: /\b(?:rx|raio-?x|raios-?x|radiografia|radiogr[aá]fic[ao]|teleradiografia|telerradiografia|x-?ray|chest\s+radiograph)\b/i
+  },
+  {
+    modality: "ECG",
+    label: "ECG / Eletrocardiograma",
+    pattern: /\b(?:ecg|eletrocardiograma|eletrocardiogr[aá]fic[ao]|electrocardiogra(?:m|phy))\b/i
+  },
+  {
+    modality: "ECOCARDIOGRAMA",
+    label: "Ecocardiograma / Doppler Card\xEDaco",
+    pattern: /\b(?:ecocardiograma|ecocardiografia|ecocardiogr[aá]fic[ao]|echocardiogra(?:m|phy)|ecodoppler\s+card[ií]aco|modo[\s-]?m)\b/i
+  },
+  {
+    modality: "CTG",
+    label: "CTG / Cardiotocografia",
+    pattern: /\b(?:ctg|cardiotocografia|cardiotocogr[aá]fic[ao]|cardiotocograma|cardiotocography)\b/i
+  },
+  {
+    modality: "LAPAROSCOPIA",
+    label: "Laparoscopia / Videolaparoscopia",
+    pattern: /\b(?:laparoscopia|videolaparoscopia|laparosc[oó]pic[ao]|videolaparosc[oó]pic[ao]|laparoscopy)\b/i
+  },
+  {
+    modality: "EDA",
+    label: "EDA / Endoscopia Digestiva",
+    pattern: /\b(?:eda|endoscopia(?:\s+digestiva(?:\s+alta)?)?|endosc[oó]pic[ao])\b/i
+  },
+  {
+    modality: "COLONOSCOPIA",
+    label: "Colonoscopia / Retossigmoidoscopia",
+    pattern: /\b(?:colonoscopia|retossigmoidoscopia|colonosc[oó]pic[ao])\b/i
+  },
+  {
+    modality: "HISTEROSCOPIA",
+    label: "Histeroscopia",
+    pattern: /\b(?:histeroscopia|histerosc[oó]pic[ao])\b/i
+  },
+  {
+    modality: "COLPOSCOPIA",
+    label: "Colposcopia",
+    pattern: /\b(?:colposcopia|colposc[oó]pic[ao])\b/i
+  },
+  {
+    modality: "BRONCOSCOPIA",
+    label: "Broncoscopia",
+    pattern: /\b(?:broncoscopia|broncosc[oó]pic[ao])\b/i
+  },
+  {
+    modality: "FUNDOSCOPIA",
+    label: "Fundoscopia / Retinografia",
+    pattern: /\b(?:fundoscopia|fundo\s+de\s+olho|mapeamento\s+de\s+retina|retinografia|fundoscopy)\b/i
+  },
+  {
+    modality: "DERMATOSCOPIA",
+    label: "Dermatoscopia",
+    pattern: /\b(?:dermatoscopia|dermatosc[oó]pic[ao]|dermoscopy)\b/i
+  },
+  {
+    modality: "OTOSCOPIA",
+    label: "Otoscopia",
+    pattern: /\b(?:otoscopia|otosc[oó]pic[ao]|otoscopy)\b/i
+  },
+  {
+    modality: "HISTOPATOLOGIA",
+    label: "Histopatologia / Bi\xF3psia / Esfrega\xE7o",
+    pattern: /\b(?:histopatol[oó]gic[ao]|anatomopatol[oó]gic[ao]|histologia|l[aâ]mina\s+histol[oó]gica|esfrega[cç]o\s+(?:de\s+)?sangue|blood\s+smear|microscopia|bi[oó]psia)\b/i
+  },
+  {
+    modality: "MAMOGRAFIA",
+    label: "Mamografia",
+    pattern: /\b(?:mamografia|mamogr[aá]fic[ao]|mammogra(?:m|phy))\b/i
+  },
+  {
+    modality: "ESPIROMETRIA",
+    label: "Espirometria",
+    pattern: /\b(?:espirometria|espirom[eé]tric[ao]|curva\s+fluxo-?volume)\b/i
+  },
+  {
+    modality: "PARTOGRAMA",
+    label: "Partograma",
+    pattern: /\b(?:partograma|partogram)\b/i
+  },
+  {
+    modality: "ARTERIOGRAFIA",
+    label: "Arteriografia / Cateterismo",
+    pattern: /\b(?:arteriografia|angiografia|cineangiocoronariografia|cateterismo\s+card[ií]aco)\b/i
+  }
+];
+var VISUAL_OVERLAP_STOPWORDS = /* @__PURE__ */ new Set([
+  "paciente",
+  "gestante",
+  "parturiente",
+  "lactente",
+  "escolar",
+  "idoso",
+  "idosa",
+  "adulto",
+  "adulta",
+  "mulher",
+  "homem",
+  "crianca",
+  "clinico",
+  "clinica",
+  "diagnostico",
+  "diagnostica",
+  "conduta",
+  "exame",
+  "imagem",
+  "figura",
+  "foto",
+  "abaixo",
+  "acima",
+  "anexo",
+  "mostrado",
+  "mostrada",
+  "apresentado",
+  "apresentada",
+  "evidencia",
+  "evidenciando",
+  "demonstra",
+  "demonstrando",
+  "mostra",
+  "mostrando",
+  "revela",
+  "revelando",
+  "observa",
+  "nota",
+  "indica",
+  "indicando",
+  "correlacao",
+  "padrao",
+  "caracteristico",
+  "caracteristica",
+  "achado",
+  "achados",
+  "sinal",
+  "sinais",
+  "aspecto",
+  "lesao",
+  "alteracao",
+  "alteracoes",
+  "normal",
+  "agudo",
+  "aguda",
+  "cronico",
+  "cronica",
+  "direito",
+  "direita",
+  "esquerdo",
+  "esquerda",
+  "bilateral",
+  "anterior",
+  "posterior",
+  "inferior",
+  "superior",
+  "torax",
+  "toracico",
+  "toracica",
+  "abdome",
+  "abdominal",
+  "pelve",
+  "pelvico",
+  "pelvica",
+  "cranio",
+  "cerebral",
+  "pulmonar",
+  "cardiaco",
+  "cardiaca",
+  "renal",
+  "hepatico",
+  "hepatica",
+  "uterino",
+  "uterina",
+  "fetal",
+  "intraparto",
+  "obstetrico",
+  "obstetrica",
+  "emergencia",
+  "pronto",
+  "socorro",
+  "sala",
+  "ambulatorio",
+  "enfermaria",
+  "centro",
+  "qual",
+  "quais",
+  "imediata",
+  "imediato",
+  "primeira",
+  "segunda",
+  "escolha",
+  "linha",
+  "ecg",
+  "usg",
+  "tc",
+  "rm",
+  "rx",
+  "ctg",
+  "eda",
+  "eletrocardiograma",
+  "ultrassonografia",
+  "ultrassom",
+  "tomografia",
+  "computadorizada",
+  "ressonancia",
+  "magnetica",
+  "radiografia",
+  "cardiotocografia",
+  "cardiotocografico",
+  "laparoscopia",
+  "videolaparoscopia",
+  "endoscopia",
+  "colonoscopia",
+  "derivacoes",
+  "ortostase",
+  "contraste",
+  "tracado",
+  "corte",
+  "incidencia",
+  "legenda",
+  "visual",
+  "complementar",
+  "internato",
+  "medico",
+  "medica",
+  "caso",
+  "quadro",
+  "realiza",
+  "realizou",
+  "submetida",
+  "submetido",
+  "dor",
+  "febre",
+  "dispneia",
+  "sudorese",
+  "cefaleia",
+  "nausea",
+  "vomito",
+  "vomitos",
+  "palpitacoes",
+  "semanas",
+  "meses",
+  "anos",
+  "horas",
+  "minutos",
+  "tipica",
+  "tipico",
+  "suspeita",
+  "avaliacao",
+  "manejo",
+  "tratamento",
+  "abordagem",
+  "classificacao",
+  "fisiologica",
+  "patologica",
+  "compat\xEDvel",
+  "compativel",
+  "presenca",
+  "ausencia",
+  "doppler",
+  "colorido",
+  "colorida",
+  "axial",
+  "coronal",
+  "sagital",
+  "transversal",
+  "longitudinal",
+  "eletrocardiografico",
+  "eletrocardiografica",
+  "classico",
+  "classica",
+  "utero",
+  "gravidico",
+  "gravidica",
+  "biliar",
+  "vesicula",
+  "onda",
+  "ondas",
+  "intervalo",
+  "complexo",
+  "segmento",
+  "taquicardia",
+  "bradicardia",
+  "irregular",
+  "regular",
+  "sinusal",
+  "ritmo",
+  "conducao",
+  "todas",
+  "todos",
+  "toda",
+  "todo",
+  "partograma",
+  "apresentacao",
+  "apresentando",
+  "apresenta",
+  "contracao",
+  "contracoes",
+  "eficaz",
+  "eficazes",
+  "dilatacao",
+  "trabalho",
+  "parto"
+]);
+var VISUAL_FINDING_PATTERNS = [
+  /\bsupradesnivelamento\s+(?:convexo\s+)?(?:do\s+segmento\s+|de\s+)?st\b/i,
+  /\binfradesnivelamento\s+(?:do\s+segmento\s+|de\s+)?st\b/i,
+  /\bonda\s+q\s+patol[oó]gica\b/i,
+  /\bpneumoperit[oô]nio\b/i,
+  /\bn[ií]vel\s+hidroa[eé]reo\b/i,
+  /\bempilhamento\s+de\s+moedas\b/i,
+  /\bpar[aá]bola\s+de\s+damoiseau\b/i,
+  /\bsinal\s+d[aoe]\s+(?:roda\s+dentada|alvo|menisco|duplo\s+contorno|dupla\s+bolha|gr[aã]o\s+de\s+caf[eé]|tartaruga|campan[aá]rio|polegar|anel\s+de\s+fogo|halo|contas\s+de\s+ros[aá]rio)\b/i,
+  /\bcordas\s+de\s+violino\b/i,
+  /\bdesacelera[cç][õo]es?\s+tardias?\b/i,
+  /\bvariabilidade\s+ausente\b/i,
+  /\bvidro\s+fosco\b/i,
+  /\bconsolida[cç][aã]o\s+lobar\b/i,
+  /\bborramento\s+da\s+gordura\b/i,
+  /\bespessamento\s+(?:parietal|tub[aá]rio|endometrial)\b/i,
+  /\bsombra\s+ac[uú]stica\b/i,
+  /\bhipotranspar[eê]ncia\b/i,
+  /\bhipertranspar[eê]ncia\b/i,
+  /\bimagem\s+(?:hipoecoica|hiperecoica|anecoica|hiperdensa|hipodensa)\b/i,
+  /\bvelamento\s+d[eo]\s+seio\b/i,
+  /\balargamento\s+(?:de\s+|do\s+)?mediastino\b/i,
+  /\blente\s+biconvexa\b/i,
+  /\bforma\s+de\s+crescente\b/i,
+  /\bcole[cç][aã]o\s+peric[oó]lica\b/i
+];
+function extractVisualLegendEntries(card) {
+  const entries = [];
+  const rawHint = (card.hint || "").replace(/<table[\s\S]*?<\/table>/gi, " ").replace(/<audio\b[^>]*>[\s\S]*?<\/audio>/gi, " ");
+  const commentSplit = rawHint.split(/<b>\s*Coment[áa]rio:\s*<\/b>/i);
+  const preCommentHint = commentSplit[0] || "";
+  const hasCommentSplit = commentSplit.length > 1;
+  const sourcesToScan = [
+    hasCommentSplit ? preCommentHint : rawHint,
+    card.question || ""
+  ];
+  const seenRaw = /* @__PURE__ */ new Set();
+  for (const srcHtml of sourcesToScan) {
+    const italicRegex = /<i\b[^>]*>([\s\S]*?)<\/i>/gi;
+    let m;
+    while ((m = italicRegex.exec(srcHtml)) !== null) {
+      const rawHtml = m[0];
+      if (seenRaw.has(rawHtml)) continue;
+      seenRaw.add(rawHtml);
+      const text = stripHtml(m[1] || "").replace(/\s+/g, " ").trim();
+      const descriptiveText = text.replace(/^(?:legenda(?:\s+visual)?|achado(?:\s+visual)?|imagem)\s*:\s*/i, "").trim();
+      const wordCount = descriptiveText ? descriptiveText.split(/\s+/).filter(Boolean).length : 0;
+      entries.push({ rawHtml, text, descriptiveText, wordCount });
+    }
+  }
+  if (entries.length === 0 && hasCommentSplit && /<img\b/i.test(commentSplit.slice(1).join(" "))) {
+    const postComment = commentSplit.slice(1).join(" ");
+    const italicRegex = /<i\b[^>]*>([\s\S]*?)<\/i>/gi;
+    let m;
+    while ((m = italicRegex.exec(postComment)) !== null) {
+      const text = stripHtml(m[1] || "").replace(/\s+/g, " ").trim();
+      const descriptiveText = text.replace(/^(?:legenda(?:\s+visual)?|achado(?:\s+visual)?|imagem)\s*:\s*/i, "").trim();
+      const wordCount = descriptiveText ? descriptiveText.split(/\s+/).filter(Boolean).length : 0;
+      entries.push({ rawHtml: m[0], text, descriptiveText, wordCount });
+    }
+  }
+  return entries;
+}
+function extractDiagnosticModalities(text) {
+  const plain = stripHtml(stripClozeMarkup(text || ""));
+  if (!plain) return [];
+  const found = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of DIAGNOSTIC_MODALITY_PATTERNS) {
+    if (entry.pattern.test(plain) && !seen.has(entry.modality)) {
+      seen.add(entry.modality);
+      found.push({ modality: entry.modality, label: entry.label });
+    }
+  }
+  return found;
+}
+function detectModalityConflict(card) {
+  const legendEntries = extractVisualLegendEntries(card);
+  const legendCombined = legendEntries.map((e) => e.text).join(" ");
+  const legendMods = extractDiagnosticModalities(legendCombined);
+  if (legendMods.length === 0) {
+    return { hasConflict: false, cardModalities: [], legendModalities: [] };
+  }
+  const cardTextCombined = [card.topic || "", card.question || ""].join(" ");
+  const cardMods = extractDiagnosticModalities(cardTextCombined);
+  if (cardMods.length === 0) {
+    return {
+      hasConflict: false,
+      cardModalities: [],
+      legendModalities: legendMods.map((m) => m.label)
+    };
+  }
+  const legendSet = new Set(legendMods.map((m) => m.modality));
+  const hasOverlap = cardMods.some((m) => legendSet.has(m.modality));
+  if (hasOverlap) {
+    return {
+      hasConflict: false,
+      cardModalities: cardMods.map((m) => m.label),
+      legendModalities: legendMods.map((m) => m.label)
+    };
+  }
+  const cardLabels = cardMods.map((m) => m.label).join(" / ");
+  const legendLabels = legendMods.map((m) => m.label).join(" / ");
+  return {
+    hasConflict: true,
+    cardModalities: cardMods.map((m) => m.label),
+    legendModalities: legendMods.map((m) => m.label),
+    message: `Conflito de modalidade texto \xD7 legenda: texto do card cita ${cardLabels}, mas a legenda visual descreve ${legendLabels}.`
+  };
+}
+function extractVisualFindingStems(text) {
+  const norm = stripHtml(stripClozeMarkup(text || "")).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s]/g, " ");
+  const stems = /* @__PURE__ */ new Set();
+  for (const tok of norm.split(/\s+/)) {
+    if (tok.length >= 5 && !DANGLING_STOPWORDS.has(tok) && !MEDICAL_UNITS_AND_STOPWORDS.has(tok) && !VISUAL_OVERLAP_STOPWORDS.has(tok)) {
+      stems.add(stemPortugueseWord(tok));
+    }
+  }
+  return stems;
+}
+function detectRedundantVisualDescription(card) {
+  if (card.type !== "basic" || !/<img\b/i.test(card.question || "")) {
+    return { isRedundant: false };
+  }
+  const qWithoutImgs = (card.question || "").replace(/<img\b[^>]*>/gi, " ");
+  const qVisible = stripHtml(stripClozeMarkup(qWithoutImgs));
+  if (!qVisible) return { isRedundant: false };
+  for (const pattern of VISUAL_FINDING_PATTERNS) {
+    const match = qVisible.match(pattern);
+    if (match) {
+      return {
+        isRedundant: true,
+        reason: `Enunciado descreve textualmente o achado visual ("${match[0]}") em card Med_Basic_Inverted_v2 com imagem na pergunta.`
+      };
+    }
+  }
+  const legendEntries = extractVisualLegendEntries(card);
+  const legendText = legendEntries.map((e) => e.descriptiveText).join(" ");
+  if (legendText) {
+    const qStems = extractVisualFindingStems(qVisible);
+    const legendStems = extractVisualFindingStems(legendText);
+    const shared = [];
+    for (const st of legendStems) {
+      if (qStems.has(st)) shared.push(st);
+    }
+    if (shared.length >= 2) {
+      return {
+        isRedundant: true,
+        reason: `Enunciado antecipa textualmente o achado da legenda visual (${shared.slice(0, 3).join(", ")}) em card Med_Basic_Inverted_v2 com imagem na pergunta.`
+      };
+    }
+  }
+  const sentences = qVisible.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean);
+  for (const sentence of sentences) {
+    if (/^(?:qual|quais|o\s+que|como|por\s+que|quando|onde)\b/i.test(sentence)) {
+      continue;
+    }
+    const narrationMatch = sentence.match(
+      /\b(?:exame|imagem|figura|foto|tra[cç]ado|ecg|ctg|rx|radiografia|tc|tomografia|rm|resson[aâ]ncia|usg|ultrassonografia|laparoscopia|videolaparoscopia|endoscopia|eda|fundoscopia|dermatoscopia|l[aâ]mina)\s+(?:abaixo|acima|anexo|apresentad[ao]|mostrad[ao])?[^,]*?\b(?:mostra|mostrando|evidencia|evidenciando|revela|revelando|demonstra|demonstrando|exibe|exibindo|observa-se|nota-se|visualiza-se|identifica-se)\s+(.+)$/i
+    );
+    if (narrationMatch && narrationMatch[1]) {
+      const findingStems = extractVisualFindingStems(narrationMatch[1]);
+      if (findingStems.size >= 2) {
+        return {
+          isRedundant: true,
+          reason: `Enunciado narra o achado visual da imagem ("${narrationMatch[1].slice(0, 60).trim()}") em card Med_Basic_Inverted_v2.`
+        };
+      }
+    }
+  }
+  return { isRedundant: false };
+}
+function lintCard(card, availableMediaNames) {
+  const warnings = [];
+  const cardType = String(card.type || "basic").toLowerCase() === "cloze" ? "cloze" : "basic";
+  const questionText = card.question || "";
+  const answerText = card.answer || "";
+  const hintText = card.hint || "";
+  const topicText = card.topic || "";
+  const availableMediaSet = /* @__PURE__ */ new Set();
+  if (availableMediaNames) {
+    for (const name of availableMediaNames) {
+      if (name) {
+        const clean = String(name).trim().toLowerCase();
+        availableMediaSet.add(clean);
+        const base = clean.split(/[\\/]/).pop();
+        if (base) availableMediaSet.add(base);
+        const srcMatch = clean.match(/\bsrc=["']([^"']+)["']/i);
+        if (srcMatch && srcMatch[1]) {
+          const srcBase = srcMatch[1].trim().split(/[\\/]/).pop();
+          if (srcBase) availableMediaSet.add(srcBase);
+        }
+        const soundMatch = clean.match(/\[sound:([^\]]+)\]/i);
+        if (soundMatch && soundMatch[1]) {
+          const soundBase = soundMatch[1].trim().split(/[\\/]/).pop();
+          if (soundBase) availableMediaSet.add(soundBase);
+        }
+      }
+    }
+  }
+  const mediaRefs = extractCardMediaReferences(card, card.deck_key || "deck");
+  const missingMediaFiles = [];
+  if (!card.isResolvingImage) {
+    for (const ref of mediaRefs) {
+      const raw = (ref.sourceUrl || "").trim();
+      const isSelfContainedOrWeb = /^(?:https?:\/\/|data:)/i.test(raw);
+      const isLoadedLocally = availableMediaSet.has(ref.filename.toLowerCase()) || availableMediaSet.has(raw.toLowerCase());
+      if (!isSelfContainedOrWeb && !isLoadedLocally) {
+        if (!missingMediaFiles.includes(ref.filename)) {
+          missingMediaFiles.push(ref.filename);
+        }
+        warnings.push({
+          code: "MISSING_MEDIA",
+          field: ref.field,
+          severity: "error",
+          message: `M\xEDdia local n\xE3o encontrada ("${ref.filename}"): clique em "Buscar no Google/Web" ou remova a refer\xEAncia.`
+        });
+      }
+    }
+  }
+  const questionWordCount = countWords(questionText);
+  const visibleAnswer = stripHtml(answerText);
+  const answerWordCount = cardType === "basic" ? countWords(answerText) : 0;
+  const answerCharCount = visibleAnswer.length;
+  const commentVisibleCharCount = extractCommentVisibleText(hintText).length;
+  if (questionWordCount > MAX_QUESTION_WORDS) {
+    warnings.push({
+      code: "QUESTION_TOO_LONG",
+      field: "question",
+      severity: "warning",
+      message: `Enunciado com ${questionWordCount} palavras (Matuschak & Nielsen Anti-Pattern-Matching: m\xE1x. ${MAX_QUESTION_WORDS} palavras para evitar memoriza\xE7\xE3o superficial da forma da frase).`
+    });
+  }
+  const visibleTopic = stripHtml(topicText);
+  if (visibleTopic) {
+    const mPrefix = questionText.match(/^\s*(?:\*\*|<b>)([\s\S]*?)(?:\*\*|<\/b>)[:.]?\s*/i);
+    if (mPrefix && mPrefix[1]) {
+      const pfx = stripHtml(mPrefix[1]).toLowerCase();
+      const topClean = visibleTopic.toLowerCase();
+      const subtop = topClean.includes(" - ") ? topClean.split(" - ").pop().trim() : topClean;
+      if (pfx === topClean || pfx === subtop || pfx.length > 5 && (topClean.includes(pfx) || pfx.includes(topClean) || subtop.includes(pfx) || pfx.includes(subtop))) {
+        warnings.push({
+          code: "TOPIC_DUPLICATED_IN_QUESTION",
+          field: "question",
+          severity: "error",
+          message: `A pergunta inicia repetindo o t\xF3pico "${stripHtml(mPrefix[1])}" em negrito.`
+        });
+      }
+    }
+  }
+  const allFieldsText = `${questionText} ${answerText} ${hintText} ${topicText}`;
+  if (/\$/.test(allFieldsText) || /\\[a-zA-Z([]/.test(allFieldsText)) {
+    warnings.push({
+      code: "LATEX_PROHIBITED",
+      field: "question",
+      severity: "error",
+      message: 'Sintaxe LaTeX/MathJax n\xE3o renderizada ("$" ou "\\"). Use caracteres Unicode diretos (\u2265, \u2264, \u03B2, \u03B1, \u2192).'
+    });
+  }
+  if (/\bcategoria\s+[ABCDX]\b/i.test(allFieldsText)) {
+    warnings.push({
+      code: "FDA_OBSOLETE_CATEGORY",
+      field: "hint",
+      severity: "warning",
+      message: "Evite categorias obsoletas da FDA (A/B/C/D/X); descreva o risco teratog\xEAnico espec\xEDfico."
+    });
+  }
+  const clozeRegex = /\{\{c(\d+)::([\s\S]*?)\}\}/g;
+  const clozeMatches = Array.from(questionText.matchAll(clozeRegex));
+  const clozeCount = clozeMatches.length;
+  let maxClozeWords = 0;
+  const clozeTargets = [];
+  for (const match of clozeMatches) {
+    const inner = match[2] || "";
+    const parts = inner.split("::");
+    const targetText = (parts[0] || "").trim();
+    clozeTargets.push(targetText);
+    const wordsList = stripHtml(targetText).split(/\s+/).filter(Boolean);
+    const wCount = wordsList.length;
+    if (wCount > maxClozeWords) {
+      maxClozeWords = wCount;
+    }
+    if (wCount >= 3 && DANGLING_STOPWORDS.has(wordsList[wordsList.length - 1].toLowerCase())) {
+      warnings.push({
+        code: "CLOZE_DANGLING_PARTICLE",
+        field: "question",
+        severity: "error",
+        message: `Lacuna cloze termina com part\xEDcula truncada ("${wordsList[wordsList.length - 1]}").`
+      });
+    }
+    if (parts.length > 1) {
+      const dica = (parts[1] || "").trim().toLowerCase();
+      const hasProhibitedDica = Array.from(PROHIBITED_CLOZE_HINTS).some((h) => dica.includes(h)) || dica.includes(" ou ") || dica.length > 0;
+      if (hasProhibitedDica) {
+        warnings.push({
+          code: "CLOZE_HAS_HINT",
+          field: "question",
+          severity: "error",
+          message: `Proibido usar ::dica dentro da lacuna {{c1::...}} (encontrado "::${parts[1]}").`
+        });
+      }
+    }
+    if (match[1] !== "1") {
+      warnings.push({
+        code: "CLOZE_COUNT_INVALID",
+        field: "question",
+        severity: "error",
+        message: `Usar estritamente {{c1::...}} (encontrado {{c${match[1]}::...}}).`
+      });
+    }
+  }
+  if (/\{\{c\d+::[\s\S]*?\}\}\s*\((?:crit[eé]rios?|pontos?|dias?|anos?|itens?|sinais?)\)/i.test(questionText)) {
+    warnings.push({
+      code: "CLOZE_HAS_HINT",
+      field: "question",
+      severity: "warning",
+      message: 'Evite muletas p\xF3s-lacuna entre par\xEAnteses como "{{c1::...}} (crit\xE9rios)".'
+    });
+  }
+  if (cardType === "basic") {
+    if (answerWordCount === 0) {
+      warnings.push({
+        code: "ANSWER_TOO_LONG",
+        field: "answer",
+        severity: "error",
+        message: "Card basic exige resposta preenchida (Matuschak Tractable & Focused: 1 a 12 palavras, m\xE1x 15)."
+      });
+    } else if (answerWordCount > MAX_BASIC_ANSWER_WORDS || answerCharCount > MAX_BASIC_ANSWER_CHARS) {
+      warnings.push({
+        code: "ANSWER_TOO_LONG",
+        field: "answer",
+        severity: "error",
+        message: `Resposta viola Tractable & Focused de Matuschak/Nielsen (${answerWordCount}/${MAX_BASIC_ANSWER_WORDS} palavras, ${answerCharCount}/${MAX_BASIC_ANSWER_CHARS} chars).`
+      });
+    }
+    if (visibleAnswer.includes(";")) {
+      warnings.push({
+        code: "ANSWER_HAS_SEMICOLON",
+        field: "answer",
+        severity: "error",
+        message: "Proibido conter ponto-e-v\xEDrgula (;) na resposta basic (Matuschak Focused: teste apenas 1 detalhe at\xF4mico por prompt)."
+      });
+    }
+    if (visibleAnswer.length > 0 && !visibleAnswer.endsWith(".")) {
+      warnings.push({
+        code: "ANSWER_MISSING_PERIOD",
+        field: "answer",
+        severity: "warning",
+        message: "A resposta em card basic deve terminar com ponto final (.)."
+      });
+    }
+    const trimmedRawAnswer = answerText.trim();
+    if (/^<(b|strong)\b[^>]*>[\s\S]*<\/\1>\.?$/i.test(trimmedRawAnswer) || /^Resposta:/i.test(visibleAnswer)) {
+      warnings.push({
+        code: "ANSWER_OUTER_BOLD",
+        field: "answer",
+        severity: "warning",
+        message: 'Proibido envolver toda a resposta basic em <b> externo ou iniciar com "Resposta:".'
+      });
+    }
+    const visQ = stripHtml(questionText);
+    const hasTemporalOrLineQualifier = /\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+manuten[cç][aã]o|de\s+minuto\s+zero|(?:conduta|abordagem|manejo|proped[êe]utica|medida)\s+(?:diagn[oó]stic[ao]|terap[êe]utic[ao]|profil[áa]tic[ao]))\b/i.test(
+      visQ
+    );
+    if (!hasTemporalOrLineQualifier && /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|\bcomo\s+conduzir|\bo\s+que\s+fazer)\s*\?\s*$/i.test(
+      visQ
+    )) {
+      warnings.push({
+        code: "VAGUE_TEMPORAL_WINDOW",
+        field: "question",
+        severity: "warning",
+        message: 'Especifique a janela temporal na pergunta ("Qual \xE9 a conduta imediata de minuto zero?" ou "Qual o tratamento definitivo?").'
+      });
+    }
+  } else if (cardType === "cloze") {
+    if (clozeCount !== 1) {
+      warnings.push({
+        code: "CLOZE_COUNT_INVALID",
+        field: "question",
+        severity: "error",
+        message: `Card cloze deve conter estritamente 1 lacuna {{c1::...}} (encontradas: ${clozeCount}).`
+      });
+    }
+    if (maxClozeWords > MAX_CLOZE_WORDS) {
+      warnings.push({
+        code: "CLOZE_TOO_LONG",
+        field: "question",
+        severity: "error",
+        message: `Lacuna cloze excede ${MAX_CLOZE_WORDS} palavras (${maxClozeWords}/${MAX_CLOZE_WORDS} palavras).`
+      });
+    }
+    if (answerText.trim() !== "") {
+      warnings.push({
+        code: "CLOZE_NON_EMPTY_ANSWER",
+        field: "answer",
+        severity: "error",
+        message: 'Em cards cloze, o campo "answer" deve ser estritamente vazio ("").'
+      });
+    }
+  }
+  const visibleQuestion = stripHtml(stripClozeMarkup(questionText));
+  const qWithoutVf = visibleQuestion.replace(/\[?\s*verdadeiro\s+ou\s+falso\??\s*\]?/gi, "");
+  const questionMarkCount = (qWithoutVf.match(/\?/g) || []).length;
+  const compoundRegex1 = /\bqual\b[^?]{3,65}\be\s+(?:qual|quais|como|quando|onde)\b/i;
+  const compoundRegex2 = /\b(?:qual|quais)\s+(?:é\s+|são\s+)?(?:o|a|os|as)?\s*(?:diagn[oó]stico|hip[oó]tese|agente|etiologia|classifica[cç][aã]o|est[aá]gio|achado|parede|mecanismo|escore)(?:\s+[a-zà-ú0-9_-]+){0,3}\s+e\s+(?:qual\s+)?(?:a\s+|o\s+|os\s+|as\s+)?(?:conduta|tratamento|manejo|exame|droga|f[áa]rmaco|terapia|antiarr[ií]tmico|ant[ií]doto|dose|art[eé]ria|interven[cç][aã]o)\b/i;
+  const hasCompoundQuestion = questionMarkCount > 1 || compoundRegex1.test(visibleQuestion) || compoundRegex2.test(visibleQuestion);
+  if (hasCompoundQuestion) {
+    warnings.push({
+      code: "COMPOUND_QUESTION",
+      field: "question",
+      severity: "error",
+      message: "Pergunta composta detectada (viola Focused & Consistent de Matuschak). Pergunte apenas 1 decis\xE3o/alavanca at\xF4mica."
+    });
+  }
+  const unfocusedSetRegex = /\b(?:quais\s+(?:s[aã]o\s+)?(?:os|as)\s+(?:\d+\s+)?(?:principais\s+)?(?:causas|crit[eé]rios|sintomas|sinais|fatores|manifesta[cç][oõ]es|complica[cç][oõ]es|indica[cç][oõ]es|contraindica[cç][oõ]es|agentes|etapas|tipos)|cite\s+(?:os|as|\d+)|liste\s+(?:os|as))\b/i;
+  const answerNumberedListRegex = /(?:^|\s)(?:1[.)]\s+.+2[.)]\s+|[-•]\s+.+[-•]\s+)/;
+  if (unfocusedSetRegex.test(visibleQuestion) || cardType === "basic" && answerNumberedListRegex.test(visibleAnswer)) {
+    warnings.push({
+      code: "MATUSCHAK_UNFOCUSED_SET",
+      field: "question",
+      severity: "error",
+      message: "Lista aberta n\xE3o-focada (viola Matuschak Focused & Consistent): converta conjuntos/enumera\xE7\xF5es em 1 atributo espec\xEDfico ancorado ou 1 lacuna cloze."
+    });
+  }
+  const passiveDefinitionRegex = /^\s*(?:o\s+que\s+[eé]\s+(?:o|a|um|uma)?\s*[a-zà-ú0-9\s-]{2,40}\??|defina\s+[a-zà-ú0-9\s-]{2,40}\.?|fale\s+sobre\s+.+)$/i;
+  const binaryAnswerRegex = /^(?:sim|n[aã]o|verdadeiro|falso)(?:[.,!]|$)/i;
+  if (passiveDefinitionRegex.test(visibleQuestion.trim()) || cardType === "basic" && binaryAnswerRegex.test(visibleAnswer.trim())) {
+    warnings.push({
+      code: "NIELSEN_PASSIVE_OR_BINARY",
+      field: cardType === "basic" && binaryAnswerRegex.test(visibleAnswer.trim()) ? "answer" : "question",
+      severity: "error",
+      message: 'Prompt passivo/bin\xE1rio (viola Salience de Matuschak & LTM de Nielsen): evite defini\xE7\xF5es de dicion\xE1rio ("O que \xE9...?") ou respostas Sim/N\xE3o; ancore em decis\xE3o cl\xEDnica ou mecanismo causal.'
+    });
+  }
+  if (!visibleTopic.includes(" - ") || visibleTopic.length > 3 && visibleTopic === visibleTopic.toUpperCase()) {
+    warnings.push({
+      code: "TOPIC_FORMAT",
+      field: "topic",
+      severity: "warning",
+      message: 'O campo "topic" deve seguir o formato "Tema - Subtema", sem caixa alta total.'
+    });
+  }
+  const topicWords = expandWithSynonyms(extractCoreKeywords(topicText));
+  const topicStems = /* @__PURE__ */ new Set();
+  for (const tw of topicWords) {
+    const st = stemPortugueseWord(tw);
+    if (st.length >= 4) topicStems.add(st);
+  }
+  const topicAcronyms = new Set(extractAcronymTokens(topicText));
+  const subtopicPart = topicText.includes(" - ") ? topicText.split(" - ").slice(1).join(" - ") : topicText;
+  const subtopicWords = expandWithSynonyms(extractCoreKeywords(subtopicPart));
+  const subtopicStems = /* @__PURE__ */ new Set();
+  for (const sw of subtopicWords) {
+    const st = stemPortugueseWord(sw);
+    if (st.length >= 4) subtopicStems.add(st);
+  }
+  const targetAnswerString = cardType === "basic" ? visibleAnswer : clozeTargets.join(" ");
+  const targetKeywords = extractCoreKeywords(targetAnswerString);
+  const targetAcronyms = extractAcronymTokens(targetAnswerString);
+  let hasTopicSpoiler = false;
+  const matchedAcronymInTopic = targetAcronyms.find((acr) => topicAcronyms.has(acr));
+  if (targetKeywords.length > 0 && topicWords.size > 0 || matchedAcronymInTopic) {
+    const matchedKws = targetKeywords.filter((kw) => {
+      if (topicWords.has(kw)) return true;
+      const kwStem = stemPortugueseWord(kw);
+      if (kwStem.length >= 4 && topicStems.has(kwStem)) return true;
+      for (const ts of topicStems) {
+        if (stemsCollideForSpoiler(kwStem, ts)) return true;
+      }
+      return false;
+    });
+    const firstTargetKw = targetKeywords[0];
+    const firstTargetStem = firstTargetKw ? stemPortugueseWord(firstTargetKw) : "";
+    const firstWordStemMatchesTopic = firstTargetStem.length >= 4 && (subtopicStems.has(firstTargetStem) || topicStems.has(firstTargetStem));
+    if (Boolean(matchedAcronymInTopic) || targetKeywords.length > 0 && matchedKws.length === targetKeywords.length || targetKeywords.length >= 2 && matchedKws.length / targetKeywords.length >= 0.5 || firstWordStemMatchesTopic || matchedKws.some((kw) => kw.length >= 5)) {
+      hasTopicSpoiler = true;
+      warnings.push({
+        code: "TOPIC_SPOILER",
+        field: "topic",
+        severity: "error",
+        message: `Spoiler no topic (radical/termo): entrega "${matchedAcronymInTopic || matchedKws[0] || firstTargetKw}" da resposta.`
+      });
+    }
+  }
+  const questionWithoutCloze = questionText.replace(/\{\{c\d+::[\s\S]*?\}\}/g, " __CLOZE__ ");
+  const parensMatches = Array.from(questionWithoutCloze.matchAll(/\(([^)]+)\)/g));
+  const targetNorm = normalizeForSpoiler(targetAnswerString);
+  for (const pm of parensMatches) {
+    const pText = (pm[1] || "").trim();
+    const pNorm = normalizeForSpoiler(pText);
+    if (!pNorm) continue;
+    const pWords = expandWithSynonyms(pNorm.split(/\s+/));
+    const pAcronyms = new Set(extractAcronymTokens(pText));
+    const exactLeak = targetNorm.length > 0 && (targetNorm === pNorm || targetNorm.length > 4 && pNorm.includes(targetNorm));
+    const acronymLeak = targetAcronyms.some((acr) => pAcronyms.has(acr));
+    const keywordLeak = targetKeywords.length >= 1 && (targetKeywords.every((kw) => pWords.has(kw)) || targetKeywords.some((kw) => kw.length >= 5 && pWords.has(kw)));
+    if (exactLeak || acronymLeak || keywordLeak) {
+      warnings.push({
+        code: "QUESTION_PAREN_SPOILER",
+        field: "question",
+        severity: "error",
+        message: `Spoiler entre par\xEAnteses no enunciado: "(${pText})" antecipa a resposta.`
+      });
+      break;
+    }
+  }
+  const hasQuestionImg = /<img\b/i.test(questionText);
+  const hasHintImg = /<img\b/i.test(hintText);
+  const hasAnyImg = hasQuestionImg || hasHintImg;
+  if (card.image_mode === "recognition") {
+    if (cardType !== "basic" || !hasQuestionImg) {
+      warnings.push({
+        code: "RECOGNITION_MISMATCH",
+        field: "question",
+        severity: "error",
+        message: 'image_mode "recognition" exige card basic com <img src="..."> na pergunta.'
+      });
+    }
+    if (hasQuestionImg && hasHintImg) {
+      warnings.push({
+        code: "RECOGNITION_MISMATCH",
+        field: "hint",
+        severity: "warning",
+        message: "N\xE3o repita a mesma tag <img> no hint de cards recognition (use apenas a legenda <i>...</i>)."
+      });
+    }
+  }
+  if (!hasAnyImg && !card.isResolvingImage) {
+    const hasOrphanVisualDeixis = /\b(?:tra[çc]ado|ecg|eletrocardiograma|exame|imagem|figura|foto|radiografia|rx|tc|tomografia|rm|resson[aâ]ncia|usg|ultrassom|ultrassonografia|ctg|cardiotocografia|l[aâ]mina|partograma|quadro\s+visual)\s+(?:abaixo|acima|ao\s+lado|em\s+anexo|anex[ao]|mostrad[ao]|apresentad[ao]|a\s+seguir)\b/i.test(
+      visibleQuestion
+    ) || /\b(?:abaixo|acima)\s*,?\s*(?:observa-se|nota-se|evidencia-se|v[êe]-se)\b/i.test(
+      visibleQuestion
+    );
+    if (hasOrphanVisualDeixis) {
+      warnings.push({
+        code: "ORPHAN_VISUAL_REFERENCE",
+        field: "question",
+        severity: "error",
+        message: 'Enunciado faz refer\xEAncia visual ("abaixo"/"acima"/"em anexo") sem nenhuma tag <img> anexada.'
+      });
+    }
+  }
+  if (/<table\b/i.test(questionText)) {
+    warnings.push({
+      code: "TABLE_MALFORMED",
+      field: "question",
+      severity: "error",
+      message: 'Tabelas HTML n\xE3o devem ficar na pergunta; mova <table class="med-table"> para o campo "hint".'
+    });
+  }
+  if (/<table\b/i.test(answerText)) {
+    warnings.push({
+      code: "TABLE_MALFORMED",
+      field: "answer",
+      severity: "error",
+      message: 'Tabelas HTML n\xE3o devem ficar na resposta; mova <table class="med-table"> para o campo "hint".'
+    });
+  }
+  if (/<table\b|<\/table>/i.test(hintText)) {
+    const openTables = (hintText.match(/<table\b/gi) || []).length;
+    const closeTables = (hintText.match(/<\/table>/gi) || []).length;
+    const openTr = (hintText.match(/<tr\b/gi) || []).length;
+    const closeTr = (hintText.match(/<\/tr>/gi) || []).length;
+    const openCell = (hintText.match(/<t[dh]\b/gi) || []).length;
+    const closeCell = (hintText.match(/<\/t[dh]>/gi) || []).length;
+    const hasHeaderCell = /<th\b/i.test(hintText);
+    const rows = hintText.match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+    const maxCols = rows.reduce((max, row) => {
+      const cells = (row.match(/<t[dh]\b/gi) || []).length;
+      return Math.max(max, cells);
+    }, 0);
+    if (openTables === 0 || openTables !== closeTables || openTr === 0 || openTr !== closeTr || openCell !== closeCell || !hasHeaderCell) {
+      warnings.push({
+        code: "TABLE_MALFORMED",
+        field: "hint",
+        severity: "error",
+        message: "Tabela HTML malformada no hint: garanta tags fechadas (<table>, <tr>, <th>, <td>) e cabe\xE7alho <th>."
+      });
+    } else if (maxCols > 5) {
+      warnings.push({
+        code: "TABLE_MALFORMED",
+        field: "hint",
+        severity: "warning",
+        message: `Tabela no hint com ${maxCols} colunas (m\xE1x. recomendado: 4\u20135 colunas para leitura m\xF3vel no Anki).`
+      });
+    }
+  }
+  if (hasAnyImg) {
+    const legendEntries = extractVisualLegendEntries(card);
+    const hasValidLegend = legendEntries.some((entry) => entry.wordCount >= MIN_VISUAL_LEGEND_WORDS);
+    if (!hasValidLegend) {
+      const bestCount = legendEntries.reduce((max, e) => Math.max(max, e.wordCount), 0);
+      warnings.push({
+        code: "RECOGNITION_MISMATCH",
+        field: "hint",
+        severity: "error",
+        message: legendEntries.length === 0 ? `[IMAGE_MISSING_LEGEND] Imagem sem legenda descritiva em <i>...</i> (m\xEDn. ${MIN_VISUAL_LEGEND_WORDS} palavras) associada ao card.` : `[IMAGE_MISSING_LEGEND] Legenda visual em <i>...</i> muito curta (${bestCount}/${MIN_VISUAL_LEGEND_WORDS} palavras descritivas m\xEDnimas).`
+      });
+    } else if (legendEntries.every(
+      (e) => /^Achado visual complementar do exame clínico para correlação diagnóstica/i.test(
+        e.descriptiveText
+      )
+    )) {
+      warnings.push({
+        code: "RECOGNITION_MISMATCH",
+        field: "hint",
+        severity: "warning",
+        message: "Legenda visual gen\xE9rica detectada; descreva o achado real vis\xEDvel na imagem (\u2265 6 palavras)."
+      });
+    }
+    const modalityCheck = detectModalityConflict(card);
+    if (modalityCheck.hasConflict && modalityCheck.message) {
+      warnings.push({
+        code: "RECOGNITION_MISMATCH",
+        field: "hint",
+        severity: "error",
+        message: `[MODALITY_CONFLICT] ${modalityCheck.message}`
+      });
+    }
+    const redundancyCheck = detectRedundantVisualDescription(card);
+    if (redundancyCheck.isRedundant && redundancyCheck.reason) {
+      warnings.push({
+        code: "RECOGNITION_MISMATCH",
+        field: "question",
+        severity: "warning",
+        message: `[REDUNDANT_VISUAL_DESCRIPTION] ${redundancyCheck.reason}`
+      });
+    }
+  }
+  if (!/<b>\s*Coment[áa]rio:\s*<\/b>/i.test(hintText)) {
+    warnings.push({
+      code: "COMMENT_MISSING_PREFIX",
+      field: "hint",
+      severity: "warning",
+      message: 'O campo "hint" deve conter "<b>Coment\xE1rio:</b> ".'
+    });
+  }
+  if (/Preceptoria|Armadilha|\[ALVO DE BANCA\]|\[BEIRA-LEITO\]|\[BUSCAR IMAGEM/i.test(
+    `${questionText} ${hintText}`
+  )) {
+    warnings.push({
+      code: "LEGACY_MARKERS",
+      field: "hint",
+      severity: "error",
+      message: "Remova marcadores obsoletos (Preceptoria, Armadilha, [ALVO DE BANCA], [BEIRA-LEITO] ou [BUSCAR IMAGEM])."
+    });
+  }
+  if (commentVisibleCharCount > MAX_COMMENT_CHARS) {
+    warnings.push({
+      code: "COMMENT_TOO_LONG",
+      field: "hint",
+      severity: "error",
+      message: `Coment\xE1rio excede o teto de ${MAX_COMMENT_CHARS} caracteres vis\xEDveis (${commentVisibleCharCount}/${MAX_COMMENT_CHARS} chars).`
+    });
+  } else if (commentVisibleCharCount > 0 && commentVisibleCharCount < 110) {
+    warnings.push({
+      code: "COMMENT_TOO_SHORT",
+      field: "hint",
+      severity: "warning",
+      message: `Coment\xE1rio curto (${commentVisibleCharCount} chars; meta ideal: 180 a 300 chars com contraste diferencial).`
+    });
+  }
+  const boldMatches = hintText.replace(/<b>\s*Coment[áa]rio:\s*<\/b>/i, "").match(/<(b|strong)\b[^>]*>/gi);
+  if (!boldMatches || boldMatches.length === 0) {
+    warnings.push({
+      code: "COMMENT_MISSING_BOLD",
+      field: "hint",
+      severity: "warning",
+      message: "Destaque os termos-chave e contraste diferencial em <b>negrito</b> no coment\xE1rio."
+    });
+  }
+  const metrics = {
+    questionWordCount,
+    answerWordCount,
+    answerCharCount,
+    commentVisibleCharCount,
+    clozeCount,
+    maxClozeWords,
+    hasCompoundQuestion,
+    hasTopicSpoiler,
+    missingMediaFiles
+  };
+  return {
+    cardId: card.id,
+    isValid: warnings.length === 0,
+    warnings,
+    metrics
+  };
+}
+var SHA256_K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
 
 // server/geminiClient.ts
 import crypto from "crypto";
@@ -269,8 +1941,8 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
 
 3. ESCOLHA FLUIDA DE FORMATO (SEM COTA FIXA) + CURADORIA PRESERVANDO O ID (FSRS):
 - A quantidade final de cards deve refletir a cobertura cl\xEDnica completa (P1 a P4) sem encher lingui\xE7a e **sem amputar conceitos essenciais**:
-  a) REFAZER EM VEZ DE DELETAR: Se um card antigo for uma lista aberta, pergunta vaga ou defini\xE7\xE3o passiva sobre um conceito P1\u2013P4 clinicamente \xFAtil (estadiamento, crit\xE9rio, esquema terap\xEAutico, retorno, complica\xE7\xE3o, popula\xE7\xE3o especial ou diferencial), **N\xC3O o exclua**: reconstrua o conceito do zero segundo Matuschak & Nielsen preservando o "id" num\xE9rico original no card principal (para manter o hist\xF3rico FSRS) e desmembrando em novos IDs (max_id + 1...) se houver mais de uma decis\xE3o at\xF4mica.
-  b) QUANDO PODAR (EXCLUIR IDs): Exclua um "id" original **APENAS** quando for: (i) duplicata sem\xE2ntica exata de outro card mantido, (ii) reprovado pelo Filtro Negativo (gen\xE9tica/biologia molecular de bancada sem impacto cl\xEDnico, hist\xF3ria/datas), ou (iii) preenchimento trivial sem alavanca cl\xEDnica real.
+  a) REFAZER EM VEZ DE DELETAR (PRESERVANDO TODOS OS POLOS CL\xCDNICOS): Se um card antigo for uma lista aberta, pergunta vaga, defini\xE7\xE3o passiva ou cloze com 2+ lacunas sobre conceitos P1\u2013P4 clinicamente \xFAteis, **N\xC3O o exclua** e **N\xC3O descarte o segundo conceito no coment\xE1rio**: reconstrua o conceito principal preservando o "id" num\xE9rico original e desmembre os demais polos clinicamente relevantes (ex.: doen\xE7a atual vs. pr\xE9via, grau leve vs. grave, 1\xAA linha vs. 2\xAA linha) em novos IDs (max_id + 1...).
+  b) QUANDO PODAR (EXCLUIR IDs \u2014 RIGOR INTERNATO-FIRST): Exclua um "id" original sempre que o card for: (i) duplicata sem\xE2ntica, fragmenta\xE7\xE3o artificial em s\xE9rie ("1/3", "2/3", "3/3" da mesma frase) ou redund\xE2ncia conceitual cruzada (o mesmo sinal, ep\xF4nimo ou crit\xE9rio j\xE1 \xE9 testado em outro card mais completo do baralho), (ii) reprovado pelo Filtro Negativo (gen\xE9tica/biologia molecular de bancada sem conduta, hist\xF3ria/datas), (iii) fisiologia/anatomia te\xF3rica pura, medidas anat\xF4micas est\xE1ticas sem impacto na conduta, detalhes t\xE9cnicos de subespecialista fora da al\xE7ada do interno, proped\xEAutica passiva substitu\xEDda por conduta padr\xE3o atual ou classifica\xE7\xE3o/modelo obsoleto substitu\xEDdo por diretriz vigente (quando um achado decidir conduta imediata, reconstrua cobrando a CONDUTA, nunca a medida isolada), ou (iv) preenchimento trivial sem decis\xE3o cl\xEDnica real.
   c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais "por que/como") ou "cloze" (crit\xE9rios num\xE9ricos, limiares, doses cr\xEDticas e alvos em \xE2ncora cl\xEDnica enxuta com 1 \xFAnica lacuna {{c1::...}}). Em "cloze" de regra geral, N\xC3O force vinheta artificial com idade/tempo de uso quando isso n\xE3o altera a conduta.
 - N\xC3O inclua o campo "sources" nos cards.
 
@@ -1027,6 +2699,20 @@ async function safeFetchWithRedirectValidation(rawUrl, init, maxRedirects = 3) {
 async function resolveImageForMultimodalValidation(imageSource, parentSignal) {
   const src = (imageSource || "").trim();
   if (!src) return { status: "broken", reason: "Fonte de imagem vazia." };
+  if (src.startsWith("/api/media/local-file?")) {
+    try {
+      const parsed = new URL(src, "http://localhost");
+      const rel = parsed.searchParams.get("rel") || "";
+      const absPath = resolveSafeLocalMediaPath(rel);
+      if (!absPath) return { status: "broken", reason: "Arquivo local n\xE3o encontrado." };
+      const buf = fs2.readFileSync(absPath);
+      const lower = absPath.toLowerCase();
+      const mimeType = lower.endsWith(".png") ? "image/png" : lower.endsWith(".webp") ? "image/webp" : "image/jpeg";
+      return { status: "ok", mimeType, data: buf.toString("base64") };
+    } catch {
+      return { status: "broken", reason: "Falha ao ler arquivo local." };
+    }
+  }
   if (/^data:image\//i.test(src)) {
     const commaIdx = src.indexOf(",");
     if (commaIdx === -1) {
@@ -1223,8 +2909,44 @@ function applyDeterministicAuditGuard(c, existing) {
   const hasOrphanDeixis = !/<img\b/i.test(`${String(c.question || "")} ${String(c.hint || "")}`) && /\b(?:ecg|tra[çc]ado|exame|imagem|rx|usg|tc|ctg)\s+(?:abaixo|acima|em\s+anexo)\b/i.test(plainQ);
   const hasMissingBasicAnswer = String(c.type || "basic").toLowerCase() === "basic" && !plainA;
   const hasShortComment = plainHint.length < 100;
-  const deterministicRebuildReason = hasOrphanDeixis ? 'Refer\xEAncia visual ("abaixo"/"em anexo") sem imagem anexada.' : hasMissingBasicAnswer ? "Card basic com resposta vazia." : hasVaguePrompt ? "Comando vago sem janela temporal ou linha terap\xEAutica." : isPassivePrompt ? "Defini\xE7\xE3o passiva sem vinheta ou decis\xE3o cl\xEDnica." : hasShortComment ? `Coment\xE1rio muito curto (${plainHint.length} chars) sem contraste diferencial adequado.` : "";
+  const rawQ = String(c.question || "");
+  const rawHint = String(c.hint || "");
+  const cardForLint = {
+    id: Number.isFinite(cid) ? cid : 0,
+    type: String(c.type || "").toLowerCase() === "cloze" || /\{\{c\d+::/.test(rawQ) ? "cloze" : "basic",
+    topic: String(c.topic || ""),
+    question: rawQ,
+    answer: String(c.answer || ""),
+    hint: rawHint,
+    image_mode: c.image_mode === "recognition" || c.image_mode === "feedback" ? c.image_mode : void 0
+  };
+  const lintResult = lintCard(cardForLint);
+  const hasFragmentedSeriesTopic = /\(\s*\d+\s*\/\s*\d+\s*\)\s*$/.test(String(c.topic || "").trim());
+  const splitCodes = /* @__PURE__ */ new Set(["CLOZE_COUNT_INVALID", "COMPOUND_QUESTION", "ANSWER_HAS_SEMICOLON"]);
+  const rebuildCodes = /* @__PURE__ */ new Set([
+    "TOPIC_SPOILER",
+    "CLOZE_HAS_HINT",
+    "ANSWER_TOO_LONG",
+    "LEGACY_MARKERS",
+    "COMMENT_TOO_LONG",
+    "QUESTION_PAREN_SPOILER",
+    "NIELSEN_PASSIVE_OR_BINARY",
+    "ORPHAN_VISUAL_REFERENCE",
+    "REDUNDANT_VISUAL_DESCRIPTION"
+  ]);
+  const splitIssue = lintResult.warnings.find((iss) => splitCodes.has(iss.code));
+  const rebuildIssue = lintResult.warnings.find((iss) => rebuildCodes.has(iss.code));
+  const deterministicSplitReason = splitIssue ? splitIssue.message : "";
+  const deterministicRebuildReason = hasOrphanDeixis ? 'Refer\xEAncia visual ("abaixo"/"em anexo") sem imagem anexada.' : hasMissingBasicAnswer ? "Card basic com resposta vazia." : hasVaguePrompt ? "Comando vago sem janela temporal ou linha terap\xEAutica." : isPassivePrompt ? "Defini\xE7\xE3o passiva sem vinheta ou decis\xE3o cl\xEDnica." : hasFragmentedSeriesTopic ? "S\xE9rie fragmentada artificialmente (1/3, 2/3, 3/3) \u2014 consolidar ou podar redund\xE2ncias." : rebuildIssue ? rebuildIssue.message : hasShortComment ? `Coment\xE1rio muito curto (${plainHint.length} chars) sem contraste diferencial adequado.` : "";
   if (existing) {
+    if (existing.verdict === "keep" && deterministicSplitReason) {
+      return {
+        ...existing,
+        verdict: "split",
+        score: Math.min(existing.score, 5),
+        reason: `${deterministicSplitReason} Desmembrar em cards at\xF4micos.`
+      };
+    }
     if (existing.verdict === "keep" && deterministicRebuildReason) {
       return {
         ...existing,
@@ -1236,11 +2958,12 @@ function applyDeterministicAuditGuard(c, existing) {
     return existing;
   }
   const validPriorities = /* @__PURE__ */ new Set(["P1", "P2", "P3", "P4"]);
+  const fallbackVerdict = deterministicSplitReason ? "split" : deterministicRebuildReason ? "rebuild" : "keep";
   return {
     cardId: cid,
-    verdict: deterministicRebuildReason ? "rebuild" : "keep",
-    score: deterministicRebuildReason ? 5 : 8,
-    reason: deterministicRebuildReason ? `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.` : "Mantido ap\xF3s auditoria geral.",
+    verdict: fallbackVerdict,
+    score: fallbackVerdict === "keep" ? 8 : 5,
+    reason: deterministicSplitReason ? `${deterministicSplitReason} Desmembrar em cards at\xF4micos.` : deterministicRebuildReason ? `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.` : "Mantido ap\xF3s auditoria geral.",
     targetConcept: sanitizeCardTextForPrompt(c.topic, 140) || "Conceito cl\xEDnico do card.",
     priority: validPriorities.has(String(c.priority || "").toUpperCase()) ? String(c.priority).toUpperCase() : "P2",
     suggestedType: c.type === "cloze" ? "cloze" : "basic"
@@ -1584,32 +3307,42 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
       const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
       const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
       const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
-      const cardsDigest = buildFullCardsDigest(
-        inputCards.slice(0, 140).map((c) => ({
-          id: c.id,
-          type: c.type,
-          priority: c.priority,
-          topic: c.topic,
-          question: c.question,
-          answer: c.answer,
-          hint: c.hint
-        }))
-      );
-      const prompt = `Voc\xEA \xE9 o Auditor Chefe de Qualidade Cl\xEDnica e Pedag\xF3gica (Matuschak & Nielsen + Diretrizes M\xE9dicas Brasileiras) avaliando UM BARALHO EXISTENTE para o tema "${deckKey}".
+      const AUDIT_CHUNK_SIZE = 120;
+      const chunks = [];
+      for (let i = 0; i < inputCards.length; i += AUDIT_CHUNK_SIZE) {
+        chunks.push(inputCards.slice(i, i + AUDIT_CHUNK_SIZE));
+      }
+      const allRawItems = [];
+      let overallSummary = "";
+      let lastModelUsed = activeModel;
+      for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+        const chunk = chunks[chunkIdx];
+        const cardsDigest = buildFullCardsDigest(
+          chunk.map((c) => ({
+            id: c.id,
+            type: c.type,
+            priority: c.priority,
+            topic: c.topic,
+            question: c.question,
+            answer: c.answer,
+            hint: c.hint
+          }))
+        );
+        const prompt = `Voc\xEA \xE9 o Auditor Chefe de Qualidade Cl\xEDnica e Pedag\xF3gica (Matuschak & Nielsen + Diretrizes M\xE9dicas Brasileiras) avaliando UM BARALHO EXISTENTE para o tema "${deckKey}"${chunks.length > 1 ? ` (Lote ${chunkIdx + 1}/${chunks.length})` : ""}.
 Analise cada card abaixo individualmente comparando-o com os PDFs anexados, o Mapa Cl\xEDnico P1\u2013P4 e as diretrizes atualizadas.
 
 ${profilePromptBlock}${guidelinesBlock}
 MAPA CL\xCDNICO P1\u2013P4 DE REFER\xCANCIA:
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Avalie conforme matriz P1\u2013P4 do tema."}
 
-CARDS EXISTENTES PARA JULGAMENTO (JULGUE TODOS OS ${Math.min(140, inputCards.length)} CARDS):
+CARDS EXISTENTES PARA JULGAMENTO (JULGUE TODOS OS ${chunk.length} CARDS DESTE LOTE):
 ${cardsDigest}
 
 CRIT\xC9RIOS DE VEREDITO POR CARD ("verdict"):
 - "keep": Card j\xE1 est\xE1 excelente (nota >= 8/10): decis\xE3o at\xF4mica clara, clinicamente atualizada e correta segundo os PDFs/diretrizes, sem spoiler, sem lista disfar\xE7ada, "hint" com \u2265 120 chars vis\xEDveis e contraste diferencial, E com tag <img ...> caso o t\xF3pico exija reconhecimento visual (ECG/RX/USG/TC/CTG/les\xE3o). NUNCA atribua "keep" a pergunta vaga ("Qual a conduta?", "Qual o manejo?", "O que fazer?"), defini\xE7\xE3o passiva ("O que \xE9 X?"), card sem imagem em reconhecimento visual ou coment\xE1rio raso (< 110 chars).
 - "rebuild": Card cobre um conceito cl\xEDnico \xFAtil/importante, POR\xC9M est\xE1 fraco (pergunta vaga como "Qual a conduta?", "Qual o manejo?", "O que fazer?", defini\xE7\xE3o passiva "O que \xE9...", resposta longa/lista, spoiler no enunciado/t\xF3pico, dose ou crit\xE9rio desatualizado/impreciso, coment\xE1rio raso ou exame visual sem <img>). DEVE SER REFEITO DO ZERO!
 - "split": Card mistura 2 ou mais decis\xF5es cl\xEDnicas diferentes no mesmo card (ex.: diagn\xF3stico + tratamento, parede + art\xE9ria, achado + antiarr\xEDtmico, ou m\xFAltiplos esquemas/crit\xE9rios) e precisa ser desdobrado em cards at\xF4micos separados.
-- "prune": Card \xE9 duplicata exata de outro card melhor no deck, \xE9 trivial sem impacto cl\xEDnico ou viola o Filtro Negativo (hist\xF3ria da medicina, gen\xE9tica de bancada sem conduta).
+- "prune": Card DEVE ser exclu\xEDdo (poda rigorosa Internato-First) se for: (1) duplicata sem\xE2ntica ou redund\xE2ncia conceitual cruzada (mesmo sinal/ep\xF4nimo/crit\xE9rio j\xE1 cobrado em outro card mais completo do deck); (2) fisiologia/anatomia te\xF3rica pura, medidas anat\xF4micas est\xE1ticas sem impacto na conduta, detalhes t\xE9cnicos de subespecialista fora da al\xE7ada do interno, proped\xEAutica passiva substitu\xEDda por conduta padr\xE3o atual, modelo/escore obsoleto substitu\xEDdo por diretriz vigente ou ep\xF4nimo raro sem impacto \xE0 beira-leito; (3) preenchimento trivial sem alavanca cl\xEDnica real; ou (4) reprovado pelo Filtro Negativo (hist\xF3ria da medicina, datas, gen\xE9tica/biologia molecular de bancada sem conduta).
 
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido:
 {
@@ -1627,44 +3360,49 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido:
     }
   ]
 }`;
-      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
-        const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
-        parts.push({ text: prompt });
-        return generateContentWithRetry(
-          ai,
-          {
-            model: activeModel,
-            contents: { parts },
-            config: {
-              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-              responseMimeType: "application/json",
-              maxOutputTokens: 32768,
-              thinkingConfig: { thinkingLevel: ThinkingLevel2.MEDIUM }
-            }
-          },
-          { signal, timeoutMs: 14e4, enableModelFallback: true }
-        );
-      }, signal);
-      if (res.writableEnded) return;
-      const rawText = response.text || "{}";
-      const { items: rawItems } = parseOrRecoverJsonArrayField(rawText, "items", [
-        "cardId",
-        "verdict"
-      ]);
-      let overallSummary = "";
-      try {
-        const full = JSON.parse(extractJsonBlock(rawText));
-        overallSummary = String(full?.overallSummary || "").trim();
-      } catch {
-        const sumMatch = rawText.match(/"overallSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-        if (sumMatch?.[1]) {
+        const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+          const parts = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+          parts.push({ text: prompt });
+          return generateContentWithRetry(
+            ai,
+            {
+              model: activeModel,
+              contents: { parts },
+              config: {
+                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                responseMimeType: "application/json",
+                maxOutputTokens: 32768,
+                thinkingConfig: { thinkingLevel: ThinkingLevel2.MEDIUM }
+              }
+            },
+            { signal, timeoutMs: 14e4, enableModelFallback: true }
+          );
+        }, signal);
+        if (res.writableEnded) return;
+        lastModelUsed = response.modelUsed || lastModelUsed;
+        const rawText = response.text || "{}";
+        const { items: chunkItems } = parseOrRecoverJsonArrayField(rawText, "items", [
+          "cardId",
+          "verdict"
+        ]);
+        allRawItems.push(...chunkItems);
+        if (!overallSummary) {
           try {
-            overallSummary = JSON.parse(`"${sumMatch[1]}"`);
+            const full = JSON.parse(extractJsonBlock(rawText));
+            overallSummary = String(full?.overallSummary || "").trim();
           } catch {
-            overallSummary = sumMatch[1];
+            const sumMatch = rawText.match(/"overallSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+            if (sumMatch?.[1]) {
+              try {
+                overallSummary = JSON.parse(`"${sumMatch[1]}"`);
+              } catch {
+                overallSummary = sumMatch[1];
+              }
+            }
           }
         }
       }
+      const rawItems = allRawItems;
       const validVerdicts = /* @__PURE__ */ new Set(["keep", "rebuild", "split", "prune"]);
       const validPriorities = /* @__PURE__ */ new Set(["P1", "P2", "P3", "P4"]);
       const itemMap = /* @__PURE__ */ new Map();
@@ -1700,7 +3438,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido:
         overallSummary: overallSummary || `Auditoria conclu\xEDda: ${counts.keep} mantido(s), ${counts.rebuild} para refazer do zero, ${counts.split} para desmembrar e ${counts.prune} para podar.`,
         counts,
         items: normalizedItems,
-        modelUsed: response.modelUsed
+        modelUsed: lastModelUsed
       });
     } catch (error) {
       if (res.writableEnded) return;
@@ -2543,9 +4281,11 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido:
 }
 
 // server/routes/media.ts
+import fs4 from "fs";
 import express2 from "express";
 
 // server/ankiExport.ts
+import fs3 from "fs";
 import crypto2 from "crypto";
 import initSqlJs from "sql.js";
 var CRC32_TABLE = (() => {
@@ -2659,6 +4399,17 @@ async function resolveMediaSourceToBuffer(sourceUrl) {
   if (!sourceUrl) return null;
   const trimmed = sourceUrl.trim();
   if (!trimmed) return null;
+  if (trimmed.startsWith("/api/media/local-file?")) {
+    try {
+      const parsed = new URL(trimmed, "http://localhost");
+      const rel = parsed.searchParams.get("rel") || "";
+      const absPath = resolveSafeLocalMediaPath(rel);
+      if (!absPath) return null;
+      return fs3.readFileSync(absPath);
+    } catch {
+      return null;
+    }
+  }
   if (trimmed.startsWith("data:")) {
     const commaIdx = trimmed.indexOf(",");
     if (commaIdx === -1) return null;
@@ -4277,6 +6028,100 @@ Retorne EXCLUSIVAMENTE um array JSON v\xE1lido com at\xE9 5 refer\xEAncias encon
     return [];
   }
 }
+async function searchOpeniMedicalImages(enQueries, rawSearch, signal) {
+  if (signal?.aborted) return [];
+  const q = (enQueries[0] || rawSearch || "").trim();
+  if (!q) return [];
+  try {
+    const url = new URL("https://openi.nlm.nih.gov/api/search");
+    url.searchParams.set("m", "1");
+    url.searchParams.set("n", "8");
+    url.searchParams.set("query", q);
+    if (/\b(x[\s_-]?ray|radiograph|chest)\b/i.test(q)) url.searchParams.set("it", "x");
+    else if (/\b(ct|computed tomography|tomography)\b/i.test(q)) url.searchParams.set("it", "c");
+    else if (/\b(mri|magnetic resonance)\b/i.test(q)) url.searchParams.set("it", "m");
+    else if (/\b(ultrasound|sonography|echocardiogram|doppler)\b/i.test(q)) url.searchParams.set("it", "u");
+    const resp = await fetch(url.toString(), {
+      headers: { "User-Agent": WIKIMEDIA_USER_AGENT, Accept: "application/json" },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(7e3)]) : AbortSignal.timeout(7e3)
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    const results = [];
+    for (let idx = 0; idx < (data.list || []).length; idx++) {
+      const item = data.list[idx];
+      const rawLarge = (item.imgLarge || item.imgThumb || "").trim();
+      if (!rawLarge) continue;
+      const fullUrl = rawLarge.startsWith("http") ? rawLarge : `https://openi.nlm.nih.gov${rawLarge.startsWith("/") ? "" : "/"}${rawLarge}`;
+      const rawThumb = (item.imgThumb || item.imgGrid150 || rawLarge).trim();
+      const thumbUrl = rawThumb.startsWith("http") ? rawThumb : `https://openi.nlm.nih.gov${rawThumb.startsWith("/") ? "" : "/"}${rawThumb}`;
+      if (isSpamOrLogoImageUrl(fullUrl)) continue;
+      const title = (item.title || q).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 90);
+      const baseSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 42);
+      results.push({
+        id: `openi-${item.uid || idx}-${Date.now()}`,
+        title: title || q,
+        thumbUrl,
+        fullUrl,
+        description: (item.Problems || title || `Imagem cient\xEDfica Open-i/NIH referente a ${q}.`).slice(0, 180),
+        suggestedFilename: `openi_${baseSlug || `med_${idx + 1}`}.jpg`,
+        defaultLegend: `Exame m\xE9dico indexado (Open-i/NIH) compat\xEDvel com ${q}.`,
+        source: "Open-i (NLM/NIH)",
+        isSvg: false
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+async function searchSerperMedicalImages(enQueries, rawSearch, signal) {
+  if (signal?.aborted) return [];
+  const apiKey = (process.env.SERPER_API_KEY || "").trim();
+  if (!apiKey) return [];
+  const q = (enQueries[0] || rawSearch || "").trim();
+  if (!q) return [];
+  try {
+    const resp = await fetch("https://google.serper.dev/images", {
+      method: "POST",
+      headers: {
+        "X-API-KEY": apiKey,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ q, num: 8 }),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8e3)]) : AbortSignal.timeout(8e3)
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    const results = [];
+    for (let idx = 0; idx < (data.images || []).length; idx++) {
+      const item = data.images[idx];
+      const fullUrl = (item.imageUrl || "").trim();
+      if (!fullUrl.startsWith("http") || isSpamOrLogoImageUrl(fullUrl)) continue;
+      if (item.imageWidth && item.imageWidth < 150) continue;
+      const thumbUrl = (item.thumbnailUrl || fullUrl).trim();
+      const title = (item.title || q).replace(/\s+/g, " ").trim().slice(0, 90);
+      const extMatch = fullUrl.match(/\.(png|jpe?g|webp)(?:\?|$)/i);
+      const ext = extMatch ? `.${extMatch[1].toLowerCase().replace("jpeg", "jpg")}` : ".jpg";
+      const baseSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 42);
+      const sourceDomain = item.domain || item.source || "Google Images";
+      results.push({
+        id: `serper-${idx}-${Date.now()}`,
+        title,
+        thumbUrl,
+        fullUrl,
+        description: `Imagem encontrada em ${sourceDomain} referente a ${rawSearch}.`.slice(0, 180),
+        suggestedFilename: `${baseSlug || `google_med_${idx + 1}`}${ext}`,
+        defaultLegend: `Exame ou imagem cl\xEDnica (${sourceDomain}) referente a ${rawSearch}.`,
+        source: `Google Images Serper (${sourceDomain})`,
+        isSvg: isSvgImageUrl(fullUrl)
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
 async function searchMedicalImages(ai, ctx) {
   const {
     query = "",
@@ -4284,6 +6129,7 @@ async function searchMedicalImages(ai, ctx) {
     question = "",
     answer = "",
     hint = "",
+    deckKey = "",
     preferGoogleGrounding = true,
     signal
   } = ctx;
@@ -4297,43 +6143,82 @@ async function searchMedicalImages(ai, ctx) {
     signal,
     answer
   );
-  const [googleSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
-    preferGoogleGrounding ? searchGoogleMedicalImagesViaGrounding(
+  const localHits = searchLocalMediaArchive({
+    query: rawSearch,
+    topic,
+    question,
+    answer,
+    deckKey,
+    limit: 6
+  }).map((hit, idx) => {
+    const localUrl = `/api/media/local-file?rel=${encodeURIComponent(hit.entry.relPath)}`;
+    return {
+      id: `local-${idx}-${hit.entry.filename}`,
+      title: hit.entry.captionHint.slice(0, 90),
+      thumbUrl: localUrl,
+      fullUrl: localUrl,
+      description: hit.entry.captionHint.slice(0, 180),
+      suggestedFilename: hit.entry.filename,
+      defaultLegend: `${hit.entry.captionHint.slice(0, 140)} (acervo local do curso).`,
+      source: "Acervo Local (04_M\xEDdias)",
+      fromMaterial: true,
+      isSvg: false,
+      relevanceScore: 30 + Math.min(25, hit.score)
+    };
+  });
+  const [openiSettled, wikipediaSettled, wikimediaSettled] = await Promise.allSettled([
+    searchOpeniMedicalImages(enQueries, rawSearch, signal),
+    searchWikipediaMedicalImages(enQueries, rawSearch, signal),
+    searchWikimediaCommonsMedical(enQueries, signal)
+  ]);
+  const tier1And2 = [
+    ...localHits,
+    ...openiSettled.status === "fulfilled" ? openiSettled.value.slice(0, 8) : [],
+    ...wikipediaSettled.status === "fulfilled" ? wikipediaSettled.value.slice(0, 8) : [],
+    ...wikimediaSettled.status === "fulfilled" ? wikimediaSettled.value.slice(0, 8) : []
+  ];
+  const scoreAndDedupe = (list) => {
+    const deduped = /* @__PURE__ */ new Map();
+    for (const candidate of list) {
+      if (!candidate) continue;
+      const key = candidate.fromMaterial ? `local:${candidate.suggestedFilename.toLowerCase()}` : normalizeImageCanonicalKey(candidate.thumbUrl || candidate.fullUrl, candidate.title);
+      const computedScore = candidate.fromMaterial ? candidate.relevanceScore ?? 40 : scoreImageRelevance(candidate, {
+        query: rawSearch,
+        topic,
+        question,
+        answer,
+        enQueries
+      });
+      const scored = { ...candidate, relevanceScore: computedScore };
+      const existing = deduped.get(key);
+      if (!existing || (scored.relevanceScore ?? 0) > (existing.relevanceScore ?? 0)) {
+        deduped.set(key, scored);
+      }
+    }
+    return Array.from(deduped.values());
+  };
+  let allScored = scoreAndDedupe(tier1And2);
+  const strongCount = allScored.filter((c) => !c.isSvg && (c.relevanceScore ?? 0) >= 18).length;
+  if (strongCount < 3) {
+    const serperResults = await searchSerperMedicalImages(enQueries, rawSearch, signal);
+    if (serperResults.length > 0) {
+      allScored = scoreAndDedupe([...allScored, ...serperResults]);
+    }
+  }
+  const strongAfterCse = allScored.filter((c) => !c.isSvg && (c.relevanceScore ?? 0) >= 18).length;
+  if (preferGoogleGrounding && strongAfterCse < 3 && ai) {
+    const groundingResults = await searchGoogleMedicalImagesViaGrounding(
       ai,
       rawSearch,
       topic,
       question,
       enQueries,
       signal
-    ) : Promise.resolve([]),
-    searchWikipediaMedicalImages(enQueries, rawSearch, signal),
-    searchWikimediaCommonsMedical(enQueries, signal)
-  ]);
-  const allCandidates = [
-    ...googleSettled.status === "fulfilled" ? googleSettled.value : [],
-    ...wikipediaSettled.status === "fulfilled" ? wikipediaSettled.value.slice(0, 8) : [],
-    ...wikimediaSettled.status === "fulfilled" ? wikimediaSettled.value.slice(0, 8) : []
-  ];
-  const dedupedMap = /* @__PURE__ */ new Map();
-  for (const candidate of allCandidates) {
-    if (!candidate) continue;
-    const key = normalizeImageCanonicalKey(candidate.thumbUrl || candidate.fullUrl, candidate.title);
-    const scored = {
-      ...candidate,
-      relevanceScore: scoreImageRelevance(candidate, {
-        query: rawSearch,
-        topic,
-        question,
-        answer,
-        enQueries
-      })
-    };
-    const existing = dedupedMap.get(key);
-    if (!existing || (scored.relevanceScore ?? 0) > (existing.relevanceScore ?? 0)) {
-      dedupedMap.set(key, scored);
+    );
+    if (groundingResults.length > 0) {
+      allScored = scoreAndDedupe([...allScored, ...groundingResults]);
     }
   }
-  const allScored = Array.from(dedupedMap.values());
   const maxScore = allScored.reduce((m, c) => Math.max(m, c.relevanceScore ?? 0), 0);
   const minThreshold = maxScore >= 28 ? 18 : 12;
   const ranked = allScored.filter((c) => (c.relevanceScore ?? 0) >= minThreshold).sort((a, b) => {
@@ -4388,6 +6273,7 @@ function createMediaRouter() {
         question = "",
         answer = "",
         hint = "",
+        deckKey = "",
         preferGoogleGrounding = true
       } = req.body || {};
       const ai = getAiClient();
@@ -4397,6 +6283,7 @@ function createMediaRouter() {
         question: String(question || ""),
         answer: String(answer || ""),
         hint: String(hint || ""),
+        deckKey: String(deckKey || ""),
         preferGoogleGrounding: Boolean(preferGoogleGrounding),
         signal
       });
@@ -4412,6 +6299,18 @@ function createMediaRouter() {
     } finally {
       cleanup();
     }
+  });
+  router.get("/media/local-file", (req, res) => {
+    const rel = String(req.query.rel || "").trim();
+    const absPath = resolveSafeLocalMediaPath(rel);
+    if (!absPath) {
+      return res.status(404).send("Local media file not found");
+    }
+    const lower = absPath.toLowerCase();
+    const mime = lower.endsWith(".png") ? "image/png" : lower.endsWith(".webp") ? "image/webp" : "image/jpeg";
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    return fs4.createReadStream(absPath).pipe(res);
   });
   router.get("/media/proxy-image", async (req, res) => {
     const { signal, cleanup } = attachRequestAbort(req, res, 6e3);
@@ -4602,7 +6501,7 @@ function createMediaRouter() {
 
 // server.ts
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path.dirname(__filename);
+var __dirname = path2.dirname(__filename);
 var PORT = Number(process.env.PORT) || 3e3;
 async function startServer() {
   const app = express3();
@@ -4616,10 +6515,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, "dist");
+    const distPath = path2.join(__dirname, "dist");
     app.use(express3.static(distPath));
     app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      res.sendFile(path2.join(distPath, "index.html"));
     });
   }
   const server = app.listen(PORT, "0.0.0.0", () => {

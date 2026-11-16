@@ -1,3 +1,4 @@
+import fs from 'fs';
 import express, { Request, Response } from 'express';
 import {
   buildAnkiApkgBuffer,
@@ -5,6 +6,7 @@ import {
   resolveDeckMediaFiles,
 } from '../ankiExport';
 import { getAiClient } from '../geminiClient';
+import { resolveSafeLocalMediaPath } from '../localMediaIndex';
 import { searchMedicalImages } from '../mediaSearch';
 import { isSafeExternalImageUrl, safeFetchWithRedirectValidation } from './gemini';
 
@@ -60,6 +62,7 @@ export function createMediaRouter(): express.Router {
         question = '',
         answer = '',
         hint = '',
+        deckKey = '',
         preferGoogleGrounding = true,
       } = req.body || {};
 
@@ -70,6 +73,7 @@ export function createMediaRouter(): express.Router {
         question: String(question || ''),
         answer: String(answer || ''),
         hint: String(hint || ''),
+        deckKey: String(deckKey || ''),
         preferGoogleGrounding: Boolean(preferGoogleGrounding),
         signal,
       });
@@ -86,6 +90,24 @@ export function createMediaRouter(): express.Router {
     } finally {
       cleanup();
     }
+  });
+
+  // Servir imagem segura do acervo local (04_Mídias/)
+  router.get('/media/local-file', (req, res) => {
+    const rel = String(req.query.rel || '').trim();
+    const absPath = resolveSafeLocalMediaPath(rel);
+    if (!absPath) {
+      return res.status(404).send('Local media file not found');
+    }
+    const lower = absPath.toLowerCase();
+    const mime = lower.endsWith('.png')
+      ? 'image/png'
+      : lower.endsWith('.webp')
+      ? 'image/webp'
+      : 'image/jpeg';
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return fs.createReadStream(absPath).pipe(res);
   });
 
   // Proxy de imagem externa para permitir Tarja Anti-Spoiler via <canvas> sem erro de CORS

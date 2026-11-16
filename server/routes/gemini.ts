@@ -1,8 +1,11 @@
+import fs from 'fs';
 import express, { Request, Response } from 'express';
+import { resolveSafeLocalMediaPath } from '../localMediaIndex';
 import type { Part } from '@google/genai';
 import { ThinkingLevel, Type } from '@google/genai';
-import type { DomainProfile } from '../../src/types/deck';
+import type { CanonicalCard, DomainProfile } from '../../src/types/deck';
 import { formatProfilePromptBlock, inferDomainProfile } from '../../src/utils/domainProfiles';
+import { lintCard } from '../../src/utils/wozniakLinter';
 import {
   buildFullCardsDigest,
   extractErrorDetails,
@@ -113,6 +116,25 @@ async function resolveImageForMultimodalValidation(
 ): Promise<FetchedImageResult> {
   const src = (imageSource || '').trim();
   if (!src) return { status: 'broken', reason: 'Fonte de imagem vazia.' };
+
+  if (src.startsWith('/api/media/local-file?')) {
+    try {
+      const parsed = new URL(src, 'http://localhost');
+      const rel = parsed.searchParams.get('rel') || '';
+      const absPath = resolveSafeLocalMediaPath(rel);
+      if (!absPath) return { status: 'broken', reason: 'Arquivo local não encontrado.' };
+      const buf = fs.readFileSync(absPath);
+      const lower = absPath.toLowerCase();
+      const mimeType = lower.endsWith('.png')
+        ? 'image/png'
+        : lower.endsWith('.webp')
+        ? 'image/webp'
+        : 'image/jpeg';
+      return { status: 'ok', mimeType, data: buf.toString('base64') };
+    } catch {
+      return { status: 'broken', reason: 'Falha ao ler arquivo local.' };
+    }
+  }
 
   if (/^data:image\//i.test(src)) {
     const commaIdx = src.indexOf(',');
@@ -367,6 +389,37 @@ export function applyDeterministicAuditGuard(
   const hasMissingBasicAnswer = String(c.type || 'basic').toLowerCase() === 'basic' && !plainA;
   const hasShortComment = plainHint.length < 100;
 
+  const rawQ = String(c.question || '');
+  const rawHint = String(c.hint || '');
+  const cardForLint: CanonicalCard = {
+    id: Number.isFinite(cid) ? cid : 0,
+    type: String(c.type || '').toLowerCase() === 'cloze' || /\{\{c\d+::/.test(rawQ) ? 'cloze' : 'basic',
+    topic: String(c.topic || ''),
+    question: rawQ,
+    answer: String(c.answer || ''),
+    hint: rawHint,
+    image_mode:
+      c.image_mode === 'recognition' || c.image_mode === 'feedback' ? c.image_mode : undefined,
+  };
+  const lintResult = lintCard(cardForLint);
+  const hasFragmentedSeriesTopic = /\(\s*\d+\s*\/\s*\d+\s*\)\s*$/.test(String(c.topic || '').trim());
+  const splitCodes = new Set(['CLOZE_COUNT_INVALID', 'COMPOUND_QUESTION', 'ANSWER_HAS_SEMICOLON']);
+  const rebuildCodes = new Set([
+    'TOPIC_SPOILER',
+    'CLOZE_HAS_HINT',
+    'ANSWER_TOO_LONG',
+    'LEGACY_MARKERS',
+    'COMMENT_TOO_LONG',
+    'QUESTION_PAREN_SPOILER',
+    'NIELSEN_PASSIVE_OR_BINARY',
+    'ORPHAN_VISUAL_REFERENCE',
+    'REDUNDANT_VISUAL_DESCRIPTION',
+  ]);
+  const splitIssue = lintResult.warnings.find((iss) => splitCodes.has(iss.code));
+  const rebuildIssue = lintResult.warnings.find((iss) => rebuildCodes.has(iss.code));
+
+  const deterministicSplitReason = splitIssue ? splitIssue.message : '';
+
   const deterministicRebuildReason = hasOrphanDeixis
     ? 'Referência visual ("abaixo"/"em anexo") sem imagem anexada.'
     : hasMissingBasicAnswer
@@ -375,11 +428,23 @@ export function applyDeterministicAuditGuard(
     ? 'Comando vago sem janela temporal ou linha terapêutica.'
     : isPassivePrompt
     ? 'Definição passiva sem vinheta ou decisão clínica.'
+    : hasFragmentedSeriesTopic
+    ? 'Série fragmentada artificialmente (1/3, 2/3, 3/3) — consolidar ou podar redundâncias.'
+    : rebuildIssue
+    ? rebuildIssue.message
     : hasShortComment
     ? `Comentário muito curto (${plainHint.length} chars) sem contraste diferencial adequado.`
     : '';
 
   if (existing) {
+    if (existing.verdict === 'keep' && deterministicSplitReason) {
+      return {
+        ...existing,
+        verdict: 'split',
+        score: Math.min(existing.score, 5),
+        reason: `${deterministicSplitReason} Desmembrar em cards atômicos.`,
+      };
+    }
     if (existing.verdict === 'keep' && deterministicRebuildReason) {
       return {
         ...existing,
@@ -391,11 +456,18 @@ export function applyDeterministicAuditGuard(
     return existing;
   }
   const validPriorities = new Set(['P1', 'P2', 'P3', 'P4']);
+  const fallbackVerdict = deterministicSplitReason
+    ? 'split'
+    : deterministicRebuildReason
+    ? 'rebuild'
+    : 'keep';
   return {
     cardId: cid,
-    verdict: deterministicRebuildReason ? 'rebuild' : 'keep',
-    score: deterministicRebuildReason ? 5 : 8,
-    reason: deterministicRebuildReason
+    verdict: fallbackVerdict,
+    score: fallbackVerdict === 'keep' ? 8 : 5,
+    reason: deterministicSplitReason
+      ? `${deterministicSplitReason} Desmembrar em cards atômicos.`
+      : deterministicRebuildReason
       ? `${deterministicRebuildReason} Refazer do zero segundo Matuschak & Nielsen.`
       : 'Mantido após auditoria geral.',
     targetConcept: sanitizeCardTextForPrompt(c.topic, 140) || 'Conceito clínico do card.',
@@ -798,33 +870,45 @@ Retorne EXCLUSIVAMENTE um JSON válido:
       const checkedMapItems = Array.isArray(clinicalMap?.items)
         ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
         : [];
-      const cardsDigest = buildFullCardsDigest(
-        inputCards.slice(0, 140).map((c: Record<string, unknown>) => ({
-          id: c.id,
-          type: c.type,
-          priority: c.priority,
-          topic: c.topic,
-          question: c.question,
-          answer: c.answer,
-          hint: c.hint,
-        }))
-      );
+      const AUDIT_CHUNK_SIZE = 120;
+      const chunks: Array<Array<Record<string, unknown>>> = [];
+      for (let i = 0; i < inputCards.length; i += AUDIT_CHUNK_SIZE) {
+        chunks.push(inputCards.slice(i, i + AUDIT_CHUNK_SIZE));
+      }
 
-      const prompt = `Você é o Auditor Chefe de Qualidade Clínica e Pedagógica (Matuschak & Nielsen + Diretrizes Médicas Brasileiras) avaliando UM BARALHO EXISTENTE para o tema "${deckKey}".
+      const allRawItems: Array<Record<string, unknown>> = [];
+      let overallSummary = '';
+      let lastModelUsed = activeModel;
+
+      for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+        const chunk = chunks[chunkIdx];
+        const cardsDigest = buildFullCardsDigest(
+          chunk.map((c: Record<string, unknown>) => ({
+            id: c.id,
+            type: c.type,
+            priority: c.priority,
+            topic: c.topic,
+            question: c.question,
+            answer: c.answer,
+            hint: c.hint,
+          }))
+        );
+
+        const prompt = `Você é o Auditor Chefe de Qualidade Clínica e Pedagógica (Matuschak & Nielsen + Diretrizes Médicas Brasileiras) avaliando UM BARALHO EXISTENTE para o tema "${deckKey}"${chunks.length > 1 ? ` (Lote ${chunkIdx + 1}/${chunks.length})` : ''}.
 Analise cada card abaixo individualmente comparando-o com os PDFs anexados, o Mapa Clínico P1–P4 e as diretrizes atualizadas.
 
 ${profilePromptBlock}${guidelinesBlock}
 MAPA CLÍNICO P1–P4 DE REFERÊNCIA:
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : 'Avalie conforme matriz P1–P4 do tema.'}
 
-CARDS EXISTENTES PARA JULGAMENTO (JULGUE TODOS OS ${Math.min(140, inputCards.length)} CARDS):
+CARDS EXISTENTES PARA JULGAMENTO (JULGUE TODOS OS ${chunk.length} CARDS DESTE LOTE):
 ${cardsDigest}
 
 CRITÉRIOS DE VEREDITO POR CARD ("verdict"):
 - "keep": Card já está excelente (nota >= 8/10): decisão atômica clara, clinicamente atualizada e correta segundo os PDFs/diretrizes, sem spoiler, sem lista disfarçada, "hint" com ≥ 120 chars visíveis e contraste diferencial, E com tag <img ...> caso o tópico exija reconhecimento visual (ECG/RX/USG/TC/CTG/lesão). NUNCA atribua "keep" a pergunta vaga ("Qual a conduta?", "Qual o manejo?", "O que fazer?"), definição passiva ("O que é X?"), card sem imagem em reconhecimento visual ou comentário raso (< 110 chars).
 - "rebuild": Card cobre um conceito clínico útil/importante, PORÉM está fraco (pergunta vaga como "Qual a conduta?", "Qual o manejo?", "O que fazer?", definição passiva "O que é...", resposta longa/lista, spoiler no enunciado/tópico, dose ou critério desatualizado/impreciso, comentário raso ou exame visual sem <img>). DEVE SER REFEITO DO ZERO!
 - "split": Card mistura 2 ou mais decisões clínicas diferentes no mesmo card (ex.: diagnóstico + tratamento, parede + artéria, achado + antiarrítmico, ou múltiplos esquemas/critérios) e precisa ser desdobrado em cards atômicos separados.
-- "prune": Card é duplicata exata de outro card melhor no deck, é trivial sem impacto clínico ou viola o Filtro Negativo (história da medicina, genética de bancada sem conduta).
+- "prune": Card DEVE ser excluído (poda rigorosa Internato-First) se for: (1) duplicata semântica ou redundância conceitual cruzada (mesmo sinal/epônimo/critério já cobrado em outro card mais completo do deck); (2) fisiologia/anatomia teórica pura, medidas anatômicas estáticas sem impacto na conduta, detalhes técnicos de subespecialista fora da alçada do interno, propedêutica passiva substituída por conduta padrão atual, modelo/escore obsoleto substituído por diretriz vigente ou epônimo raro sem impacto à beira-leito; (3) preenchimento trivial sem alavanca clínica real; ou (4) reprovado pelo Filtro Negativo (história da medicina, datas, genética/biologia molecular de bancada sem conduta).
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido:
 {
@@ -843,46 +927,52 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido:
   ]
 }`;
 
-      const response = await withGeminiKeyRotation(async (ai, keyFp) => {
-        const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
-        parts.push({ text: prompt });
-        return generateContentWithRetry(
-          ai,
-          {
-            model: activeModel,
-            contents: { parts },
-            config: {
-              systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
-              responseMimeType: 'application/json',
-              maxOutputTokens: 32768,
-              thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+        const response = await withGeminiKeyRotation(async (ai, keyFp) => {
+          const parts: Part[] = await resolveDocumentPartsForGemini(ai, pdfs, signal, keyFp);
+          parts.push({ text: prompt });
+          return generateContentWithRetry(
+            ai,
+            {
+              model: activeModel,
+              contents: { parts },
+              config: {
+                systemInstruction: INTERNATO_SYSTEM_INSTRUCTION,
+                responseMimeType: 'application/json',
+                maxOutputTokens: 32768,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+              },
             },
-          },
-          { signal, timeoutMs: 140_000, enableModelFallback: true }
-        );
-      }, signal);
+            { signal, timeoutMs: 140_000, enableModelFallback: true }
+          );
+        }, signal);
 
-      if (res.writableEnded) return;
-      const rawText = response.text || '{}';
-      const { items: rawItems } = parseOrRecoverJsonArrayField(rawText, 'items', [
-        'cardId',
-        'verdict',
-      ]);
+        if (res.writableEnded) return;
+        lastModelUsed = response.modelUsed || lastModelUsed;
+        const rawText = response.text || '{}';
+        const { items: chunkItems } = parseOrRecoverJsonArrayField(rawText, 'items', [
+          'cardId',
+          'verdict',
+        ]);
+        allRawItems.push(...chunkItems);
 
-      let overallSummary = '';
-      try {
-        const full = JSON.parse(extractJsonBlock(rawText)) as { overallSummary?: unknown };
-        overallSummary = String(full?.overallSummary || '').trim();
-      } catch {
-        const sumMatch = rawText.match(/"overallSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-        if (sumMatch?.[1]) {
+        if (!overallSummary) {
           try {
-            overallSummary = JSON.parse(`"${sumMatch[1]}"`);
+            const full = JSON.parse(extractJsonBlock(rawText)) as { overallSummary?: unknown };
+            overallSummary = String(full?.overallSummary || '').trim();
           } catch {
-            overallSummary = sumMatch[1];
+            const sumMatch = rawText.match(/"overallSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+            if (sumMatch?.[1]) {
+              try {
+                overallSummary = JSON.parse(`"${sumMatch[1]}"`);
+              } catch {
+                overallSummary = sumMatch[1];
+              }
+            }
           }
         }
       }
+
+      const rawItems = allRawItems;
 
       const validVerdicts = new Set(['keep', 'rebuild', 'split', 'prune']);
       const validPriorities = new Set(['P1', 'P2', 'P3', 'P4']);
@@ -946,7 +1036,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido:
           `Auditoria concluída: ${counts.keep} mantido(s), ${counts.rebuild} para refazer do zero, ${counts.split} para desmembrar e ${counts.prune} para podar.`,
         counts,
         items: normalizedItems,
-        modelUsed: response.modelUsed,
+        modelUsed: lastModelUsed,
       });
     } catch (error: unknown) {
       if (res.writableEnded) return;

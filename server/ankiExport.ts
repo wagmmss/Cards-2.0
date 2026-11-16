@@ -1,5 +1,7 @@
+import fs from 'fs';
 import crypto from 'crypto';
 import initSqlJs from 'sql.js';
+import { resolveSafeLocalMediaPath } from './localMediaIndex';
 
 const CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -134,6 +136,18 @@ export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buf
   if (!sourceUrl) return null;
   const trimmed = sourceUrl.trim();
   if (!trimmed) return null;
+
+  if (trimmed.startsWith('/api/media/local-file?')) {
+    try {
+      const parsed = new URL(trimmed, 'http://localhost');
+      const rel = parsed.searchParams.get('rel') || '';
+      const absPath = resolveSafeLocalMediaPath(rel);
+      if (!absPath) return null;
+      return fs.readFileSync(absPath);
+    } catch {
+      return null;
+    }
+  }
 
   if (trimmed.startsWith('data:')) {
     const commaIdx = trimmed.indexOf(',');

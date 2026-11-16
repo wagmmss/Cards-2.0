@@ -1168,7 +1168,18 @@ export function attachVisualSuggestionToCard(
  * and media references (<img src="..."> / <audio>), automatically removing orphan <audio> tags
  * whose .mp3 files do not exist on rawCards.
  */
-export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata {
+export function extractDeckMetadata(
+  rawJsonText: string,
+  options?: { availableMediaNames?: Iterable<string>; preserveLocalAudio?: boolean }
+): ExtractedDeckMetadata {
+  const availableAudioSet = options?.availableMediaNames
+    ? new Set(
+        Array.from(options.availableMediaNames)
+          .map((n) => String(n || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    : undefined;
+  const preserveLocalAudio = Boolean(options?.preserveLocalAudio);
   const empty: ExtractedDeckMetadata = {
     existingIds: [],
     mediaTags: [],
@@ -1259,9 +1270,13 @@ export function extractDeckMetadata(rawJsonText: string): ExtractedDeckMetadata 
       extractMediaFromString(fieldVal).forEach((m) => mediaSet.add(m));
     });
 
-    // Auto-remove orphan <audio> tags on imported deck cards so user never has to upload .mp3 files
-    const qAudioClean = stripOrphanAudioFromHtml(rawQuestion);
-    const hAudioClean = stripOrphanAudioFromHtml(rawHint);
+    // Remove apenas <audio> órfão cujo arquivo não esteja disponível (ou preserva tudo se preserveLocalAudio=true)
+    const qAudioClean = preserveLocalAudio
+      ? { cleanedHtml: rawQuestion, removedCount: 0 }
+      : stripOrphanAudioFromHtml(rawQuestion, availableAudioSet);
+    const hAudioClean = preserveLocalAudio
+      ? { cleanedHtml: rawHint, removedCount: 0 }
+      : stripOrphanAudioFromHtml(rawHint, availableAudioSet);
     removedOrphanAudioCount += qAudioClean.removedCount + hAudioClean.removedCount;
 
     const imageMode =
@@ -2640,8 +2655,32 @@ export function removeMissingMediaFromCard(
 export function reconcileDeckIdsAndMedia(
   generatedCards: CanonicalCard[],
   metadata: ExtractedDeckMetadata,
-  deckKey: string
+  deckKey: string,
+  options?: {
+    availableMediaNames?: Iterable<string>;
+    preserveLocalAudio?: boolean;
+    allowImageRemoval?: boolean;
+  }
 ): CanonicalCard[] {
+  const availableAudioSet = options?.availableMediaNames
+    ? new Set(
+        Array.from(options.availableMediaNames)
+          .map((n) => String(n || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    : undefined;
+  const preserveLocalAudio = Boolean(options?.preserveLocalAudio);
+  const allowImageRemoval = Boolean(options?.allowImageRemoval);
+
+  const usedImageFilenames = new Set<string>();
+  for (const gc of generatedCards) {
+    const gcText = `${gc.question || ''} ${gc.hint || ''}`;
+    const matches = gcText.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi);
+    for (const m of matches) {
+      const base = (m[1] || '').trim().split(/[\\/]/).pop()?.toLowerCase();
+      if (base) usedImageFilenames.add(base);
+    }
+  }
   const existingIds = metadata.existingIds || [];
   const existingIdSet = new Set<number>(existingIds);
   const originalById = new Map<number, CanonicalCard>();
@@ -2714,18 +2753,43 @@ export function reconcileDeckIdsAndMedia(
       for (const mediaTag of origMedia) {
         if (!question.includes(mediaTag) && !hint.includes(mediaTag)) {
           if (mediaTag.startsWith('<audio') || mediaTag.startsWith('[sound:')) {
-            // Only keep audio if it has an embedded data: or https:// source
-            if (/src=["'](?:https?:\/\/|data:)/i.test(mediaTag)) {
+            const srcMatch =
+              mediaTag.match(/\bsrc=["']([^"']+)["']/i) ||
+              mediaTag.match(/\[sound:([^\]]+)\]/i);
+            const rawSrc = (srcMatch?.[1] || '').trim();
+            const baseSrc = rawSrc.split(/[\\/]/).pop()?.toLowerCase() || '';
+            const isRemoteOrEmbedded = /^(?:https?:\/\/|data:)/i.test(rawSrc);
+            const isAvailableLocal = Boolean(availableAudioSet && baseSrc && availableAudioSet.has(baseSrc));
+            if (isRemoteOrEmbedded || preserveLocalAudio || isAvailableLocal) {
               hint = `${hint} ${mediaTag}`.trim();
             }
-          } else if (!hasNewImage) {
+          } else if (!hasNewImage && !allowImageRemoval) {
+            const imgSrcMatch = mediaTag.match(/\bsrc=["']([^"']+)["']/i);
+            const imgBase = (imgSrcMatch?.[1] || '').trim().split(/[\\/]/).pop()?.toLowerCase() || '';
+            // Não reinserir imagem antiga se ela já pertence a outro card no deck reconstruído
+            if (imgBase && usedImageFilenames.has(imgBase)) {
+              continue;
+            }
+            if (imgBase) usedImageFilenames.add(imgBase);
+
+            const escapedTag = mediaTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const origLegendMatch = (originalCard.hint || '').match(
+              new RegExp(`${escapedTag}(?:\\s*<br\\s*\\/?>)*\\s*(<i>[\\s\\S]*?<\\/i>)`, 'i')
+            );
+            const origLegend = origLegendMatch?.[1] ? origLegendMatch[1].trim() : '';
+
             if (card.image_mode === 'recognition' || origQMedia.has(mediaTag)) {
               question = `${question} ${mediaTag}`.trim();
+              if (origLegend && !/<i>[\s\S]*?<\/i>/i.test(hint)) {
+                hint = hint ? `${origLegend}<br><br>${hint.trim()}` : origLegend;
+              }
             } else if (hint) {
-              const sep = /^<i>/i.test(hint.trim()) ? '<br>' : '<br><br>';
-              hint = `${mediaTag}${sep}${hint.trim()}`;
+              const hasHintLegend = /^<i>[\s\S]*?<\/i>/i.test(hint.trim());
+              const payload = origLegend && !hasHintLegend ? `${mediaTag}<br>${origLegend}` : mediaTag;
+              const sep = hasHintLegend ? '<br>' : '<br><br>';
+              hint = `${payload}${sep}${hint.trim()}`;
             } else {
-              hint = mediaTag;
+              hint = origLegend ? `${mediaTag}<br>${origLegend}` : mediaTag;
             }
           }
         }
@@ -3094,7 +3158,22 @@ function sanitizeTopicAgainstSpoiler(
  * Deterministically repairs formatting, spoiler, and structural hygiene issues without truncating
  * or mutating semantic Matuschak/Nielsen violations (which are preserved for AI repair).
  */
-export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
+export function surgicalRepairCardLocal(
+  card: CanonicalCard,
+  optionsOrDeckKey?:
+    | string
+    | { availableMediaNames?: Iterable<string>; preserveLocalAudio?: boolean }
+): CanonicalCard {
+  const repairOpts =
+    typeof optionsOrDeckKey === 'object' && optionsOrDeckKey !== null ? optionsOrDeckKey : {};
+  const availableAudioSet = repairOpts.availableMediaNames
+    ? new Set(
+        Array.from(repairOpts.availableMediaNames)
+          .map((n) => String(n || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    : undefined;
+  const preserveLocalAudio = Boolean(repairOpts.preserveLocalAudio);
   const hasSilentCloze =
     /\{\{c\d+::[\s\S]+?\}\}/.test(card.question || '') && !String(card.answer || '').trim();
   const cardType: 'basic' | 'cloze' =
@@ -3238,8 +3317,10 @@ export function surgicalRepairCardLocal(card: CanonicalCard): CanonicalCard {
   }
 
   // 7. Normalize Hint structure & automatically remove orphan <audio> tags without files
-  question = stripOrphanAudioFromHtml(question).cleanedHtml;
-  hint = stripOrphanAudioFromHtml(hint).cleanedHtml;
+  if (!preserveLocalAudio) {
+    question = stripOrphanAudioFromHtml(question, availableAudioSet).cleanedHtml;
+    hint = stripOrphanAudioFromHtml(hint, availableAudioSet).cleanedHtml;
+  }
 
   hint = hint
     .replace(/<b>\s*🩺\s*Preceptoria[^<]*:?<\/b>\s*/gi, '')
@@ -3514,7 +3595,11 @@ export function curateAndRebalanceDeck(
   metadata?: ExtractedDeckMetadata | null,
   deckKey: string = 'internato_deck',
   clinicalMap?: ClinicalMapResponse | null,
-  options?: { skipTemplateGapAdditions?: boolean }
+  options?: {
+    skipTemplateGapAdditions?: boolean;
+    availableMediaNames?: Iterable<string>;
+    preserveLocalAudio?: boolean;
+  }
 ): { cards: CanonicalCard[]; stats: DeckCurationStats } {
   const safeMetadata: ExtractedDeckMetadata = metadata || {
     existingIds: [],
@@ -3539,7 +3624,11 @@ export function curateAndRebalanceDeck(
   }
 
   // Step 1: Repair and normalize input cards first
-  const initialRepaired = inputCards.map((c) => surgicalRepairCardLocal(c));
+  const repairOptions = {
+    availableMediaNames: options?.availableMediaNames,
+    preserveLocalAudio: options?.preserveLocalAudio,
+  };
+  const initialRepaired = inputCards.map((c) => surgicalRepairCardLocal(c, repairOptions));
 
   // Step 2: Prune negative-filter cards & high-overlap redundant cards (dropping their IDs)
   const survivingCards: CanonicalCard[] = [];
@@ -3684,9 +3773,12 @@ export function curateAndRebalanceDeck(
   }
 
   // Step 4: Reconcile IDs and media by ID preserving each card's natural format (basic vs cloze without rigid 50/50 quota)
-  const reconciled = reconcileDeckIdsAndMedia(survivingCards, safeMetadata, cleanDeckKey).map((c) =>
-    surgicalRepairCardLocal(c)
-  );
+  const reconciled = reconcileDeckIdsAndMedia(
+    survivingCards,
+    safeMetadata,
+    cleanDeckKey,
+    repairOptions
+  ).map((c) => surgicalRepairCardLocal(c, repairOptions));
 
   const finalCount = reconciled.length;
   const finalBasic = reconciled.filter((c) => c.type === 'basic').length;
