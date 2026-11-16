@@ -1,10 +1,11 @@
 import React from 'react';
-import { Download, PackageCheck } from 'lucide-react';
+import { Copy, Download, PackageCheck } from 'lucide-react';
 
 interface TopBarProps {
   deckKey: string;
   cardCount: number;
   onDownloadJson: () => void;
+  onCopyForAiStudio?: () => void;
   onExportApkg: () => void;
   isExportingApkg?: boolean;
 }
@@ -13,6 +14,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   deckKey,
   cardCount,
   onDownloadJson,
+  onCopyForAiStudio,
   onExportApkg,
   isExportingApkg = false,
 }) => {
@@ -62,6 +64,19 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         {/* Zone 3: Primary actions */}
         <div className="flex items-center gap-2 shrink-0">
+          {onCopyForAiStudio && (
+            <button
+              type="button"
+              onClick={onCopyForAiStudio}
+              disabled={cardCount === 0}
+              title="Copiar prompt cirúrgico + JSON do deck para colar no Google AI Studio"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-sky-200 bg-sky-950/70 border border-sky-700/70 rounded-lg hover:bg-sky-900/80 disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copiar p/ AI Studio</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onDownloadJson}

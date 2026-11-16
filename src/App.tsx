@@ -27,6 +27,8 @@ import {
   convertClozeToBasic,
   curateAndRebalanceDeck,
   extractDeckMetadata,
+  formatCanonicalDeckJson,
+  lintDeck,
   removeMissingMediaFromCard,
   resolveLocalMediaFilename,
   surgicalRepairCardLocal,
@@ -575,12 +577,48 @@ export default function App() {
   const activeStep: 1 | 2 | 3 | 4 =
     manualStep ?? (hasCards ? 3 : hasMap ? 2 : 1);
 
+  const handleCopyForAiStudio = useCallback(async () => {
+    if (cards.length === 0) return;
+    const effKey = (deckKey || extractedMeta.detectedDeckKey || 'deck').trim();
+    const jsonPayload = formatCanonicalDeckJson(cards, extractedMeta, effKey);
+    const lintReport = lintDeck(cards, availableMediaNames, effKey);
+    const issuesSummary = `Diagnóstico atual do linter: ${lintReport.errorCount} erro(s), ${lintReport.warningCount} aviso(s).`;
+    const promptText = [
+      `Refatore o deck "${effKey}" (${cards.length} cards) aplicando a Doutrina Internato-First (ver AGENTS.md).`,
+      issuesSummary,
+      '- Pode redundâncias, séries fragmentadas (1/3–2/3) e decoreba R1 sem impacto em conduta à beira do leito.',
+      '- Converta clozes passivos/múltiplos em casos clínicos `basic` (resposta <= 15 palavras, <= 110 chars, sem `;`) ou `cloze` atômico (apenas `{{c1::...}}`, sem `::dica`).',
+      '- Remova TOPIC_SPOILER, evite imagens duplicadas no deck, preserve IDs originais (novos IDs só ao desmembrar/adicionar) e preserve `[sound:...]` (máx. 1 áudio/card).',
+      '- Retorne APENAS o JSON array canônico atualizado para eu colar de volta no Cards-2.0.',
+      '',
+      '```json',
+      jsonPayload,
+      '```',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      await navigator.clipboard.writeText(promptText);
+      showStatus(
+        `Pacote de ${cards.length} cards copiado para a área de transferência! Cole no Google AI Studio e depois cole o JSON retornado no painel de entrada.`,
+        'success'
+      );
+    } catch {
+      showStatus(
+        'Não foi possível acessar a área de transferência do navegador; use o botão de download do JSON.',
+        'error'
+      );
+    }
+  }, [availableMediaNames, cards, deckKey, extractedMeta, showStatus]);
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0B0F17] text-slate-100">
       <TopBar
         deckKey={deckKey}
         cardCount={cards.length}
         onDownloadJson={() => handleDownloadJson()}
+        onCopyForAiStudio={() => void handleCopyForAiStudio()}
         onExportApkg={() => void handleExportApkg()}
         isExportingApkg={isExportingApkg}
       />
