@@ -4319,6 +4319,38 @@ import express2 from "express";
 import fs3 from "fs";
 import crypto2 from "crypto";
 import initSqlJs from "sql.js";
+import sharp from "sharp";
+var MAX_CLINICAL_IMAGE_WIDTH = 1600;
+var MIN_OPTIMIZE_IMAGE_BYTES = 90 * 1024;
+async function optimizeClinicalImageBuffer(filename, data) {
+  if (!data || data.length === 0) return data;
+  const extMatch = filename.toLowerCase().match(/\.(png|jpe?g|webp)$/);
+  if (!extMatch) return data;
+  const ext = extMatch[1];
+  try {
+    const pipeline = sharp(data, { failOn: "none" });
+    const meta = await pipeline.metadata();
+    const width = meta.width || 0;
+    if (data.length < MIN_OPTIMIZE_IMAGE_BYTES && width <= MAX_CLINICAL_IMAGE_WIDTH) {
+      return data;
+    }
+    let work = sharp(data, { failOn: "none" }).rotate();
+    if (width > MAX_CLINICAL_IMAGE_WIDTH) {
+      work = work.resize({ width: MAX_CLINICAL_IMAGE_WIDTH, withoutEnlargement: true });
+    }
+    let optimized;
+    if (ext === "png") {
+      optimized = await work.png({ compressionLevel: 9, palette: true, quality: 88 }).toBuffer();
+    } else if (ext === "webp") {
+      optimized = await work.webp({ quality: 85 }).toBuffer();
+    } else {
+      optimized = await work.jpeg({ quality: 86, mozjpeg: true }).toBuffer();
+    }
+    return optimized.length > 0 && optimized.length < data.length ? optimized : data;
+  } catch {
+    return data;
+  }
+}
 var CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {
@@ -4552,7 +4584,8 @@ async function resolveDeckMediaFiles(mediaManifest, mediaAssets = {}) {
     for (const r of results) {
       if (!r) continue;
       if (r.buf && r.buf.length > 0) {
-        resolvedMedia.push({ filename: r.filename, data: r.buf });
+        const optimizedBuf = await optimizeClinicalImageBuffer(r.filename, r.buf);
+        resolvedMedia.push({ filename: r.filename, data: optimizedBuf });
       } else {
         missingMedia.push({
           filename: r.filename,
@@ -4568,7 +4601,8 @@ async function resolveDeckMediaFiles(mediaManifest, mediaAssets = {}) {
       const buf = await resolveMediaSourceToBuffer(dataUri);
       if (buf && buf.length > 0) {
         seenLowerFilenames.add(cleanName.toLowerCase());
-        resolvedMedia.push({ filename: cleanName, data: buf });
+        const optimizedBuf = await optimizeClinicalImageBuffer(cleanName, buf);
+        resolvedMedia.push({ filename: cleanName, data: optimizedBuf });
       }
     }
   }

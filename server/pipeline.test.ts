@@ -940,3 +940,37 @@ test('generateContentWithRetry skips duplicate primary retries on 429 and routes
   assert.deepEqual(calledModels, [FALLBACK_GEMINI_MODEL]);
 });
 
+test('optimizeClinicalImageBuffer downscales oversized PNGs while keeping format and ignoring audio/small buffers', async () => {
+  const { optimizeClinicalImageBuffer } = await import('./ankiExport');
+  const sharp = (await import('sharp')).default;
+
+  // 1. Imagem > 1600px de largura deve ser redimensionada para <= 1600px mantendo PNG válido
+  const largePng = await sharp({
+    create: {
+      width: 2400,
+      height: 1200,
+      channels: 3,
+      background: { r: 240, g: 245, b: 250 },
+    },
+  })
+    .png({ compressionLevel: 0 })
+    .toBuffer();
+
+  const optimizedPng = await optimizeClinicalImageBuffer('ecg_grande.png', largePng);
+  const meta = await sharp(optimizedPng).metadata();
+  assert.equal(meta.format, 'png');
+  assert.ok((meta.width || 0) <= 1600, `Expected width <= 1600, got ${meta.width}`);
+  assert.ok(optimizedPng.length < largePng.length, 'Expected optimized PNG to be smaller');
+
+  // 2. Áudio (.mp3) não deve ser tocado
+  const fakeAudio = Buffer.alloc(120 * 1024, 1);
+  const audioOut = await optimizeClinicalImageBuffer('plantao.mp3', fakeAudio);
+  assert.equal(audioOut, fakeAudio);
+
+  // 3. Buffer sintético/inválido deve retornar intacto sem lançar exceção
+  const invalidImg = Buffer.from('not-a-real-png');
+  const invalidOut = await optimizeClinicalImageBuffer('mock.png', invalidImg);
+  assert.equal(invalidOut, invalidImg);
+});
+
+

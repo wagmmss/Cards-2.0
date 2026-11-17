@@ -1,7 +1,52 @@
 import fs from 'fs';
 import crypto from 'crypto';
 import initSqlJs from 'sql.js';
+import sharp from 'sharp';
 import { resolveSafeLocalMediaPath } from './localMediaIndex';
+
+const MAX_CLINICAL_IMAGE_WIDTH = 1600;
+const MIN_OPTIMIZE_IMAGE_BYTES = 90 * 1024;
+
+/**
+ * Otimiza imagens médicas raster (PNG/JPEG/WebP) acima de 90 KB ou > 1600px de largura,
+ * preservando o formato e a nitidez diagnóstica sem alterar o nome do arquivo.
+ */
+export async function optimizeClinicalImageBuffer(
+  filename: string,
+  data: Buffer
+): Promise<Buffer> {
+  if (!data || data.length === 0) return data;
+  const extMatch = filename.toLowerCase().match(/\.(png|jpe?g|webp)$/);
+  if (!extMatch) return data;
+  const ext = extMatch[1];
+
+  try {
+    const pipeline = sharp(data, { failOn: 'none' });
+    const meta = await pipeline.metadata();
+    const width = meta.width || 0;
+    if (data.length < MIN_OPTIMIZE_IMAGE_BYTES && width <= MAX_CLINICAL_IMAGE_WIDTH) {
+      return data;
+    }
+
+    let work = sharp(data, { failOn: 'none' }).rotate();
+    if (width > MAX_CLINICAL_IMAGE_WIDTH) {
+      work = work.resize({ width: MAX_CLINICAL_IMAGE_WIDTH, withoutEnlargement: true });
+    }
+
+    let optimized: Buffer;
+    if (ext === 'png') {
+      optimized = await work.png({ compressionLevel: 9, palette: true, quality: 88 }).toBuffer();
+    } else if (ext === 'webp') {
+      optimized = await work.webp({ quality: 85 }).toBuffer();
+    } else {
+      optimized = await work.jpeg({ quality: 86, mozjpeg: true }).toBuffer();
+    }
+
+    return optimized.length > 0 && optimized.length < data.length ? optimized : data;
+  } catch {
+    return data;
+  }
+}
 
 const CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -294,7 +339,8 @@ export async function resolveDeckMediaFiles(
     for (const r of results) {
       if (!r) continue;
       if (r.buf && r.buf.length > 0) {
-        resolvedMedia.push({ filename: r.filename, data: r.buf });
+        const optimizedBuf = await optimizeClinicalImageBuffer(r.filename, r.buf);
+        resolvedMedia.push({ filename: r.filename, data: optimizedBuf });
       } else {
         missingMedia.push({
           filename: r.filename,
@@ -313,7 +359,8 @@ export async function resolveDeckMediaFiles(
       const buf = await resolveMediaSourceToBuffer(dataUri);
       if (buf && buf.length > 0) {
         seenLowerFilenames.add(cleanName.toLowerCase());
-        resolvedMedia.push({ filename: cleanName, data: buf });
+        const optimizedBuf = await optimizeClinicalImageBuffer(cleanName, buf);
+        resolvedMedia.push({ filename: cleanName, data: optimizedBuf });
       }
     }
   }
