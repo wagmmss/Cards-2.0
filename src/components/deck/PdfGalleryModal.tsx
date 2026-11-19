@@ -6,11 +6,22 @@ import {
   UploadedPdfFile,
 } from '../../types/deck';
 import { collectAllMaterialImages } from '../../utils/materialImageMatcher';
-import { base64ToArrayBuffer, renderPdfPageToCanvas } from '../../utils/pdfImageExtractor';
+import {
+  base64ToArrayBuffer,
+  openPdfDocumentSession,
+  type PdfDocumentSession,
+} from '../../utils/pdfImageExtractor';
 import {
   DeckImageUsageMap,
   normalizeImageSrcForComparison,
 } from './CardMediaPanel';
+
+function cardNeedsImage(card: CanonicalCard): boolean {
+  if (card.needsManualImage) return true;
+  const combined = `${card.question || ''} ${card.hint || ''}`;
+  if (/<img\b[^>]*\bsrc=["'](?:pdfimg|buscar_imagem):/i.test(combined)) return true;
+  return !/<img\b/i.test(combined);
+}
 
 interface PdfGalleryModalProps {
   open: boolean;
@@ -75,7 +86,14 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
   const [customLegend, setCustomLegend] = useState('');
   const [statusFeedback, setStatusFeedback] = useState('');
 
-  // PDF Browser / Cropper state
+  // Inline fast crop state for selectedFigure (composite extracted PDF figures)
+  const [isCroppingFigure, setIsCroppingFigure] = useState(false);
+  const [figureCropRect, setFigureCropRect] = useState<CropRect | null>(null);
+  const [isDraggingFigure, setIsDraggingFigure] = useState(false);
+  const figureDragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const figureImgRef = useRef<HTMLImageElement | null>(null);
+
+  // PDF Browser / Cropper state + cached PDFDocumentProxy session
   const [browsePdfName, setBrowsePdfName] = useState<string>('');
   const [pageNumber, setPageNumber] = useState<number>(1);
   const [totalPages, setTotalPages] = useState<number>(1);
@@ -87,21 +105,59 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pdfSessionRef = useRef<{
+    pdfName: string;
+    bufRef: ArrayBuffer | string;
+    session: PdfDocumentSession;
+  } | null>(null);
   const cardsRef = useRef<CanonicalCard[]>(cards);
   cardsRef.current = cards;
 
+  const pendingImageCardIds = useMemo(
+    () => cards.filter((c) => cardNeedsImage(c)).map((c) => c.id),
+    [cards]
+  );
+
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      if (pdfSessionRef.current) {
+        void pdfSessionRef.current.session.destroy();
+        pdfSessionRef.current = null;
+      }
+      setIsCroppingFigure(false);
+      setFigureCropRect(null);
+      return;
+    }
     const latestCards = cardsRef.current;
     setActiveTab(initialTab);
     const nextCardId = initialCardId ?? latestCards[0]?.id ?? null;
     setSelectedCardId(nextCardId);
     const targetCard = latestCards.find((c) => c.id === nextCardId);
-    if (targetCard?.image_mode) {
+    if (targetCard?.type === 'cloze') {
+      setAttachMode('feedback');
+    } else if (targetCard?.image_mode) {
       setAttachMode(targetCard.image_mode);
     }
     setStatusFeedback('');
   }, [open, initialCardId, initialTab]);
+
+  // Cleanup cached PDFDocumentProxy session on unmount
+  useEffect(() => {
+    return () => {
+      if (pdfSessionRef.current) {
+        void pdfSessionRef.current.session.destroy();
+        pdfSessionRef.current = null;
+      }
+    };
+  }, []);
+
+  // Reset inline crop box whenever selected figure changes
+  useEffect(() => {
+    setIsCroppingFigure(false);
+    setFigureCropRect(null);
+    setIsDraggingFigure(false);
+    figureDragStartRef.current = null;
+  }, [selectedFigure?.id]);
 
   useEffect(() => {
     if (!open) return;
@@ -118,7 +174,7 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
     [viewablePdfs, browsePdfName]
   );
 
-  // Render PDF page when browsing
+  // Render PDF page when browsing, reusing cached PDFDocumentProxy per PDF
   useEffect(() => {
     if (!open || activeTab !== 'browse' || !activeBrowsePdf || !canvasRef.current) return;
     let cancelled = false;
@@ -127,13 +183,38 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
       setPageError('');
       setCropRect(null);
       try {
-        const buf =
-          activeBrowsePdf.rawArrayBuffer ||
-          (activeBrowsePdf.base64Data ? base64ToArrayBuffer(activeBrowsePdf.base64Data) : null);
-        if (!buf) {
-          throw new Error('Buffer do PDF não disponível para visualização.');
+        const bufKey: ArrayBuffer | string =
+          activeBrowsePdf.rawArrayBuffer || activeBrowsePdf.base64Data || '';
+        let session = pdfSessionRef.current?.session || null;
+
+        if (
+          !session ||
+          pdfSessionRef.current?.pdfName !== activeBrowsePdf.name ||
+          pdfSessionRef.current?.bufRef !== bufKey
+        ) {
+          if (pdfSessionRef.current) {
+            void pdfSessionRef.current.session.destroy();
+            pdfSessionRef.current = null;
+          }
+          const buf =
+            activeBrowsePdf.rawArrayBuffer ||
+            (activeBrowsePdf.base64Data ? base64ToArrayBuffer(activeBrowsePdf.base64Data) : null);
+          if (!buf) {
+            throw new Error('Buffer do PDF não disponível para visualização.');
+          }
+          session = await openPdfDocumentSession(buf);
+          if (cancelled) {
+            void session.destroy();
+            return;
+          }
+          pdfSessionRef.current = {
+            pdfName: activeBrowsePdf.name,
+            bufRef: bufKey,
+            session,
+          };
         }
-        const info = await renderPdfPageToCanvas(buf, pageNumber, canvasRef.current!, zoomScale);
+
+        const info = await session.renderPage(pageNumber, canvasRef.current!, zoomScale);
         if (cancelled) return;
         setTotalPages(Math.max(1, info.numPages));
         if (pageNumber > info.numPages) {
@@ -231,6 +312,7 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (renderingPage || !canvasRef.current) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
     const pt = getRelativeCanvasCoords(e.clientX, e.clientY);
     dragStartRef.current = pt;
     setIsDragging(true);
@@ -247,9 +329,127 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
     setCropRect({ x, y, w, h });
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
     setIsDragging(false);
     dragStartRef.current = null;
+  };
+
+  const getRelativeFigureCoords = (clientX: number, clientY: number) => {
+    const imgEl = figureImgRef.current;
+    if (!imgEl) return { x: 0, y: 0 };
+    const rect = imgEl.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    return { x, y };
+  };
+
+  const handleFigurePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isCroppingFigure || !figureImgRef.current) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const pt = getRelativeFigureCoords(e.clientX, e.clientY);
+    figureDragStartRef.current = pt;
+    setIsDraggingFigure(true);
+    setFigureCropRect({ x: pt.x, y: pt.y, w: 0, h: 0 });
+  };
+
+  const handleFigurePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDraggingFigure || !figureDragStartRef.current) return;
+    const pt = getRelativeFigureCoords(e.clientX, e.clientY);
+    const x = Math.min(figureDragStartRef.current.x, pt.x);
+    const y = Math.min(figureDragStartRef.current.y, pt.y);
+    const w = Math.abs(pt.x - figureDragStartRef.current.x);
+    const h = Math.abs(pt.y - figureDragStartRef.current.y);
+    setFigureCropRect({ x, y, w, h });
+  };
+
+  const handleFigurePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setIsDraggingFigure(false);
+    figureDragStartRef.current = null;
+  };
+
+  const buildCroppedSelectedFigure = (): PdfExtractedImage | null => {
+    const imgEl = figureImgRef.current;
+    if (!imgEl || !selectedFigure || !figureCropRect) return null;
+    if (figureCropRect.w < 14 || figureCropRect.h < 14) return null;
+    const rect = imgEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || imgEl.naturalWidth <= 0 || imgEl.naturalHeight <= 0) {
+      return null;
+    }
+
+    const scaleX = imgEl.naturalWidth / rect.width;
+    const scaleY = imgEl.naturalHeight / rect.height;
+    const sx = Math.max(0, Math.round(figureCropRect.x * scaleX));
+    const sy = Math.max(0, Math.round(figureCropRect.y * scaleY));
+    const sw = Math.min(imgEl.naturalWidth - sx, Math.round(figureCropRect.w * scaleX));
+    const sh = Math.min(imgEl.naturalHeight - sy, Math.round(figureCropRect.h * scaleY));
+    if (sw < 20 || sh < 20) return null;
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = sw;
+    outCanvas.height = sh;
+    const outCtx = outCanvas.getContext('2d');
+    if (!outCtx) return null;
+    outCtx.fillStyle = '#ffffff';
+    outCtx.fillRect(0, 0, sw, sh);
+    outCtx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    const dataUrl = outCanvas.toDataURL('image/jpeg', 0.9);
+    const cleanBase =
+      selectedFigure.pdfName
+        .replace(/\.pdf$/i, '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_|_$/g, '')
+        .slice(0, 24) || 'figura';
+
+    const uid = Math.random().toString(36).slice(2, 6);
+    const cleanLegend = customLegend.trim().replace(/^Legenda visual:\s*/i, '');
+
+    return {
+      id: `figcrop_${cleanBase}_p${selectedFigure.pageNumber}_${uid}`,
+      pdfName: selectedFigure.pdfName,
+      pageNumber: selectedFigure.pageNumber,
+      width: sw,
+      height: sh,
+      dataUrl,
+      pageTextSnippet: selectedFigure.pageTextSnippet || '',
+      captionHint:
+        cleanLegend ||
+        selectedFigure.captionHint ||
+        `Recorte rápido pág. ${selectedFigure.pageNumber} (${selectedFigure.pdfName})`,
+      suggestedFilename: `${cleanBase}_p${selectedFigure.pageNumber}_recorte_${uid}.jpg`,
+      kind: 'page_crop',
+    };
+  };
+
+  const handleApplyInlineFigureCrop = (andAttach: boolean) => {
+    const cropped = buildCroppedSelectedFigure();
+    if (!cropped) {
+      setStatusFeedback('Arraste um retângulo sobre a imagem antes de aplicar o recorte.');
+      return;
+    }
+    onSaveCroppedPdfImage?.(cropped.pdfName, cropped);
+    setSelectedFigure(cropped);
+    setIsCroppingFigure(false);
+    setFigureCropRect(null);
+    if (andAttach && selectedCardId) {
+      const result = toMedicalImageResult(cropped);
+      const legend = customLegend.trim() || result.defaultLegend;
+      onAttachImageToCard(selectedCardId, result, legend, attachMode);
+      setStatusFeedback(
+        `Recorte rápido da pág. ${cropped.pageNumber} salvo na galeria e anexado ao card ID ${selectedCardId}!`
+      );
+    } else {
+      setStatusFeedback(`Recorte rápido da pág. ${cropped.pageNumber} salvo na Galeria da Apostila!`);
+    }
   };
 
   const buildCroppedPdfImage = (): PdfExtractedImage | null => {
@@ -364,21 +564,62 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
 
         {/* Target Card & Mode Bar */}
         <div className="px-5 py-3 bg-[#0F1623] border-b border-slate-800 flex flex-wrap items-center gap-3">
-          <div className="flex-1 min-w-[240px]">
-            <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-              Card Alvo para Anexar Figura ({cards.length} no deck)
-            </label>
+          <div className="flex-1 min-w-[260px]">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Card Alvo para Anexar Figura ({cards.length} no deck)
+                {pendingImageCardIds.length > 0 && (
+                  <span className="ml-2 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 normal-case">
+                    {pendingImageCardIds.length} sem imagem
+                  </span>
+                )}
+              </label>
+              {pendingImageCardIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentIdx = selectedCardId
+                      ? pendingImageCardIds.indexOf(selectedCardId)
+                      : -1;
+                    const nextPendingId =
+                      pendingImageCardIds[(currentIdx + 1) % pendingImageCardIds.length];
+                    setSelectedCardId(nextPendingId);
+                    const nextCard = cards.find((c) => c.id === nextPendingId);
+                    if (nextCard?.type === 'cloze') {
+                      setAttachMode('feedback');
+                    } else if (nextCard?.image_mode) {
+                      setAttachMode(nextCard.image_mode);
+                    }
+                  }}
+                  className="text-[10px] font-bold text-amber-300 hover:text-amber-200 underline cursor-pointer"
+                >
+                  Próx. pendente →
+                </button>
+              )}
+            </div>
             <select
               value={selectedCardId ?? ''}
-              onChange={(e) => setSelectedCardId(e.target.value ? Number(e.target.value) : null)}
+              onChange={(e) => {
+                const nextId = e.target.value ? Number(e.target.value) : null;
+                setSelectedCardId(nextId);
+                const nextCard = cards.find((c) => c.id === nextId);
+                if (nextCard?.type === 'cloze') {
+                  setAttachMode('feedback');
+                } else if (nextCard?.image_mode) {
+                  setAttachMode(nextCard.image_mode);
+                }
+              }}
               className="w-full px-2.5 py-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] text-xs text-slate-100"
             >
               {cards.length === 0 && <option value="">Nenhum card gerado ainda</option>}
-              {cards.map((c, idx) => (
-                <option key={c.id} value={c.id}>
-                  #{idx + 1} [ID {c.id}] ({c.topic}) — {stripHtmlShort(c.question, 62)}
-                </option>
-              ))}
+              {cards.map((c, idx) => {
+                const pending = cardNeedsImage(c);
+                return (
+                  <option key={c.id} value={c.id}>
+                    {pending ? '● [PENDENTE] ' : ''}#{idx + 1} [ID {c.id}] ({c.topic}) — {stripHtmlShort(c.question, 56)}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -389,8 +630,14 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
             <div className="inline-flex rounded-lg border border-slate-700 bg-[#0B0F17] p-0.5">
               <button
                 type="button"
+                disabled={selectedCard?.type === 'cloze'}
+                title={
+                  selectedCard?.type === 'cloze'
+                    ? 'Cards Cloze aceitam imagem apenas no Verso (Feedback)'
+                    : 'Coloca a imagem na frente do card (Recognition)'
+                }
                 onClick={() => setAttachMode('recognition')}
-                className={`px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer ${
+                className={`px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
                   attachMode === 'recognition'
                     ? 'bg-sky-500 text-slate-950'
                     : 'text-slate-300 hover:bg-slate-800'
@@ -488,54 +735,149 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
               </div>
 
               {selectedFigure && (
-                <div className="bg-[#111827] p-4 rounded-xl border-2 border-sky-500/70 shadow-sm flex flex-col md:flex-row gap-4 items-start">
-                  <img
-                    src={selectedFigure.dataUrl}
-                    alt={selectedFigure.captionHint || selectedFigure.pdfName}
-                    className="w-full md:w-64 max-h-52 object-contain rounded-lg border border-slate-700 bg-slate-950"
-                  />
-                  <div className="flex-1 space-y-2.5 w-full">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-xs font-bold text-slate-100">
-                        {selectedFigure.pdfName} · Página {selectedFigure.pageNumber} ({selectedFigure.width}×{selectedFigure.height}px)
-                      </div>
+                <div className="bg-[#111827] p-4 rounded-xl border-2 border-sky-500/70 shadow-sm space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-slate-100">
+                      {selectedFigure.pdfName} · Página {selectedFigure.pageNumber} ({selectedFigure.width}×{selectedFigure.height}px)
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => {
-                          setBrowsePdfName(selectedFigure.pdfName);
-                          setPageNumber(selectedFigure.pageNumber);
-                          setActiveTab('browse');
+                          setIsCroppingFigure((prev) => !prev);
+                          setFigureCropRect(null);
                         }}
-                        className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-indigo-950/80 text-indigo-200 border border-indigo-700/70 hover:bg-indigo-900/80 cursor-pointer"
+                        className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border cursor-pointer ${
+                          isCroppingFigure
+                            ? 'bg-amber-500 text-slate-950 border-amber-400'
+                            : 'bg-sky-950/80 text-sky-200 border-sky-700/70 hover:bg-sky-900/80'
+                        }`}
                       >
-                        Abrir Pág. {selectedFigure.pageNumber} para Recortar
+                        {isCroppingFigure ? 'Cancelar Recorte Rápido' : '✂️ Recortar Figura'}
                       </button>
-                    </div>
-                    <input
-                      type="text"
-                      value={customLegend}
-                      onChange={(e) => setCustomLegend(e.target.value)}
-                      placeholder="Legenda clínica descritiva (obrigatória no card)..."
-                      className="w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] text-xs text-slate-100 placeholder:text-slate-500"
-                    />
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={!selectedCard}
-                        onClick={() => handleAttachSelectedFigure(selectedFigure)}
-                        className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 text-xs font-bold cursor-pointer"
-                      >
-                        Anexar ao Card {selectedCard ? `ID ${selectedCard.id}` : ''}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedFigure(null)}
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium cursor-pointer"
-                      >
-                        Limpar Prévia
-                      </button>
+                      {viewablePdfs.some((p) => p.name === selectedFigure.pdfName) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBrowsePdfName(selectedFigure.pdfName);
+                            setPageNumber(selectedFigure.pageNumber);
+                            setActiveTab('browse');
+                          }}
+                          className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-indigo-950/80 text-indigo-200 border border-indigo-700/70 hover:bg-indigo-900/80 cursor-pointer"
+                        >
+                          Abrir Pág. {selectedFigure.pageNumber}
+                        </button>
+                      )}
                     </div>
                   </div>
+
+                  {isCroppingFigure ? (
+                    <div className="space-y-3">
+                      <p className="text-[11px] text-amber-200/90">
+                        Arraste diretamente sobre a imagem abaixo para isolar apenas o exame clínico (removendo caixas de texto ou legendas coladas).
+                      </p>
+                      <div className="bg-slate-950 rounded-lg border border-slate-700 p-3 flex justify-center overflow-auto max-h-[46vh]">
+                        <div
+                          className="relative inline-block select-none cursor-crosshair touch-none"
+                          onPointerDown={handleFigurePointerDown}
+                          onPointerMove={handleFigurePointerMove}
+                          onPointerUp={handleFigurePointerUp}
+                          onPointerCancel={handleFigurePointerUp}
+                        >
+                          <img
+                            ref={figureImgRef}
+                            src={selectedFigure.dataUrl}
+                            alt={selectedFigure.captionHint || selectedFigure.pdfName}
+                            draggable={false}
+                            className="block max-w-full max-h-[42vh] object-contain pointer-events-none"
+                          />
+                          {figureCropRect && figureCropRect.w > 4 && figureCropRect.h > 4 && (
+                            <div
+                              className="absolute border-2 border-emerald-400 bg-emerald-400/20 pointer-events-none"
+                              style={{
+                                left: `${figureCropRect.x}px`,
+                                top: `${figureCropRect.y}px`,
+                                width: `${figureCropRect.w}px`,
+                                height: `${figureCropRect.h}px`,
+                              }}
+                            >
+                              <span className="absolute -top-5 left-0 px-1.5 py-0.5 rounded bg-emerald-500 text-slate-950 text-[10px] font-bold whitespace-nowrap">
+                                {Math.round(figureCropRect.w)}×{Math.round(figureCropRect.h)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        value={customLegend}
+                        onChange={(e) => setCustomLegend(e.target.value)}
+                        placeholder="Legenda clínica descritiva para o recorte (obrigatória no card)..."
+                        className="w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] text-xs text-slate-100 placeholder:text-slate-500"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={!selectedCard || !figureCropRect || figureCropRect.w < 14}
+                          onClick={() => handleApplyInlineFigureCrop(true)}
+                          className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 text-xs font-bold cursor-pointer"
+                        >
+                          Recortar &amp; Anexar ao Card {selectedCard ? `ID ${selectedCard.id}` : ''}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!figureCropRect || figureCropRect.w < 14}
+                          onClick={() => handleApplyInlineFigureCrop(false)}
+                          className="px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white text-xs font-bold cursor-pointer"
+                        >
+                          Salvar Recorte na Galeria
+                        </button>
+                        {figureCropRect && (
+                          <button
+                            type="button"
+                            onClick={() => setFigureCropRect(null)}
+                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium cursor-pointer"
+                          >
+                            Limpar Seleção
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col md:flex-row gap-4 items-start">
+                      <img
+                        src={selectedFigure.dataUrl}
+                        alt={selectedFigure.captionHint || selectedFigure.pdfName}
+                        className="w-full md:w-64 max-h-52 object-contain rounded-lg border border-slate-700 bg-slate-950"
+                      />
+                      <div className="flex-1 space-y-2.5 w-full">
+                        <input
+                          type="text"
+                          value={customLegend}
+                          onChange={(e) => setCustomLegend(e.target.value)}
+                          placeholder="Legenda clínica descritiva (obrigatória no card)..."
+                          className="w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] text-xs text-slate-100 placeholder:text-slate-500"
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={!selectedCard}
+                            onClick={() => handleAttachSelectedFigure(selectedFigure)}
+                            className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 text-xs font-bold cursor-pointer"
+                          >
+                            Anexar ao Card {selectedCard ? `ID ${selectedCard.id}` : ''}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedFigure(null)}
+                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium cursor-pointer"
+                          >
+                            Limpar Prévia
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -605,9 +947,12 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
                             type="button"
                             disabled={!selectedCard}
                             onClick={() => {
-                              const legend = img.captionHint
-                                ? `Legenda visual: ${img.captionHint.slice(0, 140)}.`
-                                : `Legenda visual: figura de ${img.pdfName}, pág. ${img.pageNumber}.`;
+                              const legend =
+                                isPicked && customLegend.trim()
+                                  ? customLegend.trim()
+                                  : img.captionHint
+                                    ? `Legenda visual: ${img.captionHint.slice(0, 140)}.`
+                                    : `Legenda visual: figura de ${img.pdfName}, pág. ${img.pageNumber}.`;
                               handleAttachSelectedFigure(img, legend);
                             }}
                             className="flex-1 px-2 py-1 rounded-md bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 text-[11px] font-bold cursor-pointer"
@@ -768,11 +1113,11 @@ export const PdfGalleryModal: React.FC<PdfGalleryModalProps> = ({
                       </div>
                     ) : (
                       <div
-                        className="relative inline-block select-none cursor-crosshair shadow-xl bg-white"
+                        className="relative inline-block select-none cursor-crosshair touch-none shadow-xl bg-white"
                         onPointerDown={handlePointerDown}
                         onPointerMove={handlePointerMove}
                         onPointerUp={handlePointerUp}
-                        onPointerLeave={handlePointerUp}
+                        onPointerCancel={handlePointerUp}
                       >
                         <canvas ref={canvasRef} className="block max-w-full h-auto" />
                         {renderingPage && (

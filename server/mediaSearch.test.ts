@@ -1,3 +1,6 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -8,15 +11,30 @@ import {
   normalizeImageCanonicalKey,
   scoreImageRelevance,
 } from './mediaSearch';
+import {
+  isSafeExternalUrl,
+  PayloadTooLargeError,
+  readResponseBufferWithLimit,
+} from './httpFetch';
+import { resolveSafeLocalMediaPath } from './localMediaIndex';
 import { sanitizeDeckKey } from '../src/utils/apiClient';
 import {
   buildPdfImagesCatalog,
+  detectModalitiesInText,
   extractMarkdownTextImages,
   extractUsedImageKeysFromCards,
   hasLocalModalityConflict,
   matchMaterialImagesForCard,
   mergeMaterialAndWebImages,
 } from '../src/utils/materialImageMatcher';
+import {
+  assignCaptionsAndFilterWatermarks,
+  collectPageCaptionMatches,
+  isDidacticTextSlideOnly,
+  isLikelyBannerOrDecorativeCandidate,
+  shouldAllowFallbackPageCrop,
+  type RawPdfPageBuffer,
+} from '../src/utils/pdfImageCore';
 import {
   applyResolvedWebImageToCard,
   attachVisualSuggestionToCard,
@@ -767,4 +785,274 @@ test('extractEditorialImageUrlsFromHtml prioritizes <article>/<figure> clinical 
   assert.equal(urls.length, 1);
   assert.equal(urls[0].url, 'https://litfl.com/uploads/anterior-stemi-12lead.jpg');
 });
+
+test('Lote 3: pdfImageCore filters wide banners, repeated course badges, and didactic text slides ("Dica de prova" / "Pulo do gato") while preserving ECG strips and real exam pages', () => {
+  assert.equal(
+    isDidacticTextSlideOnly('Dica de prova: Pulo do gato para nunca errar antibiótico na pneumonia comunitária.'),
+    true
+  );
+  assert.equal(
+    isDidacticTextSlideOnly('Dica de prova: analise a otoscopia evidenciando abaulamento timpânico na OMA.'),
+    false
+  );
+
+  // Text-only criteria/table slide without vector diagram ops or real visual exam cue must NOT produce page_crop
+  assert.equal(
+    shouldAllowFallbackPageCrop(
+      'Quadro resumo com critérios diagnósticos de febre reumática e escore clínico.',
+      0,
+      false
+    ),
+    false
+  );
+  // Real clinical exam page (cistoscopia / otoscopia) MUST allow page_crop when embedded count is 0
+  assert.equal(
+    shouldAllowFallbackPageCrop(
+      'Cistoscopia evidenciando lesão papilífera urotelial em parede lateral vesical.',
+      0,
+      false
+    ),
+    true
+  );
+
+  // Wide course header banner (1000x160) on non-ECG page is rejected, whereas wide ECG rhythm strip (1000x200) survives
+  assert.equal(
+    isLikelyBannerOrDecorativeCandidate(
+      { width: 1000, height: 160, captionHint: '', pageTextSnippet: '' },
+      'Pneumonia comunitária em idosos: conduta ambulatorial e internação.'
+    ),
+    true
+  );
+  assert.equal(
+    isLikelyBannerOrDecorativeCandidate(
+      { width: 1000, height: 200, captionHint: 'Traçado de ECG em DII longo', pageTextSnippet: '' },
+      'Eletrocardiograma com ritmo de fibrilação atrial.'
+    ),
+    false
+  );
+
+  const pageBuffers: RawPdfPageBuffer[] = [
+    {
+      pageNumber: 1,
+      pageText: 'Dica de prova: Pulo do gato — revise os critérios de gravidade da sepse.',
+      captionMatches: [],
+      candidates: [
+        {
+          id: 'p1_dica_banner',
+          pdfName: 'apostila.pdf',
+          pageNumber: 1,
+          width: 900,
+          height: 180,
+          dataUrl: 'data:image/jpeg;base64,BANNER',
+          captionHint: 'Dica de prova',
+          pageTextSnippet: '',
+          suggestedFilename: 'p1_banner.jpg',
+          kind: 'embedded',
+          signature: 'banner_900x180',
+          byteLengthHint: 4000,
+        },
+        {
+          id: 'p1_badge',
+          pdfName: 'apostila.pdf',
+          pageNumber: 1,
+          width: 150,
+          height: 150,
+          dataUrl: 'data:image/jpeg;base64,BADGE',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p1_badge.jpg',
+          kind: 'embedded',
+          signature: 'badge_150x150',
+          byteLengthHint: 2000,
+        },
+      ],
+      fallbackCropCandidate: {
+        id: 'p1_slide_crop',
+        pdfName: 'apostila.pdf',
+        pageNumber: 1,
+        width: 1000,
+        height: 1400,
+        dataUrl: 'data:image/jpeg;base64,SLIDE',
+        captionHint: '',
+        pageTextSnippet: 'Dica de prova: Pulo do gato',
+        suggestedFilename: 'p1_slide.jpg',
+        kind: 'page_crop',
+        signature: 'page_1_slide',
+        byteLengthHint: 30000,
+      },
+    },
+    {
+      pageNumber: 2,
+      pageText: 'Otoscopia: membrana timpânica hiperemiada e abaulada na otite média aguda.',
+      captionMatches: collectPageCaptionMatches(
+        'Otoscopia: membrana timpânica hiperemiada e abaulada na otite média aguda.'
+      ),
+      candidates: [
+        {
+          id: 'p2_badge_repeat',
+          pdfName: 'apostila.pdf',
+          pageNumber: 2,
+          width: 150,
+          height: 150,
+          dataUrl: 'data:image/jpeg;base64,BADGE',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p2_badge.jpg',
+          kind: 'embedded',
+          signature: 'badge_150x150',
+          byteLengthHint: 2000,
+        },
+        {
+          id: 'p2_otoscopia_real',
+          pdfName: 'apostila.pdf',
+          pageNumber: 2,
+          width: 640,
+          height: 480,
+          dataUrl: 'data:image/jpeg;base64,OTO',
+          captionHint: '',
+          pageTextSnippet: '',
+          suggestedFilename: 'p2_oto.jpg',
+          kind: 'embedded',
+          signature: 'oto_real_640x480',
+          byteLengthHint: 42000,
+        },
+      ],
+    },
+  ];
+
+  const extracted = assignCaptionsAndFilterWatermarks(pageBuffers, 50);
+  assert.equal(extracted.length, 1);
+  assert.equal(extracted[0].id, 'p2_otoscopia_real');
+  assert.match(extracted[0].captionHint || '', /Otoscopia/i);
+});
+
+test('Lote 3: clinical modalities (cistoscopia, laparoscopia, otoscopia, colposcopia, eda, colonoscopia, rm) and expanded stock/slide blocklist work across matcher and mediaSearch', () => {
+  assert.deepEqual(detectModalitiesInText('Achado na cistoscopia de tumor vesical', 'trigger'), ['cistoscopia']);
+  assert.deepEqual(detectModalitiesInText('Otoscopia com abaulamento da membrana timpânica', 'trigger'), ['otoscopia']);
+  assert.deepEqual(detectModalitiesInText('Colposcopia com epitélio acetobranco e mosaico', 'trigger'), ['colposcopia']);
+  assert.deepEqual(detectModalitiesInText('Videolaparoscopia evidenciando aderências em cordas de violino', 'trigger'), ['laparoscopy']);
+  assert.deepEqual(detectModalitiesInText('EDA com úlcera péptica Forrest IIa', 'trigger'), ['eda']);
+  assert.deepEqual(detectModalitiesInText('Colonoscopia demonstrando pseudomembranas', 'trigger'), ['colonoscopia']);
+  assert.deepEqual(detectModalitiesInText('RM de crânio em sequência FLAIR', 'trigger'), ['rm']);
+
+  assert.equal(
+    hasLocalModalityConflict(
+      'Qual o achado típico na otoscopia da OMA?',
+      'Figura 1: Colposcopia com epitélio acetobranco'
+    ),
+    true
+  );
+  assert.equal(
+    hasLocalModalityConflict(
+      'Qual o achado na cistoscopia em hematúria indolor?',
+      'Figura 2: Cistoscopia mostrando lesão urotelial papilífera'
+    ),
+    false
+  );
+
+  // PT->EN medical search translation for newly added modalities
+  assert.ok(
+    buildEnglishMedicalSearchQueries('Cistoscopia tumor vesical', 'Urologia', '').some((q) =>
+      /cystoscopy/i.test(q)
+    )
+  );
+  assert.ok(
+    buildEnglishMedicalSearchQueries('Otoscopia membrana timpânica OMA', 'Pediatria', '').some((q) =>
+      /otoscopy/i.test(q)
+    )
+  );
+  assert.ok(
+    buildEnglishMedicalSearchQueries('Colposcopia epitélio acetobranco', 'Ginecologia', '').some((q) =>
+      /colposcopy/i.test(q)
+    )
+  );
+
+  // Expanded stock/slide/course-banner URL blocklist
+  assert.equal(isSpamOrLogoImageUrl('https://cdn.example.com/shutterstock_12345_doctor.jpg'), true);
+  assert.equal(isSpamOrLogoImageUrl('https://cdn.example.com/dica-de-prova-cardio.png'), true);
+  assert.equal(isSpamOrLogoImageUrl('https://cdn.example.com/pulo_do_gato_banner.jpg'), true);
+  assert.equal(isSpamOrLogoImageUrl('https://cdn.example.com/medgrupo-slide-banner.png'), true);
+
+  // Modality scoring prioritizes real otoscopy over unrelated slide/stock image
+  const otoCand = {
+    title: 'Acute otitis media tympanic membrane otoscopy',
+    description: 'Bulging erythematous eardrum on clinical otoscopy',
+    source: 'Wikimedia Commons Medical',
+    thumbUrl: 'https://upload.wikimedia.org/commons/acute_otitis_media_otoscopy.jpg',
+    fullUrl: 'https://upload.wikimedia.org/commons/acute_otitis_media_otoscopy.jpg',
+    isSvg: false,
+  };
+  const slideCand = {
+    title: 'Dica de prova otite media slide deck',
+    description: 'Powerpoint course banner summary',
+    source: 'example.com',
+    thumbUrl: 'https://example.com/otite_summary.jpg',
+    fullUrl: 'https://example.com/otite_summary.jpg',
+    isSvg: false,
+  };
+  const otoCtx = {
+    query: 'otoscopia membrana timpanica otite media aguda',
+    topic: 'Pediatria - ORL',
+    question: 'Qual o achado mais específico na otoscopia da OMA?',
+    answer: 'Abaulamento da membrana timpânica.',
+    enQueries: ['otoscopy tympanic membrane otitis media'],
+  };
+  assert.ok(
+    scoreImageRelevance(otoCand, otoCtx) > scoreImageRelevance(slideCand, otoCtx) + 100
+  );
+});
+
+test('Lote 3: httpFetch enforces SSRF + streaming byte cap and localMediaIndex blocks traversal and non-media extensions', async () => {
+  assert.equal(isSafeExternalUrl('https://upload.wikimedia.org/wikipedia/commons/ecg.jpg'), true);
+  assert.equal(isSafeExternalUrl('http://127.0.0.1:8765/secret'), false);
+  assert.equal(isSafeExternalUrl('http://[::ffff:127.0.0.1]/secret'), false);
+  assert.equal(isSafeExternalUrl('http://169.254.169.254/latest/meta-data/'), false);
+
+  // Streaming byte-cap protection against OOM
+  const smallStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(256));
+      controller.enqueue(new Uint8Array(256));
+      controller.close();
+    },
+  });
+  const okBuf = await readResponseBufferWithLimit(new Response(smallStream), 1024);
+  assert.equal(okBuf.length, 512);
+
+  const oversizedStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(700));
+      controller.enqueue(new Uint8Array(700));
+      controller.close();
+    },
+  });
+  await assert.rejects(
+    () => readResponseBufferWithLimit(new Response(oversizedStream), 1024),
+    (err: unknown) => err instanceof PayloadTooLargeError
+  );
+
+  // localMediaIndex extension & traversal validation using an isolated temp directory
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cards20_media_test_'));
+  const prevRoot = process.env.LOCAL_MEDIA_ROOT;
+  try {
+    fs.writeFileSync(path.join(tmpRoot, 'ecg_valido.png'), Buffer.from([137, 80, 78, 71]));
+    fs.writeFileSync(path.join(tmpRoot, 'manifest.json'), '{}');
+    fs.writeFileSync(path.join(tmpRoot, 'notes.txt'), 'secret');
+    process.env.LOCAL_MEDIA_ROOT = tmpRoot;
+
+    assert.ok(resolveSafeLocalMediaPath('ecg_valido.png', { imagesOnly: true }));
+    assert.equal(resolveSafeLocalMediaPath('manifest.json', { imagesOnly: true }), null);
+    assert.equal(resolveSafeLocalMediaPath('notes.txt'), null);
+    assert.equal(resolveSafeLocalMediaPath('../etc/passwd'), null);
+    assert.equal(resolveSafeLocalMediaPath('ecg_valido.png\0.jpg'), null);
+  } finally {
+    if (prevRoot === undefined) {
+      delete process.env.LOCAL_MEDIA_ROOT;
+    } else {
+      process.env.LOCAL_MEDIA_ROOT = prevRoot;
+    }
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 

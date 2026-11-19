@@ -123,21 +123,37 @@ export function getLocalMediaIndex(forceRefresh = false): LocalIndexedMediaEntry
   return entries;
 }
 
-export function resolveSafeLocalMediaPath(relPath: string): string | null {
+const ALLOWED_LOCAL_MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|mp3|ogg|wav|m4a)$/i;
+
+export function resolveSafeLocalMediaPath(
+  relPath: string,
+  options?: { imagesOnly?: boolean }
+): string | null {
   const root = getLocalMediaRoot();
   if (!root || !relPath) return null;
-  const cleanRel = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '');
+  const rawRel = String(relPath);
+  if (rawRel.includes('\0')) return null;
+  const cleanRel = rawRel.replace(/\\/g, '/').replace(/^\/+/, '');
   if (!cleanRel || cleanRel.includes('..')) return null;
+
+  const extRegex = options?.imagesOnly ? /\.(png|jpe?g|webp|gif)$/i : ALLOWED_LOCAL_MEDIA_EXT_RE;
+  if (!extRegex.test(cleanRel)) return null;
+
   const resolved = path.resolve(root, cleanRel);
   if (!resolved.startsWith(root + path.sep)) return null;
   try {
-    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-      return resolved;
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+      return null;
     }
+    const realRoot = fs.realpathSync(root);
+    const realResolved = fs.realpathSync(resolved);
+    if (!realResolved.startsWith(realRoot + path.sep)) {
+      return null;
+    }
+    return realResolved;
   } catch {
     return null;
   }
-  return null;
 }
 
 export function searchLocalMediaArchive(params: {

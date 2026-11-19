@@ -6,9 +6,14 @@ import {
   resolveDeckMediaFiles,
 } from '../ankiExport';
 import { getAiClient } from '../geminiClient';
+import {
+  isSafeExternalUrl,
+  PayloadTooLargeError,
+  readResponseBufferWithLimit,
+  safeFetchWithRedirectValidation,
+} from '../httpFetch';
 import { resolveSafeLocalMediaPath } from '../localMediaIndex';
 import { searchMedicalImages } from '../mediaSearch';
-import { isSafeExternalImageUrl, safeFetchWithRedirectValidation } from './gemini';
 
 function sanitizeDeckKeyServer(raw: unknown): string {
   return (
@@ -95,7 +100,7 @@ export function createMediaRouter(): express.Router {
   // Servir imagem segura do acervo local (04_Mídias/)
   router.get('/media/local-file', (req, res) => {
     const rel = String(req.query.rel || '').trim();
-    const absPath = resolveSafeLocalMediaPath(rel);
+    const absPath = resolveSafeLocalMediaPath(rel, { imagesOnly: true });
     if (!absPath) {
       return res.status(404).send('Local media file not found');
     }
@@ -104,6 +109,8 @@ export function createMediaRouter(): express.Router {
       ? 'image/png'
       : lower.endsWith('.webp')
       ? 'image/webp'
+      : lower.endsWith('.gif')
+      ? 'image/gif'
       : 'image/jpeg';
     res.setHeader('Content-Type', mime);
     res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -115,7 +122,7 @@ export function createMediaRouter(): express.Router {
     const { signal, cleanup } = attachRequestAbort(req, res, 6000);
     try {
       const targetUrl = String(req.query.url || '').trim();
-      if (!isSafeExternalImageUrl(targetUrl)) {
+      if (!isSafeExternalUrl(targetUrl)) {
         return res.status(400).send('Invalid or blocked image URL');
       }
       const upstream = await safeFetchWithRedirectValidation(targetUrl, {
@@ -132,20 +139,20 @@ export function createMediaRouter(): express.Router {
       if (!contentType.startsWith('image/')) {
         return res.status(415).send('Upstream resource is not an image');
       }
-      const buffer = Buffer.from(await upstream.arrayBuffer());
+      const buffer = await readResponseBufferWithLimit(upstream, 10 * 1024 * 1024);
       if (buffer.length < 64) {
         return res.status(502).send('Upstream image is empty or corrupted');
-      }
-      if (buffer.length > 10 * 1024 * 1024) {
-        return res.status(413).send('Image exceeds 10MB limit');
       }
       if (res.writableEnded) return;
       res.setHeader('Content-Type', contentType);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Cache-Control', 'public, max-age=3600');
       return res.send(buffer);
-    } catch {
+    } catch (err: unknown) {
       if (res.writableEnded) return;
+      if (err instanceof PayloadTooLargeError) {
+        return res.status(413).send('Image exceeds 10MB limit');
+      }
       return res.status(502).send('Error proxying image');
     } finally {
       cleanup();

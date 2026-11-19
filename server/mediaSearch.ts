@@ -5,6 +5,11 @@ import {
   generateContentWithRetry,
   parseGeminiApiKeys,
 } from './geminiClient';
+import {
+  isSafeExternalUrl,
+  readResponseBufferWithLimit,
+  safeFetchWithRedirectValidation,
+} from './httpFetch';
 import { searchLocalMediaArchive } from './localMediaIndex';
 
 export interface MedicalImageCandidate {
@@ -90,10 +95,17 @@ export const PT_TO_EN_MEDICAL_TERMS: Array<[RegExp, string]> = [
   [/\bcirrose|ascite|varizes\s+esof[aá]gicas\b/gi, 'esophageal varices endoscopy liver cirrhosis'],
   [/\bfratura|luxa[cç][aã]o|osteomielite|colles|monteggia\b/gi, 'bone fracture dislocation radiograph x-ray'],
   [/\bleucemia|esfrega[cç]o|anemia\s+falciforme|drepan[oó]cito|bastonete\s+de\s+auer\b/gi, 'peripheral blood smear microscopy hematology'],
+  [/\bcistoscopia|uretrocistoscopia|tumor\s+vesical|mucosa\s+vesical\b/gi, 'cystoscopy bladder urothelial lesion endoscopy'],
+  [/\bvideolaparoscopia|laparoscopia|fitz[-\s]?hugh[-\s]?curtis|cordas\s+de\s+violino|endometriose\s+peritoneal\b/gi, 'laparoscopy intraoperative peritoneal view'],
+  [/\botoscopia|membrana\s+timp[aâ]nica|otite\s+m[eé]dia\s+aguda|colesteatoma|perfura[cç][aã]o\s+timp[aâ]nica\b/gi, 'otoscopy tympanic membrane otitis media'],
+  [/\bcolposcopia|epit[eé]lio\s+acetobranco|teste\s+de\s+schiller|zona\s+de\s+transforma[cç][aã]o\b/gi, 'colposcopy cervix acetowhite lesion'],
+  [/\beda\b|endoscopia\s+digestiva(?:\s+alta)?|\bforrest\b|[uú]lcera\s+p[eé]ptica|esofagite|es[oô]fago\s+de\s+barrett\b/gi, 'upper gastrointestinal endoscopy esophagogastroduodenoscopy'],
+  [/\bcolonoscopia|retossigmoidoscopia|p[oó]lipo\s+col[oô]nico|colite\s+pseudomembranosa|retocolite\s+ulcerativa\b/gi, 'colonoscopy colonic mucosa polyp'],
+  [/\bresson[aâ]ncia\s+magn[eé]tica|\brnm\b|\bcolangiorresson[aâ]ncia\b|\bangiorresson[aâ]ncia\b/gi, 'magnetic resonance imaging MRI scan'],
 ];
 
 const BLOCKED_IMAGE_URL_PATTERN =
-  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800|kardiotokograf)/i;
+  /(?:logo|icon|favicon|avatar|gravatar|pb-primary|dark-mode|banner|badge|pixel|1x1|sprite|spinner|button|social|share|commons-logo|ambox|edit-clear|question_book|crystal_clear|padlock|symbol_|flag_of_|coat_of_arms|map_of_|blank_map|wikimedia-button|poweredby|boeing|airlines|airport|stamp_of_|coin_|portrait_of_|bust_of_|headshot|scientist|einthoven|nobel|biography|author_photo|pill_bottle|medication_box|tablet_pack|capsule_pack|stethoscope|syringe|clipart|diatom|microfossil|focusstack|brightfield|diatomaceous|galaxy|nebula|volcano|glacier|insect|beetle|butterfly|orchid|consecration|archbishop|cathedral|diocese|clergy|accouchement_vers_1800|kardiotokograf|shutterstock|istockphoto|gettyimages|dreamstime|123rf|depositphotos|alamy|freepik|vecteezy|canva|pinterest|dica[_-]?de[_-]?prova|pulo[_-]?do[_-]?gato|slide[_-]?banner|watermark|placeholder|medgrupo|estrategiamed|medway|medcof|sanar|infographic[_-]?template|powerpoint)/i;
 
 const WIKIMEDIA_USER_AGENT =
   'Cards20MedicalApp/2.0 (https://github.com/wagmms/Cards-2.0)';
@@ -178,6 +190,41 @@ const MODALITY_KEYWORDS: Array<{
     name: 'smear',
     ptEnTrigger: /\b(esfregaco|hematoscopia|lamina|esquizocito|falciforme|auer|leucemia|hellp)\b/i,
     candidateMatch: /\b(smear|microscopy|schistocyte|sickle|histology|hematology|auer|cell|blood)\b/i,
+  },
+  {
+    name: 'rm',
+    ptEnTrigger: /\b(rm|rnm|ressonancia(?:\s+magnetica)?|colangiorressonancia|angiorressonancia|mri|magnetic\s+resonance|flair|dwi)\b/i,
+    candidateMatch: /\b(mri|magnetic\s+resonance|ressonancia|rnm|flair|t1|t2|dwi|mrcp|cholangiopancreatography)\b/i,
+  },
+  {
+    name: 'cistoscopia',
+    ptEnTrigger: /\b(cistoscopia|uretrocistoscopia|cystoscopy|mucosa\s+vesical|tumor\s+vesical|trabeculacao\s+vesical)\b/i,
+    candidateMatch: /\b(cystoscop\w*|cistoscop\w*|bladder\s+mucosa|urothelial|vesical\s+tumor|urethroscop\w*)\b/i,
+  },
+  {
+    name: 'laparoscopia',
+    ptEnTrigger: /\b(videolaparoscopia|laparoscopia|laparoscopy|histeroscopia|fitz[\s-]?hugh[\s-]?curtis|cordas\s+de\s+violino|aderencias\s+pelvicas|endometriose\s+peritoneal)\b/i,
+    candidateMatch: /\b(laparoscop\w*|videolaparoscop\w*|hysteroscop\w*|intraoperative|peritoneal|adhesion|fitz[\s-]?hugh)\b/i,
+  },
+  {
+    name: 'otoscopia',
+    ptEnTrigger: /\b(otoscopia|otoscopy|membrana\s+timpanica|timpano|otite\s+media|colesteatoma|perfuracao\s+timpanica|timpanosclerose)\b/i,
+    candidateMatch: /\b(otoscop\w*|tympanic\s+membrane|eardrum|otitis\s+media|cholesteatoma|myring\w*|tympanosclerosis)\b/i,
+  },
+  {
+    name: 'colposcopia',
+    ptEnTrigger: /\b(colposcopia|colposcopy|epitelio\s+acetobranco|teste\s+de\s+schiller|pontilhado|mosaico|zona\s+de\s+transformacao)\b/i,
+    candidateMatch: /\b(colposcop\w*|acetowhite|schiller|lugol|cervix|cervical\s+lesion|mosaicism|punctation|transformation\s+zone)\b/i,
+  },
+  {
+    name: 'eda',
+    ptEnTrigger: /\b(eda|endoscopia(?:\s+digestiva(?:\s+alta)?)?|esofagite|forrest|ulcera\s+peptica|varizes\s+esofagicas|barrett|mallory[\s-]?weiss)\b/i,
+    candidateMatch: /\b(endoscop\w*|gastroscop\w*|esophagogastroduodenoscop\w*|gastric\s+ulcer|forrest|varices|esophagitis|barrett|duodenal\s+ulcer)\b/i,
+  },
+  {
+    name: 'colonoscopia',
+    ptEnTrigger: /\b(colonoscopia|retossigmoidoscopia|coloscopia|polipo\s+colonico|pseudomembrana|colite\s+pseudomembranosa|retocolite\s+ulcerativa)\b/i,
+    candidateMatch: /\b(colonoscop\w*|sigmoidoscop\w*|colonic\s+polyp|pseudomembran\w*|ulcerative\s+colitis|colonic\s+mucosa)\b/i,
   },
 ];
 
@@ -381,11 +428,11 @@ export function scoreImageRelevance(
   ) {
     score -= 14;
   }
-  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape|biography|scientist|inventor|nobel|pill|tablet|capsule|bottle|packaging|stethoscope|syringe|stock[\s_-]?photo|consecration|archbishop|cathedral|diocese|clergy|ordained|catholic|anglican)\b/i.test(candidateText)) {
+  if (/\b(hospital|building|doctor|physician|university|campus|portrait|statue|island|bridge|forest|lake|garden|flower|plant|botany|landscape|biography|scientist|inventor|nobel|pill|tablet|capsule|bottle|packaging|stethoscope|syringe|stock[\s_-]?photo|shutterstock|istock|getty|dreamstime|freepik|vecteezy|dica\s+de\s+prova|pulo\s+do\s+gato|slide\s+deck|powerpoint|infographic\s+template|course\s+banner|promotional|advertisement|consecration|archbishop|cathedral|diocese|clergy|ordained|catholic|anglican)\b/i.test(candidateText)) {
     score -= 80;
   }
   if (
-    /\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|tomografia|ultrasound|ultrassom|ultrassonografia|e-?fast)\b/i.test(queryContextText) &&
+    /\b(?:ecg|ekg|electrocardiogram|eletrocardiograma|x-ray|radiograph|tomography|tomografia|ultrasound|ultrassom|ultrassonografia|e-?fast|mri|ressonancia|cistoscopia|cystoscopy|laparoscopia|laparoscopy|otoscopia|otoscopy|colposcopia|colposcopy|colonoscopia|colonoscopy|endoscopia|endoscopy)\b/i.test(queryContextText) &&
     /(?:fluorescence|confocal|islet|pancrea|immunofluorescence|histolog|microscop|diatom|microfossil|brightfield)/i.test(candidateText)
   ) {
     score -= 90;
@@ -922,14 +969,14 @@ async function validateCandidateImageUrl(
   byteLength: number;
   isSvg: boolean;
 }> {
-  if (!url || (!url.startsWith('https://') && !url.startsWith('http://'))) {
+  if (!url || !isSafeExternalUrl(url)) {
     return { ok: false, contentType: '', byteLength: 0, isSvg: false };
   }
   if (isSpamOrLogoImageUrl(url)) {
     return { ok: false, contentType: '', byteLength: 0, isSvg: false };
   }
   try {
-    const resp = await fetch(url, {
+    const resp = await safeFetchWithRedirectValidation(url, {
       method: 'GET',
       headers: {
         'User-Agent':
@@ -946,7 +993,7 @@ async function validateCandidateImageUrl(
       return { ok: false, contentType, byteLength: 0, isSvg: false };
     }
     const isSvg = isSvgImageUrl(url, contentType);
-    const buf = Buffer.from(await resp.arrayBuffer());
+    const buf = await readResponseBufferWithLimit(resp, 10 * 1024 * 1024);
     const minBytes = isSvg ? 1500 : 3000;
     if (buf.length < minBytes) {
       return { ok: false, contentType, byteLength: buf.length, isSvg };

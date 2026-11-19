@@ -7,6 +7,10 @@ import {
   extractCaptionHint,
   extractContextForFigure,
   hasClinicalFigurePageKeyword,
+  hasExplicitClinicalVisualExamCue,
+  isDidacticTextSlideOnly,
+  isLikelyBannerOrDecorativeCandidate,
+  shouldAllowFallbackPageCrop,
   type CaptionMatch,
   type RawPdfPageBuffer,
   type RawPdfPageImageCandidate,
@@ -18,6 +22,10 @@ export {
   extractCaptionHint,
   extractContextForFigure,
   hasClinicalFigurePageKeyword,
+  hasExplicitClinicalVisualExamCue,
+  isDidacticTextSlideOnly,
+  isLikelyBannerOrDecorativeCandidate,
+  shouldAllowFallbackPageCrop,
   type CaptionMatch,
   type RawPdfPageBuffer,
   type RawPdfPageImageCandidate,
@@ -92,7 +100,7 @@ function drawPdfImageToCanvas(
   if (srcW < 120 || srcH < 80) return null;
 
   const aspect = srcW / srcH;
-  if (aspect > 8.5 || aspect < 0.12) return null;
+  if (aspect > 6.2 || aspect < 0.16) return null;
 
   const scale = Math.min(1, maxDim / Math.max(srcW, srcH));
   const targetW = Math.max(1, Math.round(srcW * scale));
@@ -180,15 +188,24 @@ function drawPdfImageToCanvas(
     sCtx.drawImage(canvas, 0, 0, sampleW, sampleH);
     const sData = sCtx.getImageData(0, 0, sampleW, sampleH).data;
     const vals: number[] = [];
+    const bucketCounts = new Map<number, number>();
     let minV = 255;
     let maxV = 0;
     for (let i = 0; i < sData.length; i += 4) {
       const lum = Math.round((sData[i] + sData[i + 1] + sData[i + 2]) / 3);
-      vals.push(Math.floor(lum / 16));
+      const bucket = Math.floor(lum / 16);
+      vals.push(bucket);
+      bucketCounts.set(bucket, (bucketCounts.get(bucket) || 0) + 1);
       if (lum < minV) minV = lum;
       if (lum > maxV) maxV = lum;
     }
-    if (maxV - minV < 14) {
+    let maxBucketFreq = 0;
+    for (const count of bucketCounts.values()) {
+      if (count > maxBucketFreq) maxBucketFreq = count;
+    }
+    const dominantRatio = vals.length > 0 ? maxBucketFreq / vals.length : 1;
+    // Reject solid/uniform blocks and flat single-color horizontal callout ribbons
+    if (maxV - minV < 14 || (dominantRatio > 0.94 && aspect > 2.8)) {
       isUniform = true;
     }
     signature = `${targetW}x${targetH}:${vals.join('')}`;
@@ -378,13 +395,20 @@ export async function extractImagesFromPdfBuffer(
     }
 
     for (const pb of pageBuffers) {
-      const survivingCount = pb.candidates.filter(
-        (cand) => (rawSigPages.get(cand.signature)?.size || 1) < 3
-      ).length;
-      const needsPageCrop =
-        hasClinicalFigurePageKeyword(pb.pageText) &&
-        pb.pageText.length < 12000 &&
-        (survivingCount === 0 || (Boolean(pb.hasVectorDiagramOps) && survivingCount <= 1));
+      const survivingCount = pb.candidates.filter((cand) => {
+        const count = rawSigPages.get(cand.signature)?.size || 1;
+        if (count >= 3) return false;
+        const asp = cand.height > 0 ? cand.width / cand.height : 1;
+        if (count >= 2 && (asp > 3.2 || asp < 0.32 || (cand.width <= 260 && cand.height <= 260))) {
+          return false;
+        }
+        return !isLikelyBannerOrDecorativeCandidate(cand, pb.pageText);
+      }).length;
+      const needsPageCrop = shouldAllowFallbackPageCrop(
+        pb.pageText,
+        survivingCount,
+        Boolean(pb.hasVectorDiagramOps)
+      );
       if (!needsPageCrop) continue;
 
       try {
@@ -463,12 +487,29 @@ export async function getPdfDocumentPageCount(buffer: ArrayBuffer): Promise<numb
   }
 }
 
-export async function renderPdfPageToCanvas(
-  buffer: ArrayBuffer,
-  pageNumber: number,
-  canvas: HTMLCanvasElement,
-  scale = 1.5
-): Promise<{ width: number; height: number; pageText: string; numPages: number }> {
+export interface PdfRenderedPageInfo {
+  width: number;
+  height: number;
+  pageText: string;
+  numPages: number;
+}
+
+export interface PdfDocumentSession {
+  readonly numPages: number;
+  renderPage: (
+    pageNumber: number,
+    canvas: HTMLCanvasElement,
+    scale?: number
+  ) => Promise<PdfRenderedPageInfo>;
+  destroy: () => Promise<void>;
+}
+
+/**
+ * Opens a cached PDFDocumentProxy session so navigating pages or changing zoom
+ * inside PdfGalleryModal reuses the already-parsed document instead of reparsing
+ * the entire PDF ArrayBuffer on every page turn.
+ */
+export async function openPdfDocumentSession(buffer: ArrayBuffer): Promise<PdfDocumentSession> {
   ensurePdfWorker();
   const wasmUrl =
     typeof window !== 'undefined' && window.location?.origin
@@ -478,33 +519,61 @@ export async function renderPdfPageToCanvas(
     data: new Uint8Array(buffer.slice(0)),
     ...(wasmUrl ? { wasmUrl } : {}),
   });
+  const pdfDoc = await loadingTask.promise;
+  let destroyed = false;
+
+  return {
+    numPages: pdfDoc.numPages,
+    async renderPage(pageNumber: number, canvas: HTMLCanvasElement, scale = 1.5) {
+      if (destroyed) {
+        throw new Error('Sessão do PDF já foi encerrada.');
+      }
+      const safePage = Math.max(1, Math.min(pageNumber, pdfDoc.numPages));
+      const page = await pdfDoc.getPage(safePage);
+      try {
+        const vp = page.getViewport({ scale });
+        canvas.width = Math.max(1, Math.round(vp.width));
+        canvas.height = Math.max(1, Math.round(vp.height));
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, canvas, viewport: vp }).promise;
+        }
+        const textContent = await page.getTextContent().catch(() => ({ items: [] }));
+        const pageText = (textContent.items as Array<{ str?: string }>)
+          .map((it) => it.str || '')
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        return {
+          width: canvas.width,
+          height: canvas.height,
+          pageText,
+          numPages: pdfDoc.numPages,
+        };
+      } finally {
+        page.cleanup();
+      }
+    },
+    async destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      await loadingTask.destroy().catch(() => undefined);
+    },
+  };
+}
+
+export async function renderPdfPageToCanvas(
+  buffer: ArrayBuffer,
+  pageNumber: number,
+  canvas: HTMLCanvasElement,
+  scale = 1.5
+): Promise<PdfRenderedPageInfo> {
+  const session = await openPdfDocumentSession(buffer);
   try {
-    const pdfDoc = await loadingTask.promise;
-    const safePage = Math.max(1, Math.min(pageNumber, pdfDoc.numPages));
-    const page = await pdfDoc.getPage(safePage);
-    const vp = page.getViewport({ scale });
-    canvas.width = Math.max(1, Math.round(vp.width));
-    canvas.height = Math.max(1, Math.round(vp.height));
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: ctx, canvas, viewport: vp }).promise;
-    }
-    const textContent = await page.getTextContent().catch(() => ({ items: [] }));
-    const pageText = (textContent.items as Array<{ str?: string }>)
-      .map((it) => it.str || '')
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    page.cleanup();
-    return {
-      width: canvas.width,
-      height: canvas.height,
-      pageText,
-      numPages: pdfDoc.numPages,
-    };
+    return await session.renderPage(pageNumber, canvas, scale);
   } finally {
-    await loadingTask.destroy().catch(() => undefined);
+    await session.destroy();
   }
 }

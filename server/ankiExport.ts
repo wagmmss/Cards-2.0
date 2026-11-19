@@ -2,6 +2,11 @@ import fs from 'fs';
 import crypto from 'crypto';
 import initSqlJs from 'sql.js';
 import sharp from 'sharp';
+import {
+  isSafeExternalUrl,
+  readResponseBufferWithLimit,
+  safeFetchWithRedirectValidation,
+} from './httpFetch';
 import { resolveSafeLocalMediaPath } from './localMediaIndex';
 
 const MAX_CLINICAL_IMAGE_WIDTH = 1600;
@@ -130,52 +135,6 @@ export function buildZipArchive(entries: Array<{ name: string; data: Buffer }>):
   return Buffer.concat([...localParts, ...centralParts, eocd]);
 }
 
-function isSafeExternalMediaUrl(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-    if (
-      host === 'localhost' ||
-      host === '::1' ||
-      host === '0.0.0.0' ||
-      host.endsWith('.local') ||
-      host.endsWith('.internal')
-    ) {
-      return false;
-    }
-    if (/^(127\.|10\.|169\.254\.|192\.168\.|0\.)/.test(host)) return false;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
-    if (/^(?:fc00:|fd[0-9a-f]{2}:|fe80:)/i.test(host)) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function safeFetchMediaUrl(
-  rawUrl: string,
-  headers: Record<string, string>,
-  maxRedirects = 3
-): Promise<globalThis.Response | null> {
-  let currentUrl = rawUrl;
-  for (let hop = 0; hop <= maxRedirects; hop++) {
-    if (!isSafeExternalMediaUrl(currentUrl)) return null;
-    const resp = await fetch(currentUrl, {
-      headers,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(12_000),
-    });
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get('location');
-      if (!location || hop === maxRedirects) return null;
-      currentUrl = new URL(location, currentUrl).toString();
-      continue;
-    }
-    return resp;
-  }
-  return null;
-}
 
 export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buffer | null> {
   if (!sourceUrl) return null;
@@ -213,15 +172,17 @@ export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buf
   }
 
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-    if (!isSafeExternalMediaUrl(trimmed)) return null;
+    if (!isSafeExternalUrl(trimmed)) return null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const resp = await safeFetchMediaUrl(trimmed, {
-          'User-Agent':
-            'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
-          Accept: 'image/*, audio/*, application/octet-stream;q=0.8',
+        const resp = await safeFetchWithRedirectValidation(trimmed, {
+          headers: {
+            'User-Agent':
+              'InternatoFirstCardArchitect/2.0 (https://aistudio.google.com; medical-education)',
+            Accept: 'image/*, audio/*, application/octet-stream;q=0.8',
+          },
+          signal: AbortSignal.timeout(12_000),
         });
-        if (!resp) return null;
         if (resp.status === 404 || resp.status === 410) return null;
         if (!resp.ok) {
           if (attempt === 0 && (resp.status === 429 || resp.status >= 500)) continue;
@@ -235,11 +196,11 @@ export async function resolveMediaSourceToBuffer(sourceUrl: string): Promise<Buf
         ) {
           return null;
         }
-        const arrBuf = await resp.arrayBuffer();
-        if (arrBuf.byteLength < 64 || arrBuf.byteLength > 20 * 1024 * 1024) {
+        const buf = await readResponseBufferWithLimit(resp, 20 * 1024 * 1024);
+        if (buf.length < 64) {
           return null;
         }
-        return Buffer.from(arrBuf);
+        return buf;
       } catch {
         if (attempt === 1) return null;
       }

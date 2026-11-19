@@ -29,11 +29,101 @@ export interface RawPdfPageBuffer {
   hasVectorDiagramOps?: boolean;
 }
 
+const EXPLICIT_CLINICAL_VISUAL_EXAM_RE =
+  /(?:\bfig\.?(?=\s*\d|\s|:|\b)|\b(?:figura|imagem|foto\s+cl[ií]nica|ecg|ekg|eletrocardiograma|tra[çc]ado|supradesnivelamento|arritmia|rx|radiografia|raio[\s-]?x|tc|tomografia|angiotc|rm|rnm|resson[âa]ncia|colangiorresson[âa]ncia|ultrassom|ultrassonografia|usg|ecocardiograma|videolaparoscopia|laparoscopia|cistoscopia|uretrocistoscopia|otoscopia|colposcopia|histeroscopia|eda|endoscopia|colonoscopia|retossigmoidoscopia|fundoscopia|dermatoscopia|esfrega[çc]o|ctg|cardiotocografia|algoritmo|fluxograma|partograma|leopold|mcroberts|pelvimetria|hodge|de\s+lee|sinclitismo|est[áa]tica\s+fetal|mecanismo\s+de\s+parto|f[óo]rceps|v[áa]cuo[\s-]?extrator|distocia|manobra)\b)/i;
+
+const DIDACTIC_CALLOUT_OR_SLIDE_RE =
+  /\b(?:dica\s+de\s+prova|pulo\s+do\s+gato|pegadinha|fique\s+ligado|cai\s+na\s+prova|n[ãa]o\s+confunda|macete|mnem[ôo]nico|quest[ãa]o\s+comentada|coment[áa]rio\s+da\s+quest[ãa]o|alternativa\s+correta|gabarito|resumo\s+(?:do\s+cap[íi]tulo|final)|mapa\s+mental|aten[çc][ãa]o\s+especial|medgrupo|estrat[ée]gia\s*med|medway|medcof|sanar|aristo|hardwork|todos\s+os\s+direitos\s+reservados|qr\s*code|sum[áa]rio|refer[êe]ncias\s+bibliogr[áa]ficas)\b/i;
+
+const STRIP_ALLOWED_MODALITY_RE =
+  /\b(?:ecg|ekg|eletrocardiograma|ctg|cardiotocografia|tra[çc]ado|ritmo|derivac[õo]es|partograma|curva\s+de\s+friedman)\b/i;
+
+export function hasExplicitClinicalVisualExamCue(text: string): boolean {
+  if (!text) return false;
+  return EXPLICIT_CLINICAL_VISUAL_EXAM_RE.test(text);
+}
+
+export function isDidacticTextSlideOnly(pageText: string): boolean {
+  if (!pageText) return false;
+  return DIDACTIC_CALLOUT_OR_SLIDE_RE.test(pageText) && !EXPLICIT_CLINICAL_VISUAL_EXAM_RE.test(pageText);
+}
+
 export function hasClinicalFigurePageKeyword(pageText: string): boolean {
   if (!pageText) return false;
-  return /(?:\bfig\.?(?=\s*\d|\s|:|\b)|\b(?:figura|imagem|quadro|tabela|escore|crit[eé]rios|ecg|eletrocardiograma|tra[çc]ado|supradesnivelamento|arritmia|rx|radiografia|tomografia|ultrassom|ultrassonografia|usg|videolaparoscopia|laparoscopia|ctg|cardiotocografia|algoritmo|fluxograma|partograma|leopold|mcroberts|pelvimetria|hodge|de\s+lee|sinclitismo|est[áa]tica\s+fetal|mecanismo\s+de\s+parto|f[óo]rceps|v[áa]cuo\s+extrator|distocia|manobra)\b)/i.test(
-    pageText
+  if (isDidacticTextSlideOnly(pageText)) return false;
+  return (
+    EXPLICIT_CLINICAL_VISUAL_EXAM_RE.test(pageText) ||
+    /\b(?:quadro|tabela|escore|crit[eé]rios)\b/i.test(pageText)
   );
+}
+
+/**
+ * Single source of truth used by both `pdfImageExtractor` and `pdfImageCore`
+ * to decide whether a page deserves a full-page raster `page_crop` fallback.
+ * Filters out didactic text slides ("Dica de prova", "Pulo do gato", "Questão comentada")
+ * and text-heavy table/criteria pages lacking actual clinical exam cues or vector diagrams.
+ */
+export function shouldAllowFallbackPageCrop(
+  pageText: string,
+  survivingEmbeddedCount: number,
+  hasVectorDiagramOps = false
+): boolean {
+  if (!pageText || pageText.length >= 12000) return false;
+  if (isDidacticTextSlideOnly(pageText)) return false;
+  if (!hasClinicalFigurePageKeyword(pageText)) return false;
+
+  const hasExplicitVisual = hasExplicitClinicalVisualExamCue(pageText);
+  // Require either an explicit clinical visual/exam/diagram cue OR vector drawing ops;
+  // bare prose mentioning "tabela"/"quadro"/"critérios" with no vector art is usually a text slide.
+  if (!hasExplicitVisual && !hasVectorDiagramOps) {
+    return false;
+  }
+
+  return survivingEmbeddedCount === 0 || (Boolean(hasVectorDiagramOps) && survivingEmbeddedCount <= 1);
+}
+
+/**
+ * Pure filter that rejects handout header/footer banners, decorative callout ribbons
+ * ("Dica de prova", "Pulo do gato"), and tiny UI badges while preserving real clinical
+ * exams (including wide ECG/CTG rhythm strips).
+ */
+export function isLikelyBannerOrDecorativeCandidate(
+  item: Pick<RawPdfPageImageCandidate, 'width' | 'height' | 'captionHint' | 'pageTextSnippet'>,
+  pageText = ''
+): boolean {
+  const w = Number(item.width || 0);
+  const h = Number(item.height || 0);
+  if (w < 120 || h < 80) return true;
+
+  const aspect = w / h;
+  const contextText = `${item.captionHint || ''} ${item.pageTextSnippet || ''} ${pageText || ''}`;
+  const captionOnly = (item.captionHint || '').trim();
+  const isStripModality = STRIP_ALLOWED_MODALITY_RE.test(contextText);
+
+  // Ultra-wide divider strips or ultra-tall sidebar ribbons
+  if (aspect > 6.2 || aspect < 0.16) return true;
+  if (!isStripModality && (aspect > 4.2 || aspect < 0.24)) return true;
+
+  // Explicit didactic callout / course branding banner without clinical exam caption
+  if (
+    captionOnly &&
+    DIDACTIC_CALLOUT_OR_SLIDE_RE.test(captionOnly) &&
+    !EXPLICIT_CLINICAL_VISUAL_EXAM_RE.test(captionOnly)
+  ) {
+    return true;
+  }
+
+  // Wide banner on a purely didactic text slide ("Dica de prova" / "Pulo do gato")
+  if (isDidacticTextSlideOnly(pageText) && (aspect > 2.6 || w < 260 || h < 200)) {
+    return true;
+  }
+
+  // Tiny square badge/icon (lightbulb, warning seal, mascot) unless explicitly captioned as an exam
+  if (w < 180 && h < 180 && !EXPLICIT_CLINICAL_VISUAL_EXAM_RE.test(captionOnly)) {
+    return true;
+  }
+
+  return false;
 }
 
 export function collectPageCaptionMatches(pageText: string): CaptionMatch[] {
@@ -42,7 +132,7 @@ export function collectPageCaptionMatches(pageText: string): CaptionMatch[] {
   const seenOffsets: number[] = [];
 
   const regex =
-    /(?:Figura|Fig\.?(?=\s*\d|\s|:)|Imagem|Foto|USG|Ultrassom|Ultrassonografia|Videolaparoscopia|Laparoscopia|ECG|Eletrocardiograma|Traçado|Radiografia|Tomografia|Quadro|Tabela|Gráfico|Partograma|Manobra(?:\s+de\s+[A-ZÀ-ÿa-zà-ÿ]+)?)\s*\d*[:.\-–]?\s*[^.!?]{6,150}/gi;
+    /(?:Figura|Fig\.?(?=\s*\d|\s|:)|Imagem|Foto|USG|Ultrassom|Ultrassonografia|Videolaparoscopia|Laparoscopia|Cistoscopia|Otoscopia|Colposcopia|Histeroscopia|Endoscopia|EDA|Colonoscopia|Resson[âa]ncia|RM|RNM|ECG|Eletrocardiograma|Ecocardiograma|Traçado|Radiografia|Tomografia|Fundoscopia|Dermatoscopia|Quadro|Tabela|Gráfico|Partograma|Manobra(?:\s+de\s+[A-ZÀ-ÿa-zà-ÿ]+)?)\s*\d*[:.\-–]?\s*[^.!?]{6,150}/gi;
 
   let m: RegExpExecArray | null;
   while ((m = regex.exec(pageText)) !== null) {
@@ -88,7 +178,7 @@ export function extractContextForFigure(
 
   // Look for a local caption phrase inside this proportional window
   const localMatch = localSnippet.match(
-    /(?:Figura|Fig\.?(?=\s*\d|\s|:)|Imagem|Foto|USG|Ultrassom|Ultrassonografia|Videolaparoscopia|Laparoscopia|ECG|Eletrocardiograma|Traçados?|Radiografia|Tomografia|Quadro|Tabela|Gráfico|Partograma|Manobra(?:\s+de\s+[A-ZÀ-ÿa-zà-ÿ]+)?)\s*\d*[:.\-–]?\s*[^.!?]{6,140}/i
+    /(?:Figura|Fig\.?(?=\s*\d|\s|:)|Imagem|Foto|USG|Ultrassom|Ultrassonografia|Videolaparoscopia|Laparoscopia|Cistoscopia|Otoscopia|Colposcopia|Histeroscopia|Endoscopia|EDA|Colonoscopia|Resson[âa]ncia|RM|RNM|ECG|Eletrocardiograma|Ecocardiograma|Traçados?|Radiografia|Tomografia|Fundoscopia|Dermatoscopia|Quadro|Tabela|Gráfico|Partograma|Manobra(?:\s+de\s+[A-ZÀ-ÿa-zà-ÿ]+)?)\s*\d*[:.\-–]?\s*[^.!?]{6,140}/i
   );
 
   let captionHint = '';
@@ -120,10 +210,10 @@ export function extractCaptionHint(pageText: string, figZeroIdx = 0, totalFigs =
 }
 
 /**
- * Pure Phase-2 post-processor: computes cross-page watermark signatures (`pageCount >= 3`) first,
- * activates vector/slide `page_crop` fallback when a clinical figure page has zero surviving embedded
- * images (or vector diagrams with minimal embedded raster clutter) after watermark removal, and then
- * assigns sequential `figZeroIdx` captions ONLY to surviving images so institution logos never steal Figure 1/2 captions.
+ * Pure Phase-2 post-processor: computes cross-page watermark signatures (`pageCount >= 3`,
+ * or `>= 2` for banner/icon geometry) and filters decorative banners/text callouts first,
+ * activates vector/slide `page_crop` fallback only on genuine clinical visual pages, and then
+ * assigns sequential `figZeroIdx` captions ONLY to surviving images so logos/banners never steal captions.
  */
 export function assignCaptionsAndFilterWatermarks(
   pageBuffers: RawPdfPageBuffer[],
@@ -151,6 +241,16 @@ export function assignCaptionsAndFilterWatermarks(
       const pageCount = sigPages.get(item.signature)?.size || 1;
       if (pageCount >= 3) continue; // Repeated institution logo / watermark across 3+ pages
 
+      const aspect = item.height > 0 ? item.width / item.height : 1;
+      const isRepeatedIconOrBanner =
+        pageCount >= 2 &&
+        (aspect > 3.2 || aspect < 0.32 || (item.width <= 260 && item.height <= 260));
+      if (isRepeatedIconOrBanner) continue;
+
+      if (isLikelyBannerOrDecorativeCandidate(item, pageBuf.pageText)) {
+        continue;
+      }
+
       const samePageExactKey = `${item.pageNumber}:${item.signature}:${Math.round(item.byteLengthHint / 512)}`;
       if (seenSamePageExact.has(samePageExactKey)) continue;
       seenSamePageExact.add(samePageExactKey);
@@ -170,10 +270,11 @@ export function assignCaptionsAndFilterWatermarks(
 
     const shouldActivatePageCrop =
       Boolean(pageBuf.fallbackCropCandidate) &&
-      hasClinicalFigurePageKeyword(pageBuf.pageText) &&
-      pageBuf.pageText.length < 12000 &&
-      (nonWatermarkCandidates.length === 0 ||
-        (Boolean(pageBuf.hasVectorDiagramOps) && nonWatermarkCandidates.length <= 1));
+      shouldAllowFallbackPageCrop(
+        pageBuf.pageText,
+        nonWatermarkCandidates.length,
+        Boolean(pageBuf.hasVectorDiagramOps)
+      );
 
     if (shouldActivatePageCrop && pageBuf.fallbackCropCandidate) {
       survivingOnPage.push(pageBuf.fallbackCropCandidate);
@@ -194,6 +295,22 @@ export function assignCaptionsAndFilterWatermarks(
               figZeroIdx,
               totalSurviving
             );
+
+      // Post-caption guard: drop small/banner graphics whose assigned caption is purely a didactic callout
+      if (
+        item.kind === 'embedded' &&
+        isLikelyBannerOrDecorativeCandidate(
+          {
+            width: item.width,
+            height: item.height,
+            captionHint,
+            pageTextSnippet,
+          },
+          pageBuf.pageText
+        )
+      ) {
+        continue;
+      }
 
       const rawCaption = (captionHint || '').trim();
       const captionKey = `${item.pageNumber}:${rawCaption.toLowerCase()}`;

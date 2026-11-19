@@ -18,6 +18,9 @@ export type ModalityKey =
   | 'rm'
   | 'usg'
   | 'laparoscopy'
+  | 'cistoscopia'
+  | 'otoscopia'
+  | 'colposcopia'
   | 'eda'
   | 'colonoscopia'
   | 'ctg'
@@ -36,6 +39,9 @@ const VISUAL_DIAGNOSTIC_MODALITIES = new Set<ModalityKey>([
   'rm',
   'usg',
   'laparoscopy',
+  'cistoscopia',
+  'otoscopia',
+  'colposcopia',
   'eda',
   'colonoscopia',
   'ctg',
@@ -82,9 +88,9 @@ const MODALITY_PATTERNS: Array<{
   {
     key: 'rm',
     trigger:
-      /\b(rm|rnm|ressonancia(?:\s+magnetica)?|colangiorressonancia|angiorressonancia|mri|magnetic\s+resonance)\b/i,
+      /\b(rm|rnm|ressonancia(?:\s+magnetica)?|colangiorressonancia|angiorressonancia|mri|magnetic\s+resonance|flair|dwi|difusao|gadolinio)\b/i,
     candidate:
-      /\b(rm|rnm|ressonancia(?:\s+magnetica)?|mri|magnetic\s+resonance|t1|t2|flair|difusao|colangiorressonancia)\b/i,
+      /\b(rm|rnm|ressonancia(?:\s+magnetica)?|mri|magnetic\s+resonance|t1|t2|flair|dwi|difusao|colangiorressonancia|mrcp)\b/i,
   },
   {
     key: 'usg',
@@ -96,23 +102,44 @@ const MODALITY_PATTERNS: Array<{
   {
     key: 'laparoscopy',
     trigger:
-      /\b(videolaparoscopia|laparoscopia|laparotomia|histeroscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico)\b/i,
+      /\b(videolaparoscopia|laparoscopia|laparotomia|histeroscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico|endometriose\s+peritoneal)\b/i,
     candidate:
-      /\b(videolaparoscopia|laparoscopia|laparoscopy|laparoscopica|laparoscopico|laparotomia|histeroscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico|tuba inflamada)\b/i,
+      /\b(videolaparoscopia|laparoscopia|laparoscopy|laparoscopica|laparoscopico|laparotomia|histeroscopia|aderencia|aderencias|fitz[\s-]?hugh[\s-]?curtis|cordas de violino|intraoperatorio|achado cirurgico|aspecto laparoscopico|tuba inflamada|peritoneal)\b/i,
+  },
+  {
+    key: 'cistoscopia',
+    trigger:
+      /\b(cistoscopia|uretrocistoscopia|cystoscopy|mucosa\s+vesical|tumor\s+vesical|trabeculacao\s+vesical|cistite\s+intersticial)\b/i,
+    candidate:
+      /\b(cistoscopia|cistoscopico|uretrocistoscopia|cystoscop\w*|mucosa\s+vesical|bladder\s+mucosa|urotelial|urothelial|vesical)\b/i,
+  },
+  {
+    key: 'otoscopia',
+    trigger:
+      /\b(otoscopia|otoscopy|membrana\s+timpanica|timpano|otite\s+media|abaulamento\s+timpanico|perfuracao\s+timpanica|colesteatoma|timpanosclerose)\b/i,
+    candidate:
+      /\b(otoscopia|otoscopico|otoscop\w*|membrana\s+timpanica|tympanic\s+membrane|timpano|eardrum|otite\s+media|otitis\s+media|colesteatoma|cholesteatoma|timpanosclerose)\b/i,
+  },
+  {
+    key: 'colposcopia',
+    trigger:
+      /\b(colposcopia|colposcopy|epitelio\s+acetobranco|teste\s+de\s+schiller|iodo\s+negativo|pontilhado|mosaico|zona\s+de\s+transformacao|jec|lesao\s+intraepitelial)\b/i,
+    candidate:
+      /\b(colposcopia|colposcopico|colposcop\w*|acetobranco|acetowhite|schiller|lugol|mosaico|mosaicism|pontilhado|punctation|zona\s+de\s+transformacao|cervix|colo\s+uterino)\b/i,
   },
   {
     key: 'eda',
     trigger:
-      /\b(eda|endoscopia(?:\s+digestiva(?:\s+alta)?)?|esofagite|forrest|ulcera\s+peptica|varizes\s+esofagicas)\b/i,
+      /\b(eda|endoscopia(?:\s+digestiva(?:\s+alta)?)?|esofagite|forrest|ulcera\s+peptica|varizes\s+esofagicas|barrett|mallory[\s-]?weiss|los\s+angeles)\b/i,
     candidate:
-      /\b(eda|endoscopia|endoscopy|endoscopica|endoscopico|mucosa\s+gastrica|ulcera|forrest|esofagite)\b/i,
+      /\b(eda|endoscopia|endoscopy|endoscopica|endoscopico|gastroscop\w*|mucosa\s+gastrica|ulcera|forrest|esofagite|barrett|varizes)\b/i,
   },
   {
     key: 'colonoscopia',
     trigger:
-      /\b(colonoscopia|retossigmoidoscopia|coloscopia|polipo\s+colonico|pseudomembrana)\b/i,
+      /\b(colonoscopia|retossigmoidoscopia|coloscopia|polipo\s+colonico|pseudomembrana|colite\s+pseudomembranosa|retocolite\s+ulcerativa|angiodisplasia)\b/i,
     candidate:
-      /\b(colonoscopia|colonoscopy|retossigmoidoscopia|colonoscopico|mucosa\s+colonica|polipo)\b/i,
+      /\b(colonoscopia|colonoscopy|retossigmoidoscopia|colonoscopico|sigmoidoscop\w*|mucosa\s+colonica|polipo|pseudomembrana|colite\s+ulcerativa)\b/i,
   },
   {
     key: 'ctg',

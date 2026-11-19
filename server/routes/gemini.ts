@@ -1,6 +1,12 @@
 import fs from 'fs';
 import express, { Request, Response } from 'express';
 import { resolveSafeLocalMediaPath } from '../localMediaIndex';
+import {
+  isSafeExternalUrl,
+  PayloadTooLargeError,
+  readResponseBufferWithLimit,
+  safeFetchWithRedirectValidation,
+} from '../httpFetch';
 import type { Part } from '@google/genai';
 import { ThinkingLevel, Type } from '@google/genai';
 import type { CanonicalCard, DomainProfile } from '../../src/types/deck';
@@ -54,55 +60,8 @@ function createRequestAbortSignal(req: Request, res: Response, maxMs: number): {
   };
 }
 
-export function isSafeExternalImageUrl(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-    if (
-      host === 'localhost' ||
-      host === '::1' ||
-      host === '0.0.0.0' ||
-      host.endsWith('.local') ||
-      host.endsWith('.internal')
-    ) {
-      return false;
-    }
-    if (/^(127\.|10\.|169\.254\.|192\.168\.|0\.)/.test(host)) return false;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
-    if (/^(?:fc00:|fd[0-9a-f]{2}:|fe80:)/i.test(host)) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function safeFetchWithRedirectValidation(
-  rawUrl: string,
-  init: RequestInit,
-  maxRedirects = 3
-): Promise<globalThis.Response> {
-  let currentUrl = rawUrl;
-  for (let hop = 0; hop <= maxRedirects; hop++) {
-    if (!isSafeExternalImageUrl(currentUrl)) {
-      throw new Error('URL externa inválida ou bloqueada por política SSRF.');
-    }
-    const resp = await fetch(currentUrl, {
-      ...init,
-      redirect: 'manual',
-    });
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get('location');
-      if (!location || hop === maxRedirects) {
-        throw new Error('Redirecionamento excessivo ou inválido ao buscar URL externa.');
-      }
-      currentUrl = new URL(location, currentUrl).toString();
-      continue;
-    }
-    return resp;
-  }
-  throw new Error('Falha ao seguir redirecionamento seguro.');
-}
+export const isSafeExternalImageUrl = isSafeExternalUrl;
+export { safeFetchWithRedirectValidation };
 
 type FetchedImageResult =
   | { status: 'ok'; mimeType: string; data: string }
@@ -229,12 +188,9 @@ async function resolveImageForMultimodalValidation(
     if (contentType === 'image/jpg') contentType = 'image/jpeg';
 
     if (contentType.includes('svg')) {
-      const svgBuf = Buffer.from(await upstream.arrayBuffer());
+      const svgBuf = await readResponseBufferWithLimit(upstream, 6 * 1024 * 1024);
       if (svgBuf.length < 128) {
         return { status: 'broken', reason: 'Arquivo SVG vazio ou corrompido.' };
-      }
-      if (svgBuf.length > 6 * 1024 * 1024) {
-        return { status: 'fetch_error', reason: 'SVG externo excede 6MB.' };
       }
       const head = svgBuf.subarray(0, 512).toString('utf8').toLowerCase();
       if (head.includes('<!doctype html') || head.includes('<html')) {
@@ -258,15 +214,15 @@ async function resolveImageForMultimodalValidation(
       return { status: 'fetch_error', reason: `Formato de imagem não suportado: ${contentType}` };
     }
 
-    const buf = Buffer.from(await upstream.arrayBuffer());
+    const buf = await readResponseBufferWithLimit(upstream, 6 * 1024 * 1024);
     if (buf.length < 256) {
       return { status: 'broken', reason: 'Arquivo de imagem vazio ou corrompido.' };
     }
-    if (buf.length > 6 * 1024 * 1024) {
-      return { status: 'fetch_error', reason: 'Imagem externa excede 6MB.' };
-    }
     return { status: 'ok', mimeType: contentType, data: buf.toString('base64') };
   } catch (err: unknown) {
+    if (err instanceof PayloadTooLargeError) {
+      return { status: 'fetch_error', reason: 'Imagem externa excede 6MB.' };
+    }
     const msg = err instanceof Error ? err.message : 'Erro ao baixar imagem externa.';
     if (/política SSRF|Redirecionamento/i.test(msg)) {
       return { status: 'broken', reason: msg };
