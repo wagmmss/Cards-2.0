@@ -1474,12 +1474,15 @@ function lintCard(card, availableMediaNames) {
   }
   const plainQuestionText = stripHtml(questionText);
   const plainAnswerText = stripHtml(answerText);
-  if (cardType === "basic" && /^\s*Por\s+que\b/i.test(plainQuestionText) && !/\b(?:conduta|tratamento|exame|esquema|dose|prescri[çc][ãa]o|cirurgia)\b/i.test(plainQuestionText)) {
+  const hasClinicalDecisionWhyAnchor = /\b(?:conduta|tratamento|manejo|exame|esquema|dose|prescri[çc][ãa]o|cirurgia|contraindicad[ao]|evitad[ao]|evitar|proscrit[ao]|escolh[ae]|prefer[ei]|prioriz\w*|suspender|interromper|manter|iniciar|associar|ajustar|corrigir|repor|drenar|intubar|anticoagul\w*|antibi[óo]tic\w*|f[áa]rmaco|droga|medica[çc][ãa]o|terapia|choque|instabilidade|risco\s+de\s+(?:sangramento|hemorragia|choque|edema|intoxica[çc][ãa]o|arritmia|hernia[çc][ãa]o|perfura[çc][ãa]o|morte))\b/i.test(
+    plainQuestionText
+  );
+  if (cardType === "basic" && /^\s*Por\s+que\b/i.test(plainQuestionText) && !hasClinicalDecisionWhyAnchor) {
     warnings.push({
       code: "THEORETICAL_WHY_QUESTION",
       field: "question",
       severity: "warning",
-      message: 'Pergunta te\xF3rica "Por que..." sem decis\xE3o cl\xEDnica pr\xE1tica: avalie podar ou converter em conduta de plant\xE3o.'
+      message: 'Pergunta te\xF3rica "Por que..." sem decis\xE3o cl\xEDnica pr\xE1tica: avalie podar ou ancorar em conduta/contraindica\xE7\xE3o de plant\xE3o.'
     });
   }
   if (/\b(?:hepaticojejunostomia|dreno\s+de\s+kehr|ileotiflectomia|ileocecectomia|diverticulectomia|linfadenectomia|csendes|colectomia\s+direita\s+oncol[óo]gica)\b/i.test(
@@ -1739,6 +1742,11 @@ function lintCard(card, availableMediaNames) {
       message: "Remova marcadores obsoletos (Preceptoria, Armadilha, [ALVO DE BANCA], [BEIRA-LEITO] ou [BUSCAR IMAGEM])."
     });
   }
+  const boldMatches = hintText.replace(/<b>\s*Coment[áa]rio:\s*<\/b>/i, "").match(/<(b|strong)\b[^>]*>/gi);
+  const hasBoldInComment = Boolean(boldMatches && boldMatches.length > 0);
+  const hasDifferentialOrCausalContrast = /\b(?:diferente(?:mente)?|enquanto|ao\s+contr[áa]rio|j[áa]\s+(?:o|a|os|as|em|na|no)|contrari[ao]|contraindicad[ao]|em\s+vez\s+de|vs\.?|versus|pois|porque|evitando|prevenindo|reduz(?:indo)?\s+risco)\b/i.test(
+    extractCommentVisibleText(hintText)
+  );
   if (commentVisibleCharCount > MAX_COMMENT_CHARS) {
     warnings.push({
       code: "COMMENT_TOO_LONG",
@@ -1746,16 +1754,15 @@ function lintCard(card, availableMediaNames) {
       severity: "error",
       message: `Coment\xE1rio excede o teto de ${MAX_COMMENT_CHARS} caracteres vis\xEDveis (${commentVisibleCharCount}/${MAX_COMMENT_CHARS} chars).`
     });
-  } else if (commentVisibleCharCount > 0 && commentVisibleCharCount < 110) {
+  } else if (commentVisibleCharCount > 0 && (commentVisibleCharCount < 80 || commentVisibleCharCount < 110 && (!hasBoldInComment || !hasDifferentialOrCausalContrast))) {
     warnings.push({
       code: "COMMENT_TOO_SHORT",
       field: "hint",
       severity: "warning",
-      message: `Coment\xE1rio curto (${commentVisibleCharCount} chars; meta ideal: 180 a 300 chars com contraste diferencial).`
+      message: `Coment\xE1rio curto (${commentVisibleCharCount} chars; use >= 80 chars com <b>negrito</b> e contraste diferencial ou 110\u2013300 chars).`
     });
   }
-  const boldMatches = hintText.replace(/<b>\s*Coment[áa]rio:\s*<\/b>/i, "").match(/<(b|strong)\b[^>]*>/gi);
-  if (!boldMatches || boldMatches.length === 0) {
+  if (!hasBoldInComment) {
     warnings.push({
       code: "COMMENT_MISSING_BOLD",
       field: "hint",
@@ -1969,7 +1976,7 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
 
 2. COMPREENS\xC3O PROFUNDA & MEM\xD3RIA DE LONGO PRAZO DE MICHAEL NIELSEN (augmentingcognition.com/ltm.html):
 - **Proibi\xE7\xE3o de Defini\xE7\xF5es Inertes e Prompts Bin\xE1rios:** NUNCA crie perguntas passivas de dicion\xE1rio ("O que \xE9 X?", "Defina X") nem prompts bin\xE1rios ("Sim/N\xE3o", "Verdadeiro/Falso").
-- **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Al\xE9m de condutas em vinhetas cl\xEDnicas, crie prompts que cobrem **o porqu\xEA fisiopatol\xF3gico/mecan\xEDstico** ("Por que X ocorre?", "Como diferenciar A de B \xE0 beira-leito?", "Por que droga Y \xE9 contraindicada no contexto Z?"), construindo uma rede densa de compreens\xE3o em vez de decoreba isolada.
+- **Understand Before You Memorize & Prompts Integrativos ("Why / How"):** Al\xE9m de condutas em vinhetas cl\xEDnicas, crie prompts que cobrem **o mecanismo causal com impacto direto em conduta/contraindica\xE7\xE3o** ("Por que droga Y \xE9 contraindicada no contexto Z?", "Por que priorizar conduta A antes de B \xE0 beira-leito?", "Como diferenciar A de B \xE0 beira-leito?"), evitando perguntas te\xF3ricas puras sem decis\xE3o cl\xEDnica.
 - **Regra "More Than You Think" (Matuschak):** Quando um conceito P1/P2 for central para o Internato, ataque-o por m\xFAltiplos \xE2ngulos complementares (ex.: reconhecimento \u2192 conduta imediata \u2192 mecanismo/armadilha diferencial), cada um em seu pr\xF3prio card focado.
 - **Prompts de Sali\xEAncia Cl\xEDnica (Salience Prompts):** Em cen\xE1rios aplicados, apresente a situa\xE7\xE3o concreta ([CEN\xC1RIO + PERFIL/CONTEXTO] + [ACHADOS/SINAIS/DADOS]) para treinar o c\xE9rebro a reconhecer **quando** ativar aquele conhecimento na pr\xE1tica m\xE9dica.
 
@@ -1977,7 +1984,7 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
 - A quantidade final de cards deve refletir a cobertura cl\xEDnica completa (P1 a P4) sem encher lingui\xE7a e **sem amputar conceitos essenciais**:
   a) REFAZER EM VEZ DE DELETAR (PRESERVANDO TODOS OS POLOS CL\xCDNICOS): Se um card antigo for uma lista aberta, pergunta vaga, defini\xE7\xE3o passiva ou cloze com 2+ lacunas sobre conceitos P1\u2013P4 clinicamente \xFAteis, **N\xC3O o exclua** e **N\xC3O descarte o segundo conceito no coment\xE1rio**: reconstrua o conceito principal preservando o "id" num\xE9rico original e desmembre os demais polos clinicamente relevantes (ex.: doen\xE7a atual vs. pr\xE9via, grau leve vs. grave, 1\xAA linha vs. 2\xAA linha) em novos IDs (max_id + 1...).
   b) QUANDO PODAR (EXCLUIR IDs \u2014 RIGOR INTERNATO-FIRST): Exclua um "id" original sempre que o card for: (i) duplicata sem\xE2ntica, fragmenta\xE7\xE3o artificial em s\xE9rie ("1/3", "2/3", "3/3" da mesma frase) ou redund\xE2ncia conceitual cruzada (o mesmo sinal, ep\xF4nimo ou crit\xE9rio j\xE1 \xE9 testado em outro card mais completo do baralho), (ii) reprovado pelo Filtro Negativo (gen\xE9tica/biologia molecular de bancada sem conduta, hist\xF3ria/datas), (iii) fisiologia/anatomia te\xF3rica pura, medidas anat\xF4micas est\xE1ticas sem impacto na conduta, detalhes t\xE9cnicos de subespecialista fora da al\xE7ada do interno, proped\xEAutica passiva substitu\xEDda por conduta padr\xE3o atual ou classifica\xE7\xE3o/modelo obsoleto substitu\xEDdo por diretriz vigente (quando um achado decidir conduta imediata, reconstrua cobrando a CONDUTA, nunca a medida isolada), ou (iv) preenchimento trivial sem decis\xE3o cl\xEDnica real.
-  c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais "por que/como") ou "cloze" (crit\xE9rios num\xE9ricos, limiares, doses cr\xEDticas e alvos em \xE2ncora cl\xEDnica enxuta com 1 \xFAnica lacuna {{c1::...}}). Em "cloze" de regra geral, N\xC3O force vinheta artificial com idade/tempo de uso quando isso n\xE3o altera a conduta.
+  c) ESCOLHA FLUIDA DE FORMATO (SEM COTA 50/50): Para cada card sobrevivente ou novo, escolha livremente "basic" (condutas, diferenciais, imagens recognition, mecanismos causais com impacto em conduta/contraindica\xE7\xE3o) ou "cloze" (crit\xE9rios num\xE9ricos, limiares, doses cr\xEDticas e alvos em \xE2ncora cl\xEDnica enxuta com 1 \xFAnica lacuna {{c1::...}}). Em "cloze" de regra geral, N\xC3O force vinheta artificial com idade/tempo de uso quando isso n\xE3o altera a conduta.
 - N\xC3O inclua o campo "sources" nos cards.
 
 4. DOUTRINA INTERNATO-FIRST GERAL (P1 -> P4 ADAPT\xC1VEL POR PERFIL DE DOM\xCDNIO), IMAGENS FIDEDIGNAS E FORMATA\xC7\xC3O:
@@ -1985,20 +1992,20 @@ SUAS DIRETRIZES INEGOCI\xC1VEIS DE ENGENHARIA COGNITIVA (MATUSCHAK & NIELSEN + F
   * **P1** = Prioridade M\xE1xima / Conduta Cr\xEDtica do Perfil (emerg\xEAncia/minuto zero no perfil Emerg\xEAncia; indica\xE7\xE3o cir\xFArgica/choque/dano no Cir\xFArgico; indica\xE7\xE3o/contraindica\xE7\xE3o/crit\xE9rio diagn\xF3stico no Ambulatorial; lei/sigilo/notifica\xE7\xE3o/princ\xEDpio \xE9tico-SUS no Preventiva/Normativo).
   * **P2** = Decis\xE3o Diagn\xF3stica, Estadiamento, Escores e Reconhecimento Visual (exames reais em image_mode: "recognition", pontos de corte num\xE9ricos exatos, interpreta\xE7\xE3o de medidas/\xEDndices).
   * **P3** = Manejo Longitudinal / Seguimento / Preven\xE7\xE3o / Fluxo Operacional (tratamento de 1\xAA linha, popula\xE7\xF5es especiais, rastreamento, vacinas, reabilita\xE7\xE3o, prazos/fluxos documentais).
-  * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Cl\xE1ssicas de Banca (mecanismos causais, pares confund\xEDveis, exce\xE7\xF5es normativas).
+  * **P4** = Fisiopatologia Aplicada, Diferenciais e Armadilhas Cl\xE1ssicas de Banca (mecanismos causais que mudam conduta, pares confund\xEDveis, exce\xE7\xF5es normativas).
 - AVALIA\xC7\xC3O VISUAL PROATIVA EM TODOS OS CARDS (MATERIAIS ANEXADOS + WEB):
   * N\xE3o se limite a manter ou trocar imagens que j\xE1 existiam no deck original. Para CADA card gerado ou reconstru\xEDdo, raciocine se um exame visual real (ECG, RX, TC, USG, CTG, dermoscopia, fundoscopia, esfrega\xE7o/l\xE2mina, foto semiol\xF3gica, fluxograma ou tabela cl\xEDnica) melhora significativamente a reten\xE7\xE3o e o racioc\xEDnio do estudante.
   * Se existir uma figura compat\xEDvel no "CAT\xC1LOGO DE IMAGENS DOS MATERIAIS ANEXADOS" fornecido no prompt, insira <img src="pdfimg:ID_EXATO">.
   * Se n\xE3o houver figura correspondente nos PDFs, mas o card ganhar valor com imagem cl\xEDnica real, insira <img src="buscar_imagem: termo cl\xEDnico espec\xEDfico em PT ou EN"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">, <img src="buscar_imagem: pneumotorax hipertensivo radiografia torax">).
-  * Coloque <img ...> na "question" ("image_mode": "recognition") quando o estudante precisa reconhecer o achado visual para responder; ou coloque no in\xEDcio do "hint" ("image_mode": "feedback", antes de <b>Coment\xE1rio:</b>) quando a imagem refor\xE7a a explica\xE7\xE3o, classifica\xE7\xE3o ou algoritmo sem entregar a resposta na frente.
+  * Coloque <img ...> na "question" ("image_mode": "recognition") EXCLUSIVAMENTE em cards "basic" quando o estudante precisa reconhecer o achado visual para responder; em cards "cloze" \xE9 PROIBIDO usar "image_mode": "recognition" \u2014 coloque a imagem apenas no in\xEDcio do "hint" ("image_mode": "feedback", antes de <b>Coment\xE1rio:</b>).
   * Em cards puramente normativos, de dose ou c\xE1lculo simples onde imagem n\xE3o acrescenta, N\xC3O force <img>.
-  * Para escores, crit\xE9rios diagn\xF3sticos ou correla\xE7\xF5es topogr\xE1ficas estruturadas (ex.: \xCDndice de Bishop, Apgar, Wells, CURB-65, Sgarbossa, Paredes/Coron\xE1rias no IAM) sem figura correspondente nos PDFs, renderize proativamente uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> no "hint" AP\xD3S o texto de <b>Coment\xE1rio:</b> (m\xE1x. 4 colunas, c\xE9lulas curtas; a tabela N\xC3O entra na contagem de 180\u2013300 chars do coment\xE1rio).
+  * Para escores, crit\xE9rios diagn\xF3sticos ou correla\xE7\xF5es topogr\xE1ficas estruturadas (ex.: \xCDndice de Bishop, Apgar, Wells, CURB-65, Sgarbossa, Paredes/Coron\xE1rias no IAM) sem figura correspondente nos PDFs, renderize proativamente uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> no "hint" AP\xD3S o texto de <b>Coment\xE1rio:</b> (m\xE1x. 4 colunas, c\xE9lulas curtas; a tabela N\xC3O entra na contagem de caracteres do coment\xE1rio).
   * Toda <img> anexada exige legenda descritiva em <i>...</i> com \u2265 6 palavras descrevendo o achado vis\xEDvel real (PROIBIDO legenda gen\xE9rica/tautol\xF3gica ou que d\xEA spoiler da resposta em cards recognition).
 - PRECIS\xC3O TERMINOL\xD3GICA ESTRITA: valide cada termo bioqu\xEDmico, anat\xF4mico e eletrocardiogr\xE1fico com rigor absoluto (ex.: pot\xE1ssio = "calemia" / hipercalemia, NUNCA confundir com "litemia" de l\xEDtio; parear corretamente parede card\xEDaca \xD7 deriva\xE7\xF5es \xD7 art\xE9ria culpada).
 - FILTRO NEGATIVO ESTRITO: ZERO gen\xE9tica/biologia molecular de bancada sem impacto terap\xEAutico imediato, ZERO hist\xF3ria da medicina/datas e ZERO epidemiologia percentual solta que n\xE3o mude conduta.
 - PROIBIDO LaTeX ($...$, \\rightarrow, \\ge, \\le): use exclusivamente Unicode nativo (\u2192, \u2265, \u2264, \xB1, \u03B1, \u03B2, \xB5g, mEq/L) e HTML (<sub>, <sup>, <b>, <table class="med-table">).
 - PROIBIDO categorias antigas da FDA na gesta\xE7\xE3o ("Categoria B/C/D/X").
-- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br> nos feedback) de 1 a 2 frases (180 a 300 caracteres vis\xEDveis medidos AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " excluindo <table>, teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
+- "hint": sempre iniciando com "<b>Coment\xE1rio:</b> " (ou precedido por <i>Legenda visual...</i><br><br> nos cards recognition, ou por <img ...><br><i>Legenda...</i><br><br> nos feedback) de 1 a 2 frases enxutas e de alto rendimento (110 a 280 caracteres vis\xEDveis medidos AP\xD3S "<b>Coment\xE1rio:</b> " excluindo <table>; coment\xE1rios cir\xFArgicos de 85\u2013109 chars s\xE3o aceitos se j\xE1 tiverem <b>negrito</b> e contraste diferencial; teto estrito de 320 chars), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio.`;
 function extractJsonBlock(text) {
   if (!text) return "{}";
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -2950,16 +2957,15 @@ function sanitizeReturnedNotes(notes) {
 }
 function applyDeterministicAuditGuard(c, existing) {
   const cid = Number(c.id);
-  const plainQ = String(c.question || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  const plainA = String(c.answer || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  const plainHint = String(c.hint || "").replace(/<table[\s\S]*?<\/table>/gi, " ").replace(/<[^>]+>/g, " ").replace(/Coment[áa]rio:/gi, "").replace(/\s+/g, " ").trim();
-  const hasVaguePrompt = !/\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+minuto\s+zero|diagn[oó]stic[ao])\b/i.test(plainQ) && /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|como\s+conduzir|o\s+que\s+fazer)\s*\?\s*$/i.test(plainQ);
-  const isPassivePrompt = /^\s*(?:o\s+que\s+[eé]\s+|defina\s+|fale\s+sobre\s+)/i.test(plainQ);
-  const hasOrphanDeixis = !/<img\b/i.test(`${String(c.question || "")} ${String(c.hint || "")}`) && /\b(?:ecg|tra[çc]ado|exame|imagem|rx|usg|tc|ctg)\s+(?:abaixo|acima|em\s+anexo)\b/i.test(plainQ);
-  const hasMissingBasicAnswer = String(c.type || "basic").toLowerCase() === "basic" && !plainA;
-  const hasShortComment = plainHint.length < 100;
   const rawQ = String(c.question || "");
   const rawHint = String(c.hint || "");
+  const plainQ = rawQ.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const plainA = String(c.answer || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const commentVisibleText = extractCommentVisibleText(rawHint);
+  const hasVaguePrompt = !/\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+minuto\s+zero|diagn[oó]stic[ao])\b/i.test(plainQ) && /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|como\s+conduzir|o\s+que\s+fazer)\s*\?\s*$/i.test(plainQ);
+  const isPassivePrompt = /^\s*(?:o\s+que\s+[eé]\s+|defina\s+|fale\s+sobre\s+)/i.test(plainQ);
+  const hasOrphanDeixis = !/<img\b/i.test(`${rawQ} ${rawHint}`) && /\b(?:ecg|tra[çc]ado|exame|imagem|rx|usg|tc|ctg)\s+(?:abaixo|acima|em\s+anexo)\b/i.test(plainQ);
+  const hasMissingBasicAnswer = String(c.type || "basic").toLowerCase() === "basic" && !plainA;
   const cardForLint = {
     id: Number.isFinite(cid) ? cid : 0,
     type: String(c.type || "").toLowerCase() === "cloze" || /\{\{c\d+::/.test(rawQ) ? "cloze" : "basic",
@@ -2971,22 +2977,38 @@ function applyDeterministicAuditGuard(c, existing) {
   };
   const lintResult = lintCard(cardForLint);
   const hasFragmentedSeriesTopic = /\(\s*\d+\s*\/\s*\d+\s*\)\s*$/.test(String(c.topic || "").trim());
-  const splitCodes = /* @__PURE__ */ new Set(["CLOZE_COUNT_INVALID", "COMPOUND_QUESTION", "ANSWER_HAS_SEMICOLON"]);
+  const splitCodes = /* @__PURE__ */ new Set([
+    "CLOZE_COUNT_INVALID",
+    "COMPOUND_QUESTION",
+    "ANSWER_HAS_SEMICOLON",
+    "MATUSCHAK_UNFOCUSED_SET"
+  ]);
   const rebuildCodes = /* @__PURE__ */ new Set([
     "TOPIC_SPOILER",
     "CLOZE_HAS_HINT",
+    "CLOZE_TOO_LONG",
+    "CLOZE_DANGLING_PARTICLE",
+    "CLOZE_NON_EMPTY_ANSWER",
+    "QUESTION_TOO_LONG",
+    "VAGUE_TEMPORAL_WINDOW",
     "ANSWER_TOO_LONG",
     "LEGACY_MARKERS",
     "COMMENT_TOO_LONG",
+    "COMMENT_TOO_SHORT",
     "QUESTION_PAREN_SPOILER",
     "NIELSEN_PASSIVE_OR_BINARY",
     "ORPHAN_VISUAL_REFERENCE",
-    "REDUNDANT_VISUAL_DESCRIPTION"
+    "RECOGNITION_MISMATCH",
+    "TABLE_MALFORMED",
+    "LATEX_PROHIBITED",
+    "FDA_OBSOLETE_CATEGORY",
+    "THEORETICAL_WHY_QUESTION"
   ]);
   const splitIssue = lintResult.warnings.find((iss) => splitCodes.has(iss.code));
   const rebuildIssue = lintResult.warnings.find((iss) => rebuildCodes.has(iss.code));
+  const hasShortComment = commentVisibleText.length < 80 || lintResult.warnings.some((iss) => iss.code === "COMMENT_TOO_SHORT");
   const deterministicSplitReason = splitIssue ? splitIssue.message : "";
-  const deterministicRebuildReason = hasOrphanDeixis ? 'Refer\xEAncia visual ("abaixo"/"em anexo") sem imagem anexada.' : hasMissingBasicAnswer ? "Card basic com resposta vazia." : hasVaguePrompt ? "Comando vago sem janela temporal ou linha terap\xEAutica." : isPassivePrompt ? "Defini\xE7\xE3o passiva sem vinheta ou decis\xE3o cl\xEDnica." : hasFragmentedSeriesTopic ? "S\xE9rie fragmentada artificialmente (1/3, 2/3, 3/3) \u2014 consolidar ou podar redund\xE2ncias." : rebuildIssue ? rebuildIssue.message : hasShortComment ? `Coment\xE1rio muito curto (${plainHint.length} chars) sem contraste diferencial adequado.` : "";
+  const deterministicRebuildReason = hasOrphanDeixis ? 'Refer\xEAncia visual ("abaixo"/"em anexo") sem imagem anexada.' : hasMissingBasicAnswer ? "Card basic com resposta vazia." : hasVaguePrompt ? "Comando vago sem janela temporal ou linha terap\xEAutica." : isPassivePrompt ? "Defini\xE7\xE3o passiva sem vinheta ou decis\xE3o cl\xEDnica." : hasFragmentedSeriesTopic ? "S\xE9rie fragmentada artificialmente (1/3, 2/3, 3/3) \u2014 consolidar ou podar redund\xE2ncias." : rebuildIssue ? rebuildIssue.message : hasShortComment ? `Coment\xE1rio muito curto (${commentVisibleText.length} chars) sem contraste diferencial adequado.` : "";
   if (existing) {
     if (existing.verdict === "keep" && deterministicSplitReason) {
       return {
@@ -3584,9 +3606,9 @@ ${isBatchMode ? "DIRETRIZES CL\xCDNICAS DE REFER\xCANCIA DO TEMA (apenas refer\x
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : "Mapear integralmente P1, P2, P3 e P4 do tema."}
 
 CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
-1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, crit\xE9rios num\xE9ricos, doses cr\xEDticas e fatos at\xF4micos em \xE2ncora) livremente pelo encaixe cognitivo de cada card \u2014 sem for\xE7ar 50/50.
+1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA) + DOUTRINA INTERNATO-FIRST: Escolha "basic" (condutas \xE0 beira-leito, prescri\xE7\xE3o/dose, diagn\xF3stico diferencial, semiologia, gravidade, imagens recognition e mecanismos causais com impacto em conduta/contraindica\xE7\xE3o) ou "cloze" (limiares, crit\xE9rios num\xE9ricos, doses cr\xEDticas e fatos at\xF4micos em \xE2ncora) livremente pelo encaixe cognitivo de cada card \u2014 sem for\xE7ar 50/50 e sem decoreba est\xE9ril.
 2. Se "basic":
-   - "question": no m\xE1ximo 45 a 50 palavras. Para casos cl\xEDnicos, use cen\xE1rio concreto + cl\xEDnica/exame + pergunta precisa (minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha); para compreens\xE3o profunda (Nielsen & Matuschak), crie tamb\xE9m prompts causais/mecan\xEDsticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), defini\xE7\xF5es passivas ("O que \xE9 X?") ou respostas bin\xE1rias ("Sim/N\xE3o").
+   - "question": no m\xE1ximo 45 a 50 palavras. Para casos cl\xEDnicos, use cen\xE1rio concreto + cl\xEDnica/exame + pergunta precisa (minuto zero / exame inicial vs padr\xE3o-ouro / 1\xAA escolha / 2\xAA linha ap\xF3s falha); para compreens\xE3o causal (Nielsen & Matuschak), ancore sempre o "Por que..." em uma decis\xE3o, contraindica\xE7\xE3o, f\xE1rmaco ou conduta concreta ("Por que droga Y \xE9 contraindicada no contexto Z?", "Como diferenciar A de B \xE0 beira-leito?"). PROIBIDO "Por que..." puramente te\xF3rico/epidemiol\xF3gico sem impacto em conduta, perguntas vagas ("Qual a conduta?", "O que fazer?"), defini\xE7\xF5es passivas ("O que \xE9 X?") ou respostas bin\xE1rias ("Sim/N\xE3o").
    - "answer": 1 a 12 palavras (M\xC1XIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-v\xEDrgula (;) e SEM tag <b> externo envolvendo toda a resposta. Para esquemas combinados (ex.: 3 f\xE1rmacos), seja compacto (<= 14 palavras, deixando intervalos 12/12h e dias no hint) e NUNCA deixe dose num\xE9rica sem unidade (mg/g/mL).
 3. Se "cloze":
    - "question": cont\xE9m ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposi\xE7\xE3o pendurada no final, SEM "::dica" e SEM partir express\xF5es ao meio (ex.: proibido "{{c1::3 crit\xE9rios maiores e 1}} menor"). Mantenha a \xE2ncora cl\xEDnica enxuta e natural: N\xC3O invente idade nem tempo cronol\xF3gico artificial no enunciado quando a regra num\xE9rica \xE9 geral.
@@ -3597,12 +3619,13 @@ CHECKLIST DE VALIDA\xC7\xC3O ANTES DE GERAR CADA CARD:
    - PROATIVO: Mesmo que o card original N\xC3O tenha imagem, avalie se ele se beneficia clinicamente de um ECG, radiografia, TC, USG, CTG, foto semiol\xF3gica/dermatoscopia, l\xE2mina ou fluxograma:
      * Se houver imagem correspondente no CAT\xC1LOGO DE IMAGENS DOS MATERIAIS ANEXADOS acima, insira <img src="pdfimg:ID_EXATO">!
      * Se n\xE3o houver no cat\xE1logo dos PDFs, insira <img src="buscar_imagem: query cl\xEDnica precisa"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">)!
-     * Use na "question" ("image_mode": "recognition") quando o aluno precisa interpretar a imagem para responder, ou no in\xEDcio do "hint" ("image_mode": "feedback") quando ela serve para feedback visual/fluxograma. N\xE3o force imagens em cards puramente te\xF3ricos/normativos sem valor visual.
+     * Use na "question" ("image_mode": "recognition") EXCLUSIVAMENTE em cards "basic" quando o aluno precisa interpretar a imagem para responder (PROIBIDO "image_mode": "recognition" em cards "cloze"!). Em cards "cloze" ou quando a imagem refor\xE7a explica\xE7\xE3o/fluxograma, coloque no in\xEDcio do "hint" com "image_mode": "feedback". N\xE3o force imagens em cards puramente te\xF3ricos/normativos sem valor visual.
+     * OBRIGAT\xD3RIO: toda <img> (na question ou no hint) exige legenda <i>...</i> com >= 6 palavras descritivas no in\xEDcio do "hint" (sem dar spoiler da resposta quando "image_mode": "recognition").
    - Garanta 100% de coer\xEAncia num\xE9rica entre pergunta e hint.
 5. Duplo Salto Cognitivo Impl\xEDcito: NUNCA fa\xE7a pergunta composta ("Qual o diagn\xF3stico e a conduta?"). Apresente o caso cl\xEDnico e pergunte apenas 1 decis\xE3o at\xF4mica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre par\xEAnteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve ter "<b>Coment\xE1rio:</b> " logo antes da explica\xE7\xE3o textual (se houver <i>Legenda</i> ou <img ...>, coloque no in\xEDcio ANTES de "<b>Coment\xE1rio:</b> "), com 1 a 2 frases (180 a 300 caracteres vis\xEDveis no coment\xE1rio textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio. Para escores, crit\xE9rios num\xE9ricos ou pareamento parede\xD7deriva\xE7\xF5es\xD7art\xE9ria, inclua AP\xD3S o coment\xE1rio uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> (\u2264 4 colunas; n\xE3o conta nos 310 chars). Valide termos bioqu\xEDmicos (ex.: calemia = pot\xE1ssio, nunca "litemia").
+8. "hint": deve ter "<b>Coment\xE1rio:</b> " logo antes da explica\xE7\xE3o textual (se houver <i>Legenda</i> ou <img ...>, coloque no in\xEDcio ANTES de "<b>Coment\xE1rio:</b> "), com 1 a 2 frases enxutas (110 a 280 caracteres vis\xEDveis no coment\xE1rio textual, aceitando 85\u2013109 chars se j\xE1 tiver <b>negrito</b> e contraste diferencial; NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigat\xF3rio. Para escores, crit\xE9rios num\xE9ricos ou pareamento parede\xD7deriva\xE7\xF5es\xD7art\xE9ria, inclua AP\xD3S o coment\xE1rio uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> (\u2264 4 colunas; n\xE3o conta nos 310 chars). Valide termos bioqu\xEDmicos (ex.: calemia = pot\xE1ssio, nunca "litemia").
 9. N\xC3O inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
@@ -3820,21 +3843,22 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido:
       const targetFieldBlock = targetField ? `
 FOCO SOLICITADO PELO USU\xC1RIO: Concentre a reescrita no campo "${String(targetField)}"${fieldInstruction ? ` (motivo: "${sanitizeCardTextForPrompt(fieldInstruction, 220)}")` : ""}, preservando os demais campos j\xE1 v\xE1lidos e mantendo coer\xEAncia total entre pergunta, resposta e coment\xE1rio.` : "";
       const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html) e/ou pela Verifica\xE7\xE3o Final.
-Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia v\xE1lida (como __EMBEDDED_DATA_URI_*__) de cada card, A MENOS que o card fa\xE7a refer\xEAncia visual sem imagem \u2014 nesse caso insira <img src="buscar_imagem: query cl\xEDnica precisa"> ou remova a refer\xEAncia \xF3rf\xE3. N\xC3O inclua o campo "sources".
+Mantenha rigorosamente o mesmo "id" num\xE9rico e qualquer tag de m\xEDdia v\xE1lida (como __EMBEDDED_DATA_URI_*__) de cada card, A MENOS que o card fa\xE7a refer\xEAncia visual sem imagem \u2014 nesse caso insira <img src="buscar_imagem: query cl\xEDnica precisa"> acompanhada obrigatoriamente de legenda <i>...</i> com >= 6 palavras descritivas no in\xEDcio do "hint" e "image_mode" coerente ("recognition" apenas em basic com imagem na question; "feedback" em cloze ou imagem no hint), OU remova a refer\xEAncia visual \xF3rf\xE3. N\xC3O inclua o campo "sources".
 ${guidelinesBlock}${checkedItems ? `
 MAPA CL\xCDNICO DO DECK "${deckKey}":
 ${checkedItems}
 ` : ""}${targetFieldBlock}
 
-REGRAS DE CORRE\xC7\xC3O CIR\xDARGICA (MATUSCHAK & NIELSEN):
+REGRAS DE CORRE\xC7\xC3O CIR\xDARGICA (MATUSCHAK & NIELSEN + INTERNATO-FIRST):
 - **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/crit\xE9rios...?", "Cite...") ou a resposta tem m\xFAltiplos itens/ponto-e-v\xEDrgula, isole 1 \xFAnico atributo/decis\xE3o determinante. Se for pergunta composta ("Qual a parede e a art\xE9ria?", "Qual o diagn\xF3stico e antiarr\xEDtmico?"), mantenha apenas 1 alvo at\xF4mico.
-- **Salience & Anti-Passivo (Nielsen):** Se a pergunta \xE9 uma defini\xE7\xE3o inerte ("O que \xE9 X?") ou bin\xE1ria ("Sim/N\xE3o"), transforme em um prompt de sali\xEAncia ancorado em cen\xE1rio cl\xEDnico ou mecanismo causal.
+- **Salience & Anti-Passivo (Nielsen):** Se a pergunta \xE9 uma defini\xE7\xE3o inerte ("O que \xE9 X?"), bin\xE1ria ("Sim/N\xE3o") ou um "Por que..." te\xF3rico sem impacto pr\xE1tico, transforme em conduta \xE0 beira-leito, contraindica\xE7\xE3o, prescri\xE7\xE3o/dose ou mecanismo causal diretamente ligado \xE0 decis\xE3o cl\xEDnica.
 - **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (com janela temporal expl\xEDcita: "imediata", "inicial", "de 1\xAA escolha" \u2014 NUNCA "Qual a conduta?"); "answer" DEVE ter entre 1 e 12 palavras (m\xE1x 15 palavras / 110 chars), terminar com ".", N\xC3O conter ";" e N\xC3O ter <b> envolvendo tudo.
-- **Cloze At\xF4mico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposi\xE7\xE3o pendurada no final, SEM "::dica", e "answer" DEVE ser "".
+- **Cloze At\xF4mico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposi\xE7\xE3o pendurada no final, SEM "::dica", "answer" DEVE ser "" e \xE9 PROIBIDO usar "image_mode": "recognition".
 - **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre par\xEAnteses na "question" -> remova imediatamente a palavra/radical da resposta mantendo formato "Tema - Subtema".
+- **M\xEDdia & Legenda Obrigat\xF3ria:** Se o card cont\xE9m ou recebe qualquer <img>, garanta legenda <i>...</i> com >= 6 palavras descritivas no in\xEDcio do "hint" (sem dar spoiler da resposta quando "image_mode": "recognition").
 - **Precis\xE3o Terminol\xF3gica & Tabelas:** Corrija imprecis\xF5es cl\xEDnicas (ex.: calemia = pot\xE1ssio, nunca litemia). Se o card explicar escore ou correla\xE7\xE3o topogr\xE1fica, mantenha ou adicione <table class="med-table"> compacta (\u2264 4 colunas) AP\xD3S o texto de <b>Coment\xE1rio:</b>.
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (\u2192, \u2265, \u2264).
-- "hint": DEVE conter "<b>Coment\xE1rio:</b> ", ter entre 180 e 295 caracteres vis\xEDveis AP\xD3S o prefixo "<b>Coment\xE1rio:</b> " (excluindo <table>; PROIBIDO passar de 320 chars vis\xEDveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
+- "hint": DEVE conter "<b>Coment\xE1rio:</b> ", com 1 a 2 frases enxutas (110 a 280 caracteres vis\xEDveis AP\xD3S "<b>Coment\xE1rio:</b> ", ou 85\u2013109 chars se j\xE1 trouxer <b>negrito</b> e contraste diferencial; PROIBIDO passar de 320 chars vis\xEDveis, excluindo <table>), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
 
 CARDS SINALIZADOS E SEUS AVISOS:
 ${JSON.stringify(flaggedCards, null, 2)}
@@ -4204,9 +4228,12 @@ REGRAS ESTRITAS DE INSPE\xC7\xC3O VISUAL:
       const profilePromptBlock = formatProfilePromptBlock(effectiveProfile);
       const guidelinesBlock = formatVerifiedGuidelinesBlock(clinicalMap);
       const checkedMapItems = Array.isArray(clinicalMap?.items) ? clinicalMap.items.filter((i) => i.checked !== false) : [];
-      const deckSummary = inputCards.slice(0, 140).map((c) => {
+      const isLargeDeck = inputCards.length > 140;
+      const qMaxLen = isLargeDeck ? 360 : 650;
+      const hMaxLen = isLargeDeck ? 420 : 850;
+      const deckSummary = inputCards.map((c) => {
         const hasImg = /<img\b/i.test(`${String(c.question || "")} ${String(c.hint || "")}`);
-        return `- ID:${c.id} [${c.type === "cloze" ? "cloze" : "basic"}${c.priority ? ` ${String(c.priority)}` : ""}]${hasImg ? ` [IMG:${String(c.image_mode || "feedback")}]` : ""} | Topic: "${sanitizeCardTextForPrompt(c.topic, 100)}" | Q: "${sanitizeCardTextForPrompt(c.question, 650)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 200)}"` : ""} | Hint: "${sanitizeCardTextForPrompt(c.hint, 850)}"`;
+        return `- ID:${c.id} [${c.type === "cloze" ? "cloze" : "basic"}${c.priority ? ` ${String(c.priority)}` : ""}]${hasImg ? ` [IMG:${String(c.image_mode || "feedback")}]` : ""} | Topic: "${sanitizeCardTextForPrompt(c.topic, 100)}" | Q: "${sanitizeCardTextForPrompt(c.question, qMaxLen)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 200)}"` : ""} | Hint: "${sanitizeCardTextForPrompt(c.hint, hMaxLen)}"`;
       }).join("\n");
       const prompt = `Voc\xEA \xE9 o Preceptor Revisor Final auditando se o baralho montado para "${deckKey}" est\xE1 COMPLETO, ADEQUADO, CLINICAMENTE CORRETO e pronto para estudo no Anki (FSRS).
 

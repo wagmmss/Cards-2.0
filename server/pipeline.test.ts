@@ -1124,5 +1124,134 @@ test('buildAnkiApkgBuffer prioritizes data-anki-file over colliding src basename
   assert.ok(String(rows[0].values[1][1]).includes('src="cardio_ecg_102_image.png"'));
 });
 
+test('Lote 2: applyDeterministicAuditGuard stays aligned with lintCard codes and extractCommentVisibleText', async () => {
+  const { applyDeterministicAuditGuard } = await import('./routes/gemini');
+
+  // 1. MATUSCHAK_UNFOCUSED_SET -> downgraded from keep to split
+  const unfocusedSet = applyDeterministicAuditGuard(
+    {
+      id: 171020401,
+      type: 'basic',
+      priority: 'P2',
+      topic: 'Infectologia - Endocardite',
+      question: 'Quais são os principais critérios maiores de Duke na endocardite infecciosa?',
+      answer: 'Hemoculturas positivas e ecocardiograma alterado.',
+      hint: '<b>Comentário:</b> Os <b>critérios maiores de Duke</b> combinam microbiologia típica e evidência ecocardiográfica, enquanto febre entra nos menores.',
+    },
+    {
+      cardId: 171020401,
+      verdict: 'keep',
+      score: 9,
+      reason: 'Ok',
+      targetConcept: 'Critérios de Duke',
+      priority: 'P2',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(unfocusedSet.verdict, 'split');
+  assert.ok(unfocusedSet.score <= 5);
+
+  // 2. Long <i>Legenda</i> must NOT mask a tiny comment (< 80 visible comment chars)
+  const legendMaskingShortComment = applyDeterministicAuditGuard(
+    {
+      id: 171020402,
+      type: 'basic',
+      priority: 'P1',
+      image_mode: 'recognition',
+      topic: 'Cardiologia - Dor Torácica',
+      question:
+        '<img src="https://example.org/ecg.png"><br><b>PS:</b> Homem com dor torácica há 1 hora. Qual a parede acometida?',
+      answer: 'Parede anterior.',
+      hint: '<i>Eletrocardiograma de doze derivações demonstrando supradesnivelamento de segmento ST acentuado de V1 a V4 com onda T hiperaguda.</i><br><br><b>Comentário:</b> Acometimento anterior.',
+    },
+    {
+      cardId: 171020402,
+      verdict: 'keep',
+      score: 9,
+      reason: 'Ok',
+      targetConcept: 'IAM anterior',
+      priority: 'P1',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(legendMaskingShortComment.verdict, 'rebuild');
+  assert.ok(legendMaskingShortComment.score <= 5);
+
+  // 3. CLOZE_TOO_LONG -> downgraded from keep to rebuild
+  const longCloze = applyDeterministicAuditGuard(
+    {
+      id: 171020403,
+      type: 'cloze',
+      priority: 'P2',
+      topic: 'Sepse - Bundle Inicial',
+      question:
+        'Na sepse grave, a ressuscitação inicial inclui {{c1::cristaloide trinta mililitros por quilo em três horas}}.',
+      answer: '',
+      hint: '<b>Comentário:</b> A <b>reposição volêmica inicial</b> com cristaloide balanceado reduz hipoperfusão na sepse, evitando sobrecarga em pacientes congestos.',
+    },
+    {
+      cardId: 171020403,
+      verdict: 'keep',
+      score: 8,
+      reason: 'Ok',
+      targetConcept: 'Ressuscitação na sepse',
+      priority: 'P2',
+      suggestedType: 'cloze',
+    }
+  );
+  assert.equal(longCloze.verdict, 'rebuild');
+
+  // 4. RECOGNITION_MISMATCH (cloze with recognition mode) -> downgraded from keep to rebuild
+  const clozeRecognition = applyDeterministicAuditGuard(
+    {
+      id: 171020404,
+      type: 'cloze',
+      priority: 'P2',
+      image_mode: 'recognition',
+      topic: 'Cardiologia - Arritmias',
+      question:
+        '<img src="https://example.org/ecg_fa.png"><br>A ausência de onda P com RR irregular define {{c1::fibrilação atrial}}.',
+      answer: '',
+      hint: '<i>Traçado eletrocardiográfico em derivação DII sem onda P definida e ritmo irregular.</i><br><br><b>Comentário:</b> A <b>fibrilação atrial</b> tem RR irregular, diferente do flutter atrial que apresenta ondas F em dente de serra.',
+    },
+    {
+      cardId: 171020404,
+      verdict: 'keep',
+      score: 8,
+      reason: 'Ok',
+      targetConcept: 'FA',
+      priority: 'P2',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(clozeRecognition.verdict, 'rebuild');
+
+  // 5. Valid card with surgical 83-char comment (bold + differential contrast) stays keep!
+  const surgicalValidCard = applyDeterministicAuditGuard(
+    {
+      id: 171020405,
+      type: 'basic',
+      priority: 'P1',
+      topic: 'Colangite Aguda - Emergência',
+      question:
+        '<b>Sala Vermelha:</b> Paciente com colangite grave e choque séptico. Qual a conduta imediata de controle do foco?',
+      answer: 'Descompressão endoscópica de urgência via CPRE.',
+      hint: '<b>Comentário:</b> A <b>CPRE precoce</b> drena a via biliar sob pressão, enquanto cirurgia eleva mortalidade.',
+    },
+    {
+      cardId: 171020405,
+      verdict: 'keep',
+      score: 9,
+      reason: 'Excelente',
+      targetConcept: 'Colangite grave',
+      priority: 'P1',
+      suggestedType: 'basic',
+    }
+  );
+  assert.equal(surgicalValidCard.verdict, 'keep');
+  assert.equal(surgicalValidCard.score, 9);
+});
+
+
 
 

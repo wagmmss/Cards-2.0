@@ -9,6 +9,7 @@ import {
   extractDeckMediaManifest,
   extractDeckMetadata,
   extractUnresolvedLocalImages,
+  findFlaggedCardsForRepair,
   formatCanonicalDeckJson,
   lintCard,
   lintDeck,
@@ -1796,6 +1797,124 @@ test('formatCanonicalDeckJson preserves priority strictly via tags (keeping root
   assert.equal(meta.rawCards[0].question.includes('[sound:sopro_mitral.mp3]'), true);
   assert.equal(meta.removedOrphanAudioCount, 0);
 });
+
+test('Lote 2: THEORETICAL_WHY_QUESTION permits bedside causal/contraindication prompts while still flagging purely theoretical why-questions', () => {
+  const clinicalWhyCard: CanonicalCard = {
+    id: 171020101,
+    type: 'basic',
+    topic: 'Emergência - Insuficiência Cardíaca',
+    question:
+      'Por que o betabloqueador é contraindicado na fase inicial do choque cardiogênico com hipoperfusão?',
+    answer: 'Reduz o inotropismo e agrava o baixo débito.',
+    hint: '<b>Comentário:</b> O <b>efeito inotrópico negativo</b> piora a perfusão periférica no choque, enquanto na IC compensada o betabloqueador reduz mortalidade.',
+  };
+  const clinicalWhyLint = lintCard(clinicalWhyCard);
+  assert.equal(
+    clinicalWhyLint.warnings.some((w) => w.code === 'THEORETICAL_WHY_QUESTION'),
+    false
+  );
+
+  const thiamineWhyCard: CanonicalCard = {
+    id: 171020102,
+    type: 'basic',
+    topic: 'Emergência - Etilismo Crônico',
+    question: 'Por que associar tiamina antes da glicose hipertônica em paciente desnutrido?',
+    answer: 'Previne a precipitação aguda da encefalopatia de Wernicke.',
+    hint: '<b>Comentário:</b> A <b>glicose consome tiamina</b> como cofator metabólico, desencadeando Wernicke, enquanto a reposição prévia evita lesão neurológica.',
+  };
+  assert.equal(
+    lintCard(thiamineWhyCard).warnings.some((w) => w.code === 'THEORETICAL_WHY_QUESTION'),
+    false
+  );
+
+  const pureTheoryWhyCard: CanonicalCard = {
+    id: 171020103,
+    type: 'basic',
+    topic: 'Cirurgia - Apendicite',
+    question: 'Por que pacientes idosos têm maior taxa de perfuração apendicular?',
+    answer: 'Apresentação frustra e isquemia precoce da parede.',
+    hint: '<b>Comentário:</b> A <b>imunossenescência</b> mascara sinais peritoneais no idoso, diferente dos pacientes jovens com defesa abdominal franca.',
+  };
+  assert.equal(
+    lintCard(pureTheoryWhyCard).warnings.some((w) => w.code === 'THEORETICAL_WHY_QUESTION'),
+    true
+  );
+});
+
+test('Lote 2: COMMENT_TOO_SHORT accepts concise surgical comments (80-109 chars) with bold + differential contrast, while still flagging thin or uncontrasted comments', () => {
+  const surgicalConciseCard: CanonicalCard = {
+    id: 171020201,
+    type: 'basic',
+    topic: 'Colangite Aguda - Emergência',
+    question:
+      '<b>Sala Vermelha:</b> Paciente com colangite grave e choque séptico. Qual a conduta imediata de controle do foco?',
+    answer: 'Descompressão endoscópica de urgência via CPRE.',
+    // 83 visible chars, has <b> and differential contrast ("enquanto")
+    hint: '<b>Comentário:</b> A <b>CPRE precoce</b> drena a via biliar sob pressão, enquanto cirurgia eleva mortalidade.',
+  };
+  const conciseLint = lintCard(surgicalConciseCard);
+  assert.equal(conciseLint.warnings.some((w) => w.code === 'COMMENT_TOO_SHORT'), false);
+  assert.equal(conciseLint.isValid, true);
+
+  const uncontrastedShortCard: CanonicalCard = {
+    id: 171020202,
+    type: 'basic',
+    topic: 'Colangite Aguda - Emergência',
+    question:
+      '<b>Sala Vermelha:</b> Paciente com colangite grave e choque séptico. Qual a conduta imediata de controle do foco?',
+    answer: 'Descompressão endoscópica de urgência via CPRE.',
+    // ~85 visible chars, has <b>, NO differential/causal contrast -> STILL flagged
+    hint: '<b>Comentário:</b> A <b>CPRE precoce</b> realiza descompressão da árvore biliar no quadro de colangite.',
+  };
+  assert.equal(
+    lintCard(uncontrastedShortCard).warnings.some((w) => w.code === 'COMMENT_TOO_SHORT'),
+    true
+  );
+
+  const veryShortCard: CanonicalCard = {
+    id: 171020203,
+    type: 'basic',
+    topic: 'Colangite Aguda - Emergência',
+    question:
+      '<b>Sala Vermelha:</b> Paciente com colangite grave e choque séptico. Qual a conduta imediata de controle do foco?',
+    answer: 'Descompressão endoscópica de urgência via CPRE.',
+    // < 80 chars even with bold + contrast -> STILL flagged
+    hint: '<b>Comentário:</b> A <b>CPRE</b> drena a bile, diferente da cirurgia.',
+  };
+  assert.equal(
+    lintCard(veryShortCard).warnings.some((w) => w.code === 'COMMENT_TOO_SHORT'),
+    true
+  );
+});
+
+test('Lote 2: findFlaggedCardsForRepair respects availableMediaNames so loaded local media never triggers false-positive MISSING_MEDIA repair loops', () => {
+  const validLocalMediaCard: CanonicalCard = {
+    id: 171020301,
+    type: 'basic',
+    image_mode: 'recognition',
+    topic: 'Cardiologia - Dor Torácica',
+    question:
+      '<img src="ecg_supra_v1_v4.png"><br><b>PS:</b> Homem de 58 anos com dor precordial típica há 1 hora. Qual a parede acometida?',
+    answer: 'Parede anterior.',
+    hint: '<i>Eletrocardiograma de doze derivações com supradesnivelamento de segmento ST em derivações precordiais.</i><br><br><b>Comentário:</b> O <b>supra em V1 a V4</b> traduz oclusão da descendente anterior, diferente do supra em DII, DIII e aVF da parede inferior.',
+  };
+
+  // Without availableMediaNames -> flagged due to MISSING_MEDIA
+  const flaggedWithoutMedia = findFlaggedCardsForRepair([validLocalMediaCard], []);
+  assert.equal(flaggedWithoutMedia.length, 1);
+  assert.equal(
+    flaggedWithoutMedia[0].lint.warnings.some((w) => w.code === 'MISSING_MEDIA'),
+    true
+  );
+
+  // With availableMediaNames containing the local file -> 0 warnings, not sent to /repair-cards
+  const flaggedWithMedia = findFlaggedCardsForRepair(
+    [validLocalMediaCard],
+    ['ecg_supra_v1_v4.png']
+  );
+  assert.equal(flaggedWithMedia.length, 0);
+});
+
 
 
 

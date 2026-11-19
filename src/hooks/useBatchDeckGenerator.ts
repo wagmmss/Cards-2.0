@@ -20,6 +20,7 @@ import {
 import { buildPdfImagesCatalog } from '../utils/materialImageMatcher';
 import {
   curateAndRebalanceDeck,
+  findFlaggedCardsForRepair,
   lintCard,
   surgicalRepairCardLocal,
 } from '../utils/wozniakLinter';
@@ -1131,9 +1132,10 @@ export function useBatchDeckGenerator(params: {
       'info'
     );
 
-    const flaggedWithWarnings = curatedAndRepaired
-      .map((card) => ({ card, lint: lintCard(card) }))
-      .filter((item) => !item.lint.isValid);
+    const flaggedWithWarnings = findFlaggedCardsForRepair(
+      curatedAndRepaired,
+      availableMediaNames
+    );
 
     if (flaggedWithWarnings.length === 0) return;
 
@@ -1330,7 +1332,7 @@ export function useBatchDeckGenerator(params: {
           extractedMeta.rawCards.length > 0 ? extractedMeta.rawCards : cards
         );
 
-      const lint = lintCard(targetCard);
+      const lint = lintCard(targetCard, availableMediaNames);
       singleRepairAbortRef.current?.abort();
       const controller = new AbortController();
       singleRepairAbortRef.current = controller;

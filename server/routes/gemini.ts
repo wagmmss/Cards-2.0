@@ -5,7 +5,7 @@ import type { Part } from '@google/genai';
 import { ThinkingLevel, Type } from '@google/genai';
 import type { CanonicalCard, DomainProfile } from '../../src/types/deck';
 import { formatProfilePromptBlock, inferDomainProfile } from '../../src/utils/domainProfiles';
-import { lintCard } from '../../src/utils/wozniakLinter';
+import { extractCommentVisibleText, lintCard } from '../../src/utils/wozniakLinter';
 import {
   buildFullCardsDigest,
   extractErrorDetails,
@@ -371,26 +371,20 @@ export function applyDeterministicAuditGuard(
   existing?: NormalizedAuditVerdictItem
 ): NormalizedAuditVerdictItem {
   const cid = Number(c.id);
-  const plainQ = String(c.question || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const rawQ = String(c.question || '');
+  const rawHint = String(c.hint || '');
+  const plainQ = rawQ.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   const plainA = String(c.answer || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  const plainHint = String(c.hint || '')
-    .replace(/<table[\s\S]*?<\/table>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/Coment[áa]rio:/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const commentVisibleText = extractCommentVisibleText(rawHint);
   const hasVaguePrompt =
     !/\b(?:imediata|imediato|inicial|primeira\s+(?:escolha|linha)|1[ªa]\s+(?:escolha|linha)|definitiv[ao]|ambulatorial|de\s+minuto\s+zero|diagn[oó]stic[ao])\b/i.test(plainQ) &&
     /(?:\bqual\s+(?:é\s+)?(?:a\s+conduta|o\s+manejo|o\s+pr[oó]ximo\s+passo|o\s+tratamento)|como\s+conduzir|o\s+que\s+fazer)\s*\?\s*$/i.test(plainQ);
   const isPassivePrompt = /^\s*(?:o\s+que\s+[eé]\s+|defina\s+|fale\s+sobre\s+)/i.test(plainQ);
   const hasOrphanDeixis =
-    !/<img\b/i.test(`${String(c.question || '')} ${String(c.hint || '')}`) &&
+    !/<img\b/i.test(`${rawQ} ${rawHint}`) &&
     /\b(?:ecg|tra[çc]ado|exame|imagem|rx|usg|tc|ctg)\s+(?:abaixo|acima|em\s+anexo)\b/i.test(plainQ);
   const hasMissingBasicAnswer = String(c.type || 'basic').toLowerCase() === 'basic' && !plainA;
-  const hasShortComment = plainHint.length < 100;
 
-  const rawQ = String(c.question || '');
-  const rawHint = String(c.hint || '');
   const cardForLint: CanonicalCard = {
     id: Number.isFinite(cid) ? cid : 0,
     type: String(c.type || '').toLowerCase() === 'cloze' || /\{\{c\d+::/.test(rawQ) ? 'cloze' : 'basic',
@@ -403,20 +397,38 @@ export function applyDeterministicAuditGuard(
   };
   const lintResult = lintCard(cardForLint);
   const hasFragmentedSeriesTopic = /\(\s*\d+\s*\/\s*\d+\s*\)\s*$/.test(String(c.topic || '').trim());
-  const splitCodes = new Set(['CLOZE_COUNT_INVALID', 'COMPOUND_QUESTION', 'ANSWER_HAS_SEMICOLON']);
+  const splitCodes = new Set([
+    'CLOZE_COUNT_INVALID',
+    'COMPOUND_QUESTION',
+    'ANSWER_HAS_SEMICOLON',
+    'MATUSCHAK_UNFOCUSED_SET',
+  ]);
   const rebuildCodes = new Set([
     'TOPIC_SPOILER',
     'CLOZE_HAS_HINT',
+    'CLOZE_TOO_LONG',
+    'CLOZE_DANGLING_PARTICLE',
+    'CLOZE_NON_EMPTY_ANSWER',
+    'QUESTION_TOO_LONG',
+    'VAGUE_TEMPORAL_WINDOW',
     'ANSWER_TOO_LONG',
     'LEGACY_MARKERS',
     'COMMENT_TOO_LONG',
+    'COMMENT_TOO_SHORT',
     'QUESTION_PAREN_SPOILER',
     'NIELSEN_PASSIVE_OR_BINARY',
     'ORPHAN_VISUAL_REFERENCE',
-    'REDUNDANT_VISUAL_DESCRIPTION',
+    'RECOGNITION_MISMATCH',
+    'TABLE_MALFORMED',
+    'LATEX_PROHIBITED',
+    'FDA_OBSOLETE_CATEGORY',
+    'THEORETICAL_WHY_QUESTION',
   ]);
   const splitIssue = lintResult.warnings.find((iss) => splitCodes.has(iss.code));
   const rebuildIssue = lintResult.warnings.find((iss) => rebuildCodes.has(iss.code));
+  const hasShortComment =
+    commentVisibleText.length < 80 ||
+    lintResult.warnings.some((iss) => iss.code === 'COMMENT_TOO_SHORT');
 
   const deterministicSplitReason = splitIssue ? splitIssue.message : '';
 
@@ -433,7 +445,7 @@ export function applyDeterministicAuditGuard(
     : rebuildIssue
     ? rebuildIssue.message
     : hasShortComment
-    ? `Comentário muito curto (${plainHint.length} chars) sem contraste diferencial adequado.`
+    ? `Comentário muito curto (${commentVisibleText.length} chars) sem contraste diferencial adequado.`
     : '';
 
   if (existing) {
@@ -1168,9 +1180,9 @@ ${isBatchMode ? 'DIRETRIZES CLÍNICAS DE REFERÊNCIA DO TEMA (apenas referência
 ${checkedMapItems.length > 0 ? JSON.stringify(checkedMapItems, null, 2) : 'Mapear integralmente P1, P2, P3 e P4 do tema.'}
 
 CHECKLIST DE VALIDAÇÃO ANTES DE GERAR CADA CARD:
-1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA): Escolha "basic" (condutas, diferenciais, imagens e perguntas causais "por que / como") ou "cloze" (limiares, critérios numéricos, doses críticas e fatos atômicos em âncora) livremente pelo encaixe cognitivo de cada card — sem forçar 50/50.
+1. QUANTIDADE E FORMATO FLUIDOS (SEM COTA FIXA) + DOUTRINA INTERNATO-FIRST: Escolha "basic" (condutas à beira-leito, prescrição/dose, diagnóstico diferencial, semiologia, gravidade, imagens recognition e mecanismos causais com impacto em conduta/contraindicação) ou "cloze" (limiares, critérios numéricos, doses críticas e fatos atômicos em âncora) livremente pelo encaixe cognitivo de cada card — sem forçar 50/50 e sem decoreba estéril.
 2. Se "basic":
-   - "question": no máximo 45 a 50 palavras. Para casos clínicos, use cenário concreto + clínica/exame + pergunta precisa (minuto zero / exame inicial vs padrão-ouro / 1ª escolha / 2ª linha após falha); para compreensão profunda (Nielsen & Matuschak), crie também prompts causais/mecanísticos e de contraste diferencial ("Por que X ocorre...", "Como diferenciar A de B..."). PROIBIDO perguntas vagas ("Qual a conduta?", "O que fazer?"), definições passivas ("O que é X?") ou respostas binárias ("Sim/Não").
+   - "question": no máximo 45 a 50 palavras. Para casos clínicos, use cenário concreto + clínica/exame + pergunta precisa (minuto zero / exame inicial vs padrão-ouro / 1ª escolha / 2ª linha após falha); para compreensão causal (Nielsen & Matuschak), ancore sempre o "Por que..." em uma decisão, contraindicação, fármaco ou conduta concreta ("Por que droga Y é contraindicada no contexto Z?", "Como diferenciar A de B à beira-leito?"). PROIBIDO "Por que..." puramente teórico/epidemiológico sem impacto em conduta, perguntas vagas ("Qual a conduta?", "O que fazer?"), definições passivas ("O que é X?") ou respostas binárias ("Sim/Não").
    - "answer": 1 a 12 palavras (MÁXIMO ESTRITO 15 palavras e <= 110 caracteres), terminado em ponto final (.), SEM ponto-e-vírgula (;) e SEM tag <b> externo envolvendo toda a resposta. Para esquemas combinados (ex.: 3 fármacos), seja compacto (<= 14 palavras, deixando intervalos 12/12h e dias no hint) e NUNCA deixe dose numérica sem unidade (mg/g/mL).
 3. Se "cloze":
    - "question": contém ESTRITAMENTE UMA lacuna {{c1::...}} com 1 a 5 palavras dentro da lacuna, unidades de medida FORA da lacuna, SEM preposição pendurada no final, SEM "::dica" e SEM partir expressões ao meio (ex.: proibido "{{c1::3 critérios maiores e 1}} menor"). Mantenha a âncora clínica enxuta e natural: NÃO invente idade nem tempo cronológico artificial no enunciado quando a regra numérica é geral.
@@ -1181,12 +1193,13 @@ CHECKLIST DE VALIDAÇÃO ANTES DE GERAR CADA CARD:
    - PROATIVO: Mesmo que o card original NÃO tenha imagem, avalie se ele se beneficia clinicamente de um ECG, radiografia, TC, USG, CTG, foto semiológica/dermatoscopia, lâmina ou fluxograma:
      * Se houver imagem correspondente no CATÁLOGO DE IMAGENS DOS MATERIAIS ANEXADOS acima, insira <img src="pdfimg:ID_EXATO">!
      * Se não houver no catálogo dos PDFs, insira <img src="buscar_imagem: query clínica precisa"> (ex.: <img src="buscar_imagem: bloqueio de ramo direito ECG">)!
-     * Use na "question" ("image_mode": "recognition") quando o aluno precisa interpretar a imagem para responder, ou no início do "hint" ("image_mode": "feedback") quando ela serve para feedback visual/fluxograma. Não force imagens em cards puramente teóricos/normativos sem valor visual.
+     * Use na "question" ("image_mode": "recognition") EXCLUSIVAMENTE em cards "basic" quando o aluno precisa interpretar a imagem para responder (PROIBIDO "image_mode": "recognition" em cards "cloze"!). Em cards "cloze" ou quando a imagem reforça explicação/fluxograma, coloque no início do "hint" com "image_mode": "feedback". Não force imagens em cards puramente teóricos/normativos sem valor visual.
+     * OBRIGATÓRIO: toda <img> (na question ou no hint) exige legenda <i>...</i> com >= 6 palavras descritivas no início do "hint" (sem dar spoiler da resposta quando "image_mode": "recognition").
    - Garanta 100% de coerência numérica entre pergunta e hint.
 5. Duplo Salto Cognitivo Implícito: NUNCA faça pergunta composta ("Qual o diagnóstico e a conduta?"). Apresente o caso clínico e pergunte apenas 1 decisão atômica.
 6. "topic": formato "Tema - Subtema", ZERO spoiler por palavra ou radical INCLUSIVE no prefixo antes do " - " e NUNCA repita o topic em negrito dentro do question.
 7. "question": ZERO spoiler entre parênteses e ZERO LaTeX ($...$, \\rightarrow).
-8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <i>Legenda</i> ou <img ...>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases (180 a 300 caracteres visíveis no comentário textual, NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório. Para escores, critérios numéricos ou pareamento parede×derivações×artéria, inclua APÓS o comentário uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> (≤ 4 colunas; não conta nos 310 chars). Valide termos bioquímicos (ex.: calemia = potássio, nunca "litemia").
+8. "hint": deve ter "<b>Comentário:</b> " logo antes da explicação textual (se houver <i>Legenda</i> ou <img ...>, coloque no início ANTES de "<b>Comentário:</b> "), com 1 a 2 frases enxutas (110 a 280 caracteres visíveis no comentário textual, aceitando 85–109 chars se já tiver <b>negrito</b> e contraste diferencial; NUNCA passar de 310), termos-chave em <b>negrito</b> e contraste diferencial/causal obrigatório. Para escores, critérios numéricos ou pareamento parede×derivações×artéria, inclua APÓS o comentário uma tabela HTML compacta <table class="med-table"><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table> (≤ 4 colunas; não conta nos 310 chars). Valide termos bioquímicos (ex.: calemia = potássio, nunca "litemia").
 9. NÃO inclua o campo "sources".
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
@@ -1449,18 +1462,19 @@ Retorne EXCLUSIVAMENTE um JSON válido:
         : '';
 
       const prompt = `Reescreva cirurgicamente APENAS os cards abaixo que foram reprovados pelo Linter Matuschak & Nielsen (andymatuschak.org/prompts/ e augmentingcognition.com/ltm.html) e/ou pela Verificação Final.
-Mantenha rigorosamente o mesmo "id" numérico e qualquer tag de mídia válida (como __EMBEDDED_DATA_URI_*__) de cada card, A MENOS que o card faça referência visual sem imagem — nesse caso insira <img src="buscar_imagem: query clínica precisa"> ou remova a referência órfã. NÃO inclua o campo "sources".
+Mantenha rigorosamente o mesmo "id" numérico e qualquer tag de mídia válida (como __EMBEDDED_DATA_URI_*__) de cada card, A MENOS que o card faça referência visual sem imagem — nesse caso insira <img src="buscar_imagem: query clínica precisa"> acompanhada obrigatoriamente de legenda <i>...</i> com >= 6 palavras descritivas no início do "hint" e "image_mode" coerente ("recognition" apenas em basic com imagem na question; "feedback" em cloze ou imagem no hint), OU remova a referência visual órfã. NÃO inclua o campo "sources".
 ${guidelinesBlock}${checkedItems ? `\nMAPA CLÍNICO DO DECK "${deckKey}":\n${checkedItems}\n` : ''}${targetFieldBlock}
 
-REGRAS DE CORREÇÃO CIRÚRGICA (MATUSCHAK & NIELSEN):
+REGRAS DE CORREÇÃO CIRÚRGICA (MATUSCHAK & NIELSEN + INTERNATO-FIRST):
 - **Focused & Tractable:** Se a pergunta pede lista aberta ("Quais as causas/critérios...?", "Cite...") ou a resposta tem múltiplos itens/ponto-e-vírgula, isole 1 único atributo/decisão determinante. Se for pergunta composta ("Qual a parede e a artéria?", "Qual o diagnóstico e antiarrítmico?"), mantenha apenas 1 alvo atômico.
-- **Salience & Anti-Passivo (Nielsen):** Se a pergunta é uma definição inerte ("O que é X?") ou binária ("Sim/Não"), transforme em um prompt de saliência ancorado em cenário clínico ou mecanismo causal.
+- **Salience & Anti-Passivo (Nielsen):** Se a pergunta é uma definição inerte ("O que é X?"), binária ("Sim/Não") ou um "Por que..." teórico sem impacto prático, transforme em conduta à beira-leito, contraindicação, prescrição/dose ou mecanismo causal diretamente ligado à decisão clínica.
 - **Precise & Consistent:** Se "type": "basic" -> "question" com <= 50 palavras e pergunta precisa (com janela temporal explícita: "imediata", "inicial", "de 1ª escolha" — NUNCA "Qual a conduta?"); "answer" DEVE ter entre 1 e 12 palavras (máx 15 palavras / 110 chars), terminar com ".", NÃO conter ";" e NÃO ter <b> envolvendo tudo.
-- **Cloze Atômico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposição pendurada no final, SEM "::dica", e "answer" DEVE ser "".
+- **Cloze Atômico:** Se "type": "cloze" -> "question" DEVE ter estritamente 1 lacuna {{c1::...}} com 1 a 5 palavras, unidades fora da lacuna, sem preposição pendurada no final, SEM "::dica", "answer" DEVE ser "" e é PROIBIDO usar "image_mode": "recognition".
 - **Effortful (Zero Spoiler):** Se spoiler por radical ou palavra no "topic" ou entre parênteses na "question" -> remova imediatamente a palavra/radical da resposta mantendo formato "Tema - Subtema".
+- **Mídia & Legenda Obrigatória:** Se o card contém ou recebe qualquer <img>, garanta legenda <i>...</i> com >= 6 palavras descritivas no início do "hint" (sem dar spoiler da resposta quando "image_mode": "recognition").
 - **Precisão Terminológica & Tabelas:** Corrija imprecisões clínicas (ex.: calemia = potássio, nunca litemia). Se o card explicar escore ou correlação topográfica, mantenha ou adicione <table class="med-table"> compacta (≤ 4 colunas) APÓS o texto de <b>Comentário:</b>.
 - Substitua qualquer LaTeX ($...$, \\rightarrow) por Unicode puro (→, ≥, ≤).
-- "hint": DEVE conter "<b>Comentário:</b> ", ter entre 180 e 295 caracteres visíveis APÓS o prefixo "<b>Comentário:</b> " (excluindo <table>; PROIBIDO passar de 320 chars visíveis), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
+- "hint": DEVE conter "<b>Comentário:</b> ", com 1 a 2 frases enxutas (110 a 280 caracteres visíveis APÓS "<b>Comentário:</b> ", ou 85–109 chars se já trouxer <b>negrito</b> e contraste diferencial; PROIBIDO passar de 320 chars visíveis, excluindo <table>), com termos-chave em <b>negrito</b> e contraste diferencial/causal.
 
 CARDS SINALIZADOS E SEUS AVISOS:
 ${JSON.stringify(flaggedCards, null, 2)}
@@ -1906,11 +1920,13 @@ REGRAS ESTRITAS DE INSPEÇÃO VISUAL:
         ? clinicalMap.items.filter((i: { checked?: boolean }) => i.checked !== false)
         : [];
 
+      const isLargeDeck = inputCards.length > 140;
+      const qMaxLen = isLargeDeck ? 360 : 650;
+      const hMaxLen = isLargeDeck ? 420 : 850;
       const deckSummary = inputCards
-        .slice(0, 140)
         .map((c: Record<string, unknown>) => {
           const hasImg = /<img\b/i.test(`${String(c.question || '')} ${String(c.hint || '')}`);
-          return `- ID:${c.id} [${c.type === 'cloze' ? 'cloze' : 'basic'}${c.priority ? ` ${String(c.priority)}` : ''}]${hasImg ? ` [IMG:${String(c.image_mode || 'feedback')}]` : ''} | Topic: "${sanitizeCardTextForPrompt(c.topic, 100)}" | Q: "${sanitizeCardTextForPrompt(c.question, 650)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 200)}"` : ''} | Hint: "${sanitizeCardTextForPrompt(c.hint, 850)}"`;
+          return `- ID:${c.id} [${c.type === 'cloze' ? 'cloze' : 'basic'}${c.priority ? ` ${String(c.priority)}` : ''}]${hasImg ? ` [IMG:${String(c.image_mode || 'feedback')}]` : ''} | Topic: "${sanitizeCardTextForPrompt(c.topic, 100)}" | Q: "${sanitizeCardTextForPrompt(c.question, qMaxLen)}"${c.answer ? ` | A: "${sanitizeCardTextForPrompt(c.answer, 200)}"` : ''} | Hint: "${sanitizeCardTextForPrompt(c.hint, hMaxLen)}"`;
         })
         .join('\n');
 

@@ -2184,17 +2184,21 @@ export function lintCard(
   // 6b. Doutrina Internato-First: perguntas teóricas puras e nicho R1+
   const plainQuestionText = stripHtml(questionText);
   const plainAnswerText = stripHtml(answerText);
+  const hasClinicalDecisionWhyAnchor =
+    /\b(?:conduta|tratamento|manejo|exame|esquema|dose|prescri[çc][ãa]o|cirurgia|contraindicad[ao]|evitad[ao]|evitar|proscrit[ao]|escolh[ae]|prefer[ei]|prioriz\w*|suspender|interromper|manter|iniciar|associar|ajustar|corrigir|repor|drenar|intubar|anticoagul\w*|antibi[óo]tic\w*|f[áa]rmaco|droga|medica[çc][ãa]o|terapia|choque|instabilidade|risco\s+de\s+(?:sangramento|hemorragia|choque|edema|intoxica[çc][ãa]o|arritmia|hernia[çc][ãa]o|perfura[çc][ãa]o|morte))\b/i.test(
+      plainQuestionText
+    );
   if (
     cardType === 'basic' &&
     /^\s*Por\s+que\b/i.test(plainQuestionText) &&
-    !/\b(?:conduta|tratamento|exame|esquema|dose|prescri[çc][ãa]o|cirurgia)\b/i.test(plainQuestionText)
+    !hasClinicalDecisionWhyAnchor
   ) {
     warnings.push({
       code: 'THEORETICAL_WHY_QUESTION',
       field: 'question',
       severity: 'warning',
       message:
-        'Pergunta teórica "Por que..." sem decisão clínica prática: avalie podar ou converter em conduta de plantão.',
+        'Pergunta teórica "Por que..." sem decisão clínica prática: avalie podar ou ancorar em conduta/contraindicação de plantão.',
     });
   }
 
@@ -2541,6 +2545,15 @@ export function lintCard(
     });
   }
 
+  const boldMatches = hintText
+    .replace(/<b>\s*Coment[áa]rio:\s*<\/b>/i, '')
+    .match(/<(b|strong)\b[^>]*>/gi);
+  const hasBoldInComment = Boolean(boldMatches && boldMatches.length > 0);
+  const hasDifferentialOrCausalContrast =
+    /\b(?:diferente(?:mente)?|enquanto|ao\s+contr[áa]rio|j[áa]\s+(?:o|a|os|as|em|na|no)|contrari[ao]|contraindicad[ao]|em\s+vez\s+de|vs\.?|versus|pois|porque|evitando|prevenindo|reduz(?:indo)?\s+risco)\b/i.test(
+      extractCommentVisibleText(hintText)
+    );
+
   if (commentVisibleCharCount > MAX_COMMENT_CHARS) {
     warnings.push({
       code: 'COMMENT_TOO_LONG',
@@ -2548,19 +2561,20 @@ export function lintCard(
       severity: 'error',
       message: `Comentário excede o teto de ${MAX_COMMENT_CHARS} caracteres visíveis (${commentVisibleCharCount}/${MAX_COMMENT_CHARS} chars).`,
     });
-  } else if (commentVisibleCharCount > 0 && commentVisibleCharCount < 110) {
+  } else if (
+    commentVisibleCharCount > 0 &&
+    (commentVisibleCharCount < 80 ||
+      (commentVisibleCharCount < 110 && (!hasBoldInComment || !hasDifferentialOrCausalContrast)))
+  ) {
     warnings.push({
       code: 'COMMENT_TOO_SHORT',
       field: 'hint',
       severity: 'warning',
-      message: `Comentário curto (${commentVisibleCharCount} chars; meta ideal: 180 a 300 chars com contraste diferencial).`,
+      message: `Comentário curto (${commentVisibleCharCount} chars; use >= 80 chars com <b>negrito</b> e contraste diferencial ou 110–300 chars).`,
     });
   }
 
-  const boldMatches = hintText
-    .replace(/<b>\s*Coment[áa]rio:\s*<\/b>/i, '')
-    .match(/<(b|strong)\b[^>]*>/gi);
-  if (!boldMatches || boldMatches.length === 0) {
+  if (!hasBoldInComment) {
     warnings.push({
       code: 'COMMENT_MISSING_BOLD',
       field: 'hint',
@@ -2587,6 +2601,19 @@ export function lintCard(
     warnings,
     metrics,
   };
+}
+
+/**
+ * Seleciona cards com avisos/erros de lint considerando as mídias locais carregadas
+ * (evita falso positivo de MISSING_MEDIA no fluxo de reparo por IA).
+ */
+export function findFlaggedCardsForRepair(
+  cards: CanonicalCard[],
+  availableMediaNames: string[] = []
+): Array<{ card: CanonicalCard; lint: CardLintResult }> {
+  return cards
+    .map((card) => ({ card, lint: lintCard(card, availableMediaNames) }))
+    .filter((item) => !item.lint.isValid);
 }
 
 /**
