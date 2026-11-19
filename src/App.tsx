@@ -15,6 +15,7 @@ import {
   CardType,
   ClinicalMapResponse,
   DeckCurationStats,
+  DeckFinalVerificationReport,
   DomainProfile,
   ExtractedDeckMetadata,
   GeminiModelOption,
@@ -23,6 +24,7 @@ import {
   PriorityLevel,
   UploadedPdfFile,
 } from './types/deck';
+import { DOMAIN_PROFILE_CONFIGS, inferDomainProfile } from './utils/domainProfiles';
 import {
   convertClozeToBasic,
   curateAndRebalanceDeck,
@@ -71,7 +73,7 @@ export default function App() {
     () => initialSnapshot?.deckKey ?? ''
   );
   const [selectedProfile, setSelectedProfile] = useState<'auto' | DomainProfile>('auto');
-  const [selectedModel] = useState<GeminiModelOption>('gemini-4-hydrogen');
+  const [selectedModel, setSelectedModel] = useState<GeminiModelOption>('gemini-4-hydrogen');
   const [useGoogleSearch, setUseGoogleSearch] = useState<boolean>(true);
 
   const [clinicalMap, setClinicalMap] = useState<ClinicalMapResponse | null>(
@@ -498,6 +500,49 @@ export default function App() {
     });
   };
 
+  const handleAddMissingConceptsToMap = useCallback(
+    (missingConcepts: DeckFinalVerificationReport['missingConcepts']) => {
+      if (!missingConcepts || missingConcepts.length === 0) return;
+      const effKey = deckKey.trim() || clinicalMap?.deckKey || 'tema_clinico_internato';
+      const base = clinicalMap || buildGenericClinicalMap(effKey, cards);
+      const existingSignatures = new Set(
+        base.items.map(
+          (i) => `${i.subtopic.trim().toLowerCase()}::${i.concept.trim().toLowerCase()}`
+        )
+      );
+      const newItems = missingConcepts
+        .filter((mc) => {
+          const sig = `${mc.subtopic.trim().toLowerCase()}::${mc.concept.trim().toLowerCase()}`;
+          if (existingSignatures.has(sig)) return false;
+          existingSignatures.add(sig);
+          return true;
+        })
+        .map((mc, idx) => ({
+          id: `verif-gap-${Date.now()}-${idx}`,
+          priority: mc.priority,
+          subtopic: mc.subtopic,
+          concept: mc.concept,
+          guidelineNote: 'Lacuna identificada na Verificação Final',
+          targetCardType: mc.recommendedType || 'basic',
+          checked: true,
+        }));
+
+      if (newItems.length > 0) {
+        setClinicalMap({
+          ...base,
+          items: [...base.items, ...newItems],
+        });
+      }
+      showStatus(
+        newItems.length > 0
+          ? `${newItems.length} lacuna(s) adicionada(s) ao Mapa Clínico (Passo 2). Clique em "Recriar Deck JSON" para incorporá-las.`
+          : 'Essas lacunas já estão listadas no Mapa Clínico.',
+        newItems.length > 0 ? 'success' : 'info'
+      );
+    },
+    [cards, clinicalMap, deckKey, showStatus]
+  );
+
   const cleanDeckKeyForUsage = sanitizeDeckKey(
     deckKey.trim() || extractedMeta.detectedDeckKey || 'deck'
   );
@@ -708,10 +753,19 @@ export default function App() {
             setSelectedProfile(val);
             if (clinicalMap) {
               const effKey = deckKey.trim() || clinicalMap.deckKey || 'tema_clinico_internato';
-              const nextProf = val === 'auto' ? undefined : val;
-              setClinicalMap(buildGenericClinicalMap(effKey, cards, nextProf));
+              const nextProfile =
+                val === 'auto'
+                  ? inferDomainProfile(effKey, clinicalMap.themeTitle)
+                  : val;
+              setClinicalMap((prev) => (prev ? { ...prev, profile: nextProfile } : prev));
+              showStatus(
+                `Perfil atualizado para "${DOMAIN_PROFILE_CONFIGS[nextProfile].label}" preservando os ${clinicalMap.items.length} item(ns) do Mapa Clínico atual.`,
+                'info'
+              );
             }
           }}
+          selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
           useGoogleSearch={useGoogleSearch}
           onToggleGoogleSearch={setUseGoogleSearch}
           onGenerateClinicalMap={() => void handleGenerateClinicalMap()}
@@ -794,6 +848,9 @@ export default function App() {
           onExportApkg={() => void handleExportApkg()}
           isExportingBundle={isExportingBundle}
           isExportingApkg={isExportingApkg}
+          onRecreateCanonicalDeck={() => void handleRecreateCanonicalDeck()}
+          isGeneratingDeck={isGeneratingDeck}
+          onAddMissingConceptsToMap={handleAddMissingConceptsToMap}
         />
 
         <QuickReviewModal
@@ -803,6 +860,11 @@ export default function App() {
           deckKey={deckKey}
           localMediaAssets={localMediaAssets}
           onUpdateCard={handleUpdateCard}
+          onExportApkg={() => void handleExportApkg()}
+          onSyncAnkiConnect={() => void handleSyncAnkiConnect()}
+          onDownloadJson={() => handleDownloadJson()}
+          isExportingApkg={isExportingApkg}
+          isSyncingAnkiConnect={isSyncingAnkiConnect}
         />
 
         <PdfGalleryModal

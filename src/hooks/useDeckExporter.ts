@@ -22,6 +22,11 @@ import type {
   ExportFormatType,
   PendingExportConfirmation,
 } from '../components/ExportConfirmationModal';
+import {
+  AnkiConnectCanonicalNote,
+  syncDeckToAnkiConnect,
+  uint8ArrayToBase64,
+} from '../utils/ankiConnectHelpers';
 
 const ANKI_CONNECT_CLINICAL_CSS = `.card {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -346,7 +351,7 @@ export function useDeckExporter(params: {
     }
   }, [cards, checkExportAuditOrPrompt, clinicalMap, deckKey, extractedMeta, guidRegistry, localMediaAssets, mergeGuidEntries, showStatus]);
 
-  // Ponte Opcional para AnkiConnect Local com sincronização de modelos CSS, mídias e campos (['Question', 'Topic', 'Answer', 'Hint'])
+  // Ponte Opcional para AnkiConnect Local com tags FSRS escopadas por deck, conversão <audio>→[sound:...], mídias /api/media/local-file + SVG base64 e relato real de falhas
   const handleSyncAnkiConnect = useCallback(async (bypassAudit = false) => {
     if (cards.length === 0) return;
     const cleanDeckKey = sanitizeDeckKey(deckKey);
@@ -356,17 +361,7 @@ export function useDeckExporter(params: {
       ? `Internato::${clinicalMap.themeTitle}`
       : `Internato::${cleanDeckKey}`;
 
-    const normalizedLocalAssets = new Map<string, string>();
-    for (const [k, v] of Object.entries(localMediaAssets)) {
-      if (k && typeof v === 'string' && v.trim()) {
-        const lower = k.trim().toLowerCase();
-        normalizedLocalAssets.set(lower, v.trim());
-        const base = lower.split(/[\\/]/).pop();
-        if (base) normalizedLocalAssets.set(base, v.trim());
-      }
-    }
-
-    const invokeAnkiConnect = async <R,>(
+    const invokeAnkiConnect = async <R = unknown>(
       action: string,
       reqParams: Record<string, unknown> = {}
     ): Promise<R> => {
@@ -376,130 +371,92 @@ export function useDeckExporter(params: {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action, version: 6, params: reqParams }),
-          timeoutMs: 5000,
+          timeoutMs: 12_000,
         }
       );
       if (data.error) throw new Error(String(data.error));
       return data.result;
     };
 
+    const fetchUrlAsBase64 = async (url: string): Promise<string> => {
+      const { blob } = await fetchBlobWithTimeout(url, { timeoutMs: 15_000 });
+      const buf = await blob.arrayBuffer();
+      return uint8ArrayToBase64(new Uint8Array(buf));
+    };
+
     try {
-      await invokeAnkiConnect('version');
-      await invokeAnkiConnect('createDeck', { deck: deckTitle });
+      // Quick connectivity probe first so unreachable AnkiConnect gives a clear guidance message
+      try {
+        await invokeAnkiConnect('version');
+      } catch {
+        showStatus(
+          'AnkiConnect local (127.0.0.1:8765) não detectado. Use "Exportar .apkg" para importar no Anki Desktop preservando FSRS.',
+          'info'
+        );
+        return;
+      }
 
-      const existingModels = await invokeAnkiConnect<string[]>('modelNames').catch(
-        (): string[] => []
-      );
-      const ensureModel = async (modelName: string, isCloze: boolean) => {
-        if (existingModels.includes(modelName)) {
-          await invokeAnkiConnect('updateModelStyling', {
-            model: { name: modelName, css: ANKI_CONNECT_CLINICAL_CSS },
-          }).catch(() => undefined);
-          return;
-        }
-        await invokeAnkiConnect('createModel', {
-          modelName,
-          inOrderFields: ['Question', 'Topic', 'Answer', 'Hint'],
-          css: ANKI_CONNECT_CLINICAL_CSS,
-          isCloze,
-          cardTemplates: [
-            {
-              Name: isCloze ? 'Cloze' : 'Basic',
-              Front: isCloze
-                ? '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="cloze-text">{{cloze:Question}}</div></div>'
-                : '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="front-content">{{Question}}</div></div>',
-              Back: isCloze
-                ? '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="cloze-text">{{cloze:Question}}</div>{{#Hint}}<hr id="answer" class="med-divider"><div class="extra-box">{{Hint}}</div>{{/Hint}}</div>'
-                : '<div class="med-card"><div class="topic-box">{{Topic}}</div><div class="front-content">{{Question}}</div><hr id="answer" class="med-divider"><div class="back-content"><div class="main-answer"><b>{{Answer}}</b></div>{{#Hint}}<div class="extra-box">{{Hint}}</div>{{/Hint}}</div></div>',
-            },
-          ],
-        }).catch(() => undefined);
-      };
-
-      await ensureModel('Med_Cloze_Inverted_v2', true);
-      await ensureModel('Med_Basic_Inverted_v2', false);
-
-      // Push referenced media files to Anki's collection.media via AnkiConnect
       const mediaManifest = extractDeckMediaManifest(cards, cleanDeckKey);
-      for (const item of mediaManifest) {
-        const src = (item.sourceUrl || '').trim();
-        const localAssetUri =
-          normalizedLocalAssets.get(item.filename.toLowerCase()) ||
-          normalizedLocalAssets.get(src.toLowerCase());
-        const effectiveSrc = localAssetUri || src;
-        if (!item.filename || !effectiveSrc) continue;
-        if (/^data:/i.test(effectiveSrc)) {
-          const commaIdx = effectiveSrc.indexOf(',');
-          const b64 = commaIdx !== -1 ? effectiveSrc.slice(commaIdx + 1) : '';
-          if (b64) {
-            await invokeAnkiConnect('storeMediaFile', {
-              filename: item.filename,
-              data: b64,
-            }).catch(() => undefined);
-          }
-        } else if (/^https?:\/\//i.test(effectiveSrc)) {
-          await invokeAnkiConnect('storeMediaFile', {
-            filename: item.filename,
-            url: effectiveSrc,
-          }).catch(() => undefined);
-        }
-      }
-
       const canonicalJson = formatCanonicalDeckJson(cards, extractedMeta, cleanDeckKey);
-      const canonicalNotes: Array<{
-        id: number;
-        type: CardType;
-        topic: string;
-        question: string;
-        answer: string;
-        hint: string;
-        tags: string[];
-      }> = JSON.parse(canonicalJson);
+      const canonicalNotes: AnkiConnectCanonicalNote[] = JSON.parse(canonicalJson);
 
-      let updatedInPlace = 0;
-      let addedNew = 0;
+      const syncResult = await syncDeckToAnkiConnect({
+        deckKey: cleanDeckKey,
+        deckTitle,
+        canonicalNotes,
+        mediaManifest,
+        localMediaAssets,
+        clinicalCss: ANKI_CONNECT_CLINICAL_CSS,
+        invoke: invokeAnkiConnect,
+        fetchUrlAsBase64,
+      });
 
-      for (const note of canonicalNotes) {
-        const modelName =
-          note.type === 'cloze' ? 'Med_Cloze_Inverted_v2' : 'Med_Basic_Inverted_v2';
-        const fields = {
-          Question: note.question,
-          Topic: note.topic,
-          Answer: note.type === 'cloze' ? '' : note.answer,
-          Hint: note.hint,
-        };
-
-        const foundIds = await invokeAnkiConnect<number[]>('findNotes', {
-          query: `nid:${note.id}`,
-        });
-
-        if (Array.isArray(foundIds) && foundIds.length > 0) {
-          await invokeAnkiConnect('updateNoteFields', {
-            note: { id: foundIds[0], fields },
-          });
-          updatedInPlace++;
-        } else {
-          await invokeAnkiConnect('addNote', {
-            note: {
-              deckName: deckTitle,
-              modelName,
-              fields,
-              tags: note.tags || [cleanDeckKey],
-              options: { allowDuplicate: true },
-            },
-          });
-          addedNew++;
-        }
+      const resolvedMediaTotal = syncResult.storedMediaCount + syncResult.existingMediaCount;
+      const summaryParts = [
+        `${syncResult.updatedInPlace} atualizada(s) in-place`,
+        `${syncResult.addedNew} adicionada(s)`,
+      ];
+      if (syncResult.totalMediaCount > 0) {
+        summaryParts.push(`${resolvedMediaTotal}/${syncResult.totalMediaCount} mídia(s)`);
       }
 
+      const issues: string[] = [];
+      if (syncResult.failedMedia.length > 0) {
+        const preview = syncResult.failedMedia
+          .slice(0, 3)
+          .map((f) => `${f.filename} (${f.reason})`)
+          .join('; ');
+        const extra =
+          syncResult.failedMedia.length > 3 ? ` +${syncResult.failedMedia.length - 3}` : '';
+        issues.push(`${syncResult.failedMedia.length} falha(s) de mídia: ${preview}${extra}`);
+      }
+      if (syncResult.failedNotes.length > 0) {
+        const preview = syncResult.failedNotes
+          .slice(0, 3)
+          .map((n) => `ID ${n.cardId} (${n.reason})`)
+          .join('; ');
+        const extra =
+          syncResult.failedNotes.length > 3 ? ` +${syncResult.failedNotes.length - 3}` : '';
+        issues.push(`${syncResult.failedNotes.length} nota(s) com erro: ${preview}${extra}`);
+      }
+
+      if (issues.length > 0) {
+        showStatus(
+          `AnkiConnect concluído com ressalvas em "${deckTitle}" (${summaryParts.join(', ')}). ${issues.join(' | ')}`,
+          'error'
+        );
+      } else {
+        showStatus(
+          `Sincronizado com AnkiConnect em "${deckTitle}" (${summaryParts.join(', ')}) com tags FSRS escopadas por deck.`,
+          'success'
+        );
+      }
+    } catch (err: unknown) {
       showStatus(
-        `Sincronizado com AnkiConnect (${updatedInPlace} atualizada(s) in-place, ${addedNew} adicionada(s) em "${deckTitle}").`,
-        'success'
-      );
-    } catch {
-      showStatus(
-        'AnkiConnect local (127.0.0.1:8765) não detectado. Use "Exportar .apkg" para importar no Anki Desktop preservando FSRS.',
-        'info'
+        err instanceof Error
+          ? `Erro durante sincronização com AnkiConnect: ${err.message}`
+          : 'Erro inesperado durante sincronização com AnkiConnect.',
+        'error'
       );
     } finally {
       setIsSyncingAnkiConnect(false);

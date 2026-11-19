@@ -8,6 +8,11 @@ import {
   Search,
   RefreshCw,
   Eye,
+  Volume2,
+  PackageCheck,
+  MonitorUp,
+  Download,
+  RotateCcw,
 } from 'lucide-react';
 import { CanonicalCard, MedicalImageResult } from '../types/deck';
 import {
@@ -16,6 +21,7 @@ import {
   sanitizeMedicalHtml,
   stripHtml,
 } from '../utils/wozniakLinter';
+import { extractAudioRefsFromHtml } from '../utils/ankiConnectHelpers';
 
 interface QuickReviewModalProps {
   isOpen: boolean;
@@ -24,6 +30,11 @@ interface QuickReviewModalProps {
   deckKey: string;
   localMediaAssets?: Record<string, string>;
   onUpdateCard: (updated: CanonicalCard) => void;
+  onExportApkg?: () => void;
+  onSyncAnkiConnect?: () => void;
+  onDownloadJson?: () => void;
+  isExportingApkg?: boolean;
+  isSyncingAnkiConnect?: boolean;
 }
 
 export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
@@ -33,19 +44,31 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
   deckKey,
   localMediaAssets,
   onUpdateCard,
+  onExportApkg,
+  onSyncAnkiConnect,
+  onDownloadJson,
+  isExportingApkg = false,
+  isSyncingAnkiConnect = false,
 }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isBackShown, setIsBackShown] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [isCompleted, setIsCompleted] = useState(false);
   const [isSearchingGallery, setIsSearchingGallery] = useState(false);
   const [galleryQuery, setGalleryQuery] = useState('');
 
   const safeIndex = cards.length > 0 ? Math.min(currentIndex, cards.length - 1) : 0;
   const currentCard = cards[safeIndex] || null;
   const cleanDeckKey = (deckKey || 'deck').trim().toLowerCase().replace(/\s+/g, '_');
+  const approvedCount = cards.filter((c) => Boolean(c.imageVerified)).length;
+  const isLastCard = safeIndex >= cards.length - 1;
 
   useEffect(() => {
-    if (!isOpen || !currentCard) return;
+    if (!isOpen) {
+      setIsCompleted(false);
+      return;
+    }
+    if (!currentCard) return;
     setIsBackShown(false);
     setIsEditing(false);
     setGalleryQuery(currentCard.topic.replace(/\s*-\s*/g, ' ').trim());
@@ -53,7 +76,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
 
   // Keyboard shortcuts: Space flips card, Left/Right arrows navigate
   useEffect(() => {
-    if (!isOpen || isEditing) return;
+    if (!isOpen || isEditing || isCompleted) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -79,7 +102,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, isEditing, safeIndex, cards.length, onClose]);
+  }, [isOpen, isEditing, isCompleted, safeIndex, cards.length, onClose]);
 
   if (!isOpen || !currentCard) return null;
 
@@ -157,18 +180,21 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
     if (safeIndex < cards.length - 1) {
       setCurrentIndex(safeIndex + 1);
     } else {
-      onClose();
+      setIsCompleted(true);
     }
   };
 
-  const frontHtml = sanitizeMedicalHtml(currentCard.question, {
+  const questionAudio = extractAudioRefsFromHtml(currentCard.question, localMediaAssets);
+  const hintAudio = extractAudioRefsFromHtml(currentCard.hint || '', localMediaAssets);
+
+  const frontHtml = sanitizeMedicalHtml(questionAudio.cleanedHtml, {
     highlightCloze: currentCard.type === 'cloze',
     clozeMode: 'front',
     localMediaAssets,
     stripUnresolvedPlaceholderImgs: false,
   });
 
-  const backQuestionHtml = sanitizeMedicalHtml(currentCard.question, {
+  const backQuestionHtml = sanitizeMedicalHtml(questionAudio.cleanedHtml, {
     highlightCloze: currentCard.type === 'cloze',
     clozeMode: 'back',
     localMediaAssets,
@@ -179,7 +205,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
     stripImgs: true,
   });
 
-  const hintHtml = sanitizeMedicalHtml(currentCard.hint || '', {
+  const hintHtml = sanitizeMedicalHtml(hintAudio.cleanedHtml, {
     localMediaAssets,
     stripUnresolvedPlaceholderImgs: false,
   });
@@ -219,6 +245,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
             <button
               type="button"
               onClick={onClose}
+              aria-label="Fechar revisão rápida"
               className="p-1 text-slate-400 hover:text-slate-100 cursor-pointer"
             >
               <X className="w-4 h-4" />
@@ -228,7 +255,92 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
 
         {/* Main Card Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1">
-          {isEditing ? (
+          {isCompleted ? (
+            <div className="py-6 px-4 text-center space-y-5">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-emerald-950/80 border border-emerald-700/70 text-emerald-400 mx-auto">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <div className="space-y-1.5">
+                <h3 className="text-base font-bold text-slate-100 font-display">
+                  Revisão Rápida Concluída
+                </h3>
+                <p className="text-xs text-slate-300 tabular-nums">
+                  <strong className="text-emerald-400">{approvedCount}</strong> de{' '}
+                  <strong className="text-slate-100">{cards.length}</strong> card(s) aprovado(s) no deck{' '}
+                  <code className="font-mono text-sky-300">{cleanDeckKey}</code>. Escolha como enviar para o Anki:
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                {onExportApkg && (
+                  <button
+                    type="button"
+                    disabled={isExportingApkg}
+                    onClick={() => {
+                      onClose();
+                      onExportApkg();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 rounded-lg cursor-pointer"
+                  >
+                    <PackageCheck className="w-4 h-4" />
+                    <span>{isExportingApkg ? 'Gerando .apkg...' : 'Exportar .apkg (Anki)'}</span>
+                  </button>
+                )}
+                {onSyncAnkiConnect && (
+                  <button
+                    type="button"
+                    disabled={isSyncingAnkiConnect}
+                    onClick={() => {
+                      onClose();
+                      onSyncAnkiConnect();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-50 rounded-lg cursor-pointer"
+                  >
+                    <MonitorUp className="w-4 h-4 text-emerald-400" />
+                    <span>
+                      {isSyncingAnkiConnect
+                        ? 'Sincronizando Anki...'
+                        : 'Sincronizar AnkiConnect'}
+                    </span>
+                  </button>
+                )}
+                {onDownloadJson && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onDownloadJson();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-200 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded-lg cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Baixar JSON</span>
+                  </button>
+                )}
+              </div>
+              <div className="pt-2 flex items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCurrentIndex(0);
+                    setIsCompleted(false);
+                    setIsBackShown(false);
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs text-sky-400 hover:text-sky-300 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Revisar novamente do início</span>
+                </button>
+                <span aria-hidden="true" className="text-slate-600">·</span>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  Voltar ao Editor
+                </button>
+              </div>
+            </div>
+          ) : isEditing ? (
             <div className="space-y-3">
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">Tópico (Tema - Subtema)</label>
@@ -296,6 +408,36 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                 }}
               />
 
+              {/* Audio Preview (Front) */}
+              {questionAudio.audioItems.length > 0 && (
+                <div className="space-y-2">
+                  {questionAudio.audioItems.map((aud) => (
+                    <div
+                      key={`q-aud-${aud.filename}`}
+                      className="px-3 py-2 rounded-lg bg-[#0B0F17] border border-slate-800 flex flex-col gap-1.5"
+                    >
+                      <div className="flex items-center gap-2 text-[11px] text-sky-300">
+                        <Volume2 className="w-3.5 h-3.5 shrink-0" />
+                        <span className="font-mono truncate">{aud.filename}</span>
+                        {!aud.isPlayable && (
+                          <span className="text-amber-300">
+                            (anexe em &ldquo;+ Mídias Locais&rdquo; para ouvir no navegador)
+                          </span>
+                        )}
+                      </div>
+                      {aud.isPlayable && aud.resolvedSrc && (
+                        <audio
+                          controls
+                          preload="none"
+                          src={aud.resolvedSrc}
+                          className="w-full h-9"
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* VERSO Reveal */}
               {isBackShown ? (
                 <div className="pt-4 border-t border-slate-800 space-y-3">
@@ -306,6 +448,35 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
                         __html: answerHtml,
                       }}
                     />
+                  )}
+
+                  {hintAudio.audioItems.length > 0 && (
+                    <div className="space-y-2">
+                      {hintAudio.audioItems.map((aud) => (
+                        <div
+                          key={`h-aud-${aud.filename}`}
+                          className="px-3 py-2 rounded-lg bg-[#0B0F17] border border-slate-800 flex flex-col gap-1.5"
+                        >
+                          <div className="flex items-center gap-2 text-[11px] text-sky-300">
+                            <Volume2 className="w-3.5 h-3.5 shrink-0" />
+                            <span className="font-mono truncate">{aud.filename}</span>
+                            {!aud.isPlayable && (
+                              <span className="text-amber-300">
+                                (anexe em &ldquo;+ Mídias Locais&rdquo; para ouvir no navegador)
+                              </span>
+                            )}
+                          </div>
+                          {aud.isPlayable && aud.resolvedSrc && (
+                            <audio
+                              controls
+                              preload="none"
+                              src={aud.resolvedSrc}
+                              className="w-full h-9"
+                            />
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   )}
 
                   <div
@@ -331,7 +502,7 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
           )}
 
           {/* Galeria de Troca Rápida Online (4–6 Miniaturas Alternativas em 1 clique) */}
-          {(hasImageInCard || alternatives.length > 0) && (
+          {!isCompleted && (hasImageInCard || alternatives.length > 0) && (
             <div className="p-3.5 rounded-lg bg-[#0B0F17] border border-slate-800 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-200">
@@ -390,49 +561,51 @@ export const QuickReviewModal: React.FC<QuickReviewModalProps> = ({
         </div>
 
         {/* Modal Footer Controls */}
-        <div className="px-5 py-3.5 bg-[#0B0F17] border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={safeIndex === 0}
-              onClick={() => setCurrentIndex(Math.max(0, safeIndex - 1))}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Anterior (←)</span>
-            </button>
+        {!isCompleted && (
+          <div className="px-5 py-3.5 bg-[#0B0F17] border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={safeIndex === 0}
+                onClick={() => setCurrentIndex(Math.max(0, safeIndex - 1))}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span>Anterior (←)</span>
+              </button>
 
-            <button
-              type="button"
-              disabled={safeIndex >= cards.length - 1}
-              onClick={() => setCurrentIndex(Math.min(cards.length - 1, safeIndex + 1))}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
-            >
-              <span>Próximo (→)</span>
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
+              <button
+                type="button"
+                disabled={safeIndex >= cards.length - 1}
+                onClick={() => setCurrentIndex(Math.min(cards.length - 1, safeIndex + 1))}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 rounded-lg cursor-pointer"
+              >
+                <span>Próximo (→)</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEditing((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>{isEditing ? 'Concluir Edição' : 'Editar Texto'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleApproveAndNext}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{isLastCard ? '✓ Aprovar & Finalizar' : '✓ Aprovar & Próximo'}</span>
+              </button>
+            </div>
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setIsEditing((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg cursor-pointer"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>{isEditing ? 'Concluir Edição' : 'Editar Texto'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleApproveAndNext}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>✓ Aprovar & Próximo</span>
-            </button>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

@@ -34,6 +34,14 @@ import {
 } from './pdfImageCore';
 import { buildGenericClinicalMap } from '../data/demoDecks';
 import {
+  buildAnkiConnectFindQueries,
+  buildAnkiConnectFsrsTag,
+  convertFieldHtmlForAnkiConnect,
+  extractAudioRefsFromHtml,
+  extractBase64FromDataUri,
+  syncDeckToAnkiConnect,
+} from './ankiConnectHelpers';
+import {
   DOMAIN_PROFILE_CONFIGS,
   formatProfilePromptBlock,
   inferDomainProfile,
@@ -1913,6 +1921,202 @@ test('Lote 2: findFlaggedCardsForRepair respects availableMediaNames so loaded l
     ['ecg_supra_v1_v4.png']
   );
   assert.equal(flaggedWithMedia.length, 0);
+});
+
+test('Lote 4: AnkiConnect FSRS tags are deck-scoped to prevent cross-deck collisions and fallback nid query is deck-scoped', () => {
+  const tagDeckA = buildAnkiConnectFsrsTag('Sepse UTI', 1);
+  const tagDeckB = buildAnkiConnectFsrsTag('Trauma ATLS', 1);
+  assert.equal(tagDeckA, 'fsrs_id:sepse_uti:1');
+  assert.equal(tagDeckB, 'fsrs_id:trauma_atls:1');
+  assert.notEqual(tagDeckA, tagDeckB);
+
+  const queries = buildAnkiConnectFindQueries('sepse_uti', 'Internato::Sepse "Grave"', 42);
+  assert.equal(queries.fsrsTag, 'fsrs_id:sepse_uti:42');
+  assert.equal(queries.primaryTagQuery, 'tag:fsrs_id:sepse_uti:42');
+  assert.equal(queries.fallbackDeckNidQuery, 'deck:"Internato::Sepse \\"Grave\\"" nid:42');
+});
+
+test('Lote 4: convertFieldHtmlForAnkiConnect, extractBase64FromDataUri (SVG & base64), and extractAudioRefsFromHtml work cleanly', () => {
+  const html =
+    '<b>PS:</b> Ausculta pulmonar <audio controls><source src="/media/sibilos_exp.mp3" type="audio/mpeg"></audio> e sopro <audio src="b3_galope.ogg"></audio>.';
+  const converted = convertFieldHtmlForAnkiConnect(html);
+  assert.equal(converted.includes('<audio'), false);
+  assert.equal(converted.includes('[sound:sibilos_exp.mp3]'), true);
+  assert.equal(converted.includes('[sound:b3_galope.ogg]'), true);
+
+  // Base64 PNG data URI
+  assert.equal(extractBase64FromDataUri('data:image/png;base64,iVBORw0KGgo='), 'iVBORw0KGgo=');
+
+  // Raw UTF-8 SVG data URI
+  const rawSvgUri =
+    'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>';
+  const svgB64 = extractBase64FromDataUri(rawSvgUri);
+  assert.ok(svgB64);
+  assert.equal(
+    Buffer.from(svgB64, 'base64').toString('utf8'),
+    '<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>'
+  );
+
+  // Percent-encoded SVG data URI
+  const encodedSvgUri = 'data:image/svg+xml,%3Csvg%3E%3Crect%2F%3E%3C%2Fsvg%3E';
+  const encodedSvgB64 = extractBase64FromDataUri(encodedSvgUri);
+  assert.ok(encodedSvgB64);
+  assert.equal(Buffer.from(encodedSvgB64, 'base64').toString('utf8'), '<svg><rect/></svg>');
+
+  // Audio preview extraction for QuickReviewModal
+  const preview = extractAudioRefsFromHtml(
+    '<b>Enfermaria:</b> Ouça o foco mitral [sound:sopro_mitral.mp3] e [sound:ausente.wav].',
+    { 'sopro_mitral.mp3': 'data:audio/mpeg;base64,SUQzAw==' }
+  );
+  assert.equal(preview.cleanedHtml.includes('[sound:'), false);
+  assert.equal(preview.audioItems.length, 2);
+  assert.equal(preview.audioItems[0].filename, 'sopro_mitral.mp3');
+  assert.equal(preview.audioItems[0].isPlayable, true);
+  assert.equal(preview.audioItems[0].resolvedSrc, 'data:audio/mpeg;base64,SUQzAw==');
+  assert.equal(preview.audioItems[1].filename, 'ausente.wav');
+  assert.equal(preview.audioItems[1].isPlayable, false);
+  assert.equal(preview.audioItems[1].resolvedSrc, null);
+});
+
+test('Lote 4: syncDeckToAnkiConnect uses deck-scoped tags, deck-scoped nid fallback, local-file + SVG base64 uploads, audio conversion, and reports storeMediaFile failures', async () => {
+  const calls: Array<{ action: string; params?: Record<string, unknown> }> = [];
+  const fetchedUrls: string[] = [];
+
+  const mockInvoke = async <R = unknown>(
+    action: string,
+    params: Record<string, unknown> = {}
+  ): Promise<R> => {
+    calls.push({ action, params });
+    if (action === 'version') return 6 as R;
+    if (action === 'modelNames') return ['Med_Cloze_Inverted_v2', 'Med_Basic_Inverted_v2'] as R;
+    if (action === 'storeMediaFile') {
+      if (params.filename === 'quebrada.jpg') {
+        throw new Error('Disk full on collection.media');
+      }
+      return params.filename as R;
+    }
+    if (action === 'findNotes') {
+      const q = String(params.query || '');
+      // Note 1 matches primary deck-scoped FSRS tag directly
+      if (q === 'tag:fsrs_id:cardio_ecg:1') return [9001] as R;
+      // Note 2 was previously imported via .apkg -> matches deck-scoped nid fallback
+      if (q === 'deck:"Internato::Cardiologia" nid:2') return [2] as R;
+      return [] as R;
+    }
+    return null as R;
+  };
+
+  const mockFetchAsBase64 = async (url: string): Promise<string> => {
+    fetchedUrls.push(url);
+    return Buffer.from(`bytes-of:${url}`).toString('base64');
+  };
+
+  const result = await syncDeckToAnkiConnect({
+    deckKey: 'cardio_ecg',
+    deckTitle: 'Internato::Cardiologia',
+    clinicalCss: '.card{}',
+    canonicalNotes: [
+      {
+        id: 1,
+        type: 'basic',
+        topic: 'Cardiologia - Ausculta',
+        question:
+          '<b>PS:</b> Paciente dispneico <audio src="ausculta_b3.mp3"></audio>. Qual o achado?',
+        answer: 'Terceira bulha (B3).',
+        hint: '<b>Comentário:</b> A <b>B3</b> sugere sobrecarga volumétrica, diferente da B4 por rigidez ventricular.',
+        tags: ['cardio_ecg', 'P1'],
+      },
+      {
+        id: 2,
+        type: 'basic',
+        topic: 'Cardiologia - ECG',
+        question: '<img src="ecg_local.png"><br>Qual o ritmo?',
+        answer: 'Fibrilação atrial.',
+        hint: '<i>Traçado sem onda P com intervalos RR irregulares.</i><br><br><b>Comentário:</b> A <b>FA</b> tem RR irregular, diferente do flutter.',
+        tags: ['cardio_ecg', 'P1'],
+      },
+      {
+        id: 3,
+        type: 'cloze',
+        topic: 'Cardiologia - Esquema',
+        question:
+          'Na FA instável a conduta imediata é {{c1::cardioversão elétrica sincronizada}}.',
+        answer: '',
+        hint: '<img src="esquema.svg"><br><i>Diagrama vetorial do ritmo de emergência.</i><br><br><b>Comentário:</b> A <b>cardioversão</b> estabiliza o débito, ao contrário de controle de frequência.',
+        tags: ['cardio_ecg', 'P1'],
+      },
+    ],
+    mediaManifest: [
+      {
+        filename: 'ecg_local.png',
+        sourceUrl: '/api/media/local-file?path=cardio/ecg_local.png',
+        cardId: 2,
+        field: 'question',
+        kind: 'image',
+      },
+      {
+        filename: 'esquema.svg',
+        sourceUrl: 'data:image/svg+xml;utf8,<svg><path d="M0 0"/></svg>',
+        cardId: 3,
+        field: 'hint',
+        kind: 'image',
+      },
+      {
+        filename: 'quebrada.jpg',
+        sourceUrl: 'data:image/jpeg;base64,/9j/4AAQ',
+        cardId: 1,
+        field: 'hint',
+        kind: 'image',
+      },
+    ],
+    localMediaAssets: {},
+    invoke: mockInvoke,
+    fetchUrlAsBase64: mockFetchAsBase64,
+  });
+
+  // Media assertions: local-file fetched & uploaded, SVG converted to base64 & uploaded, broken file reported (not swallowed!)
+  assert.deepEqual(fetchedUrls, ['/api/media/local-file?path=cardio/ecg_local.png']);
+  assert.equal(result.storedMediaCount, 2);
+  assert.equal(result.failedMedia.length, 1);
+  assert.equal(result.failedMedia[0].filename, 'quebrada.jpg');
+  assert.match(result.failedMedia[0].reason, /Disk full/);
+
+  const svgStoreCall = calls.find(
+    (c) => c.action === 'storeMediaFile' && c.params?.filename === 'esquema.svg'
+  );
+  assert.ok(svgStoreCall);
+  assert.equal(
+    Buffer.from(String(svgStoreCall.params?.data || ''), 'base64').toString('utf8'),
+    '<svg><path d="M0 0"/></svg>'
+  );
+
+  // Note sync assertions: 2 updated in-place (note 1 via tag, note 2 via deck+nid fallback), 1 added (note 3)
+  assert.equal(result.updatedInPlace, 2);
+  assert.equal(result.addedNew, 1);
+  assert.equal(result.failedNotes.length, 0);
+
+  // Note 1 <audio> converted to [sound:ausculta_b3.mp3]
+  const updateNote1 = calls.find(
+    (c) => c.action === 'updateNoteFields' && (c.params?.note as { id?: number })?.id === 9001
+  );
+  assert.ok(updateNote1);
+  const note1Fields = (updateNote1.params?.note as { fields: { Question: string } }).fields;
+  assert.equal(note1Fields.Question.includes('[sound:ausculta_b3.mp3]'), true);
+  assert.equal(note1Fields.Question.includes('<audio'), false);
+
+  // Note 2 matched via deck-scoped nid fallback receives addTags with deck-scoped fsrs_id tag
+  const addTagsNote2 = calls.find((c) => c.action === 'addTags');
+  assert.ok(addTagsNote2);
+  assert.deepEqual(addTagsNote2.params, {
+    notes: [2],
+    tags: 'fsrs_id:cardio_ecg:2',
+  });
+
+  // Note 3 created via addNote includes deck-scoped fsrs_id:cardio_ecg:3 tag
+  const addNote3 = calls.find((c) => c.action === 'addNote');
+  assert.ok(addNote3);
+  const note3Tags = (addNote3.params?.note as { tags: string[] }).tags;
+  assert.equal(note3Tags.includes('fsrs_id:cardio_ecg:3'), true);
 });
 
 

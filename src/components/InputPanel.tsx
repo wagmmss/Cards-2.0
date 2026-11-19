@@ -13,9 +13,20 @@ import {
   Plus,
   Image as ImageIcon,
 } from 'lucide-react';
-import { DomainProfile, ExtractedDeckMetadata, UploadedPdfFile } from '../types/deck';
+import {
+  DomainProfile,
+  ExtractedDeckMetadata,
+  GeminiModelOption,
+  UploadedPdfFile,
+} from '../types/deck';
 import { DOMAIN_PROFILE_CONFIGS, DOMAIN_PROFILE_ORDER } from '../utils/domainProfiles';
 import { readMultipleDocumentFiles } from '../utils/documentUpload';
+
+const GEMINI_MODEL_OPTIONS: Array<{ value: GeminiModelOption; label: string }> = [
+  { value: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen (Padrão)' },
+  { value: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Rápido)' },
+  { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite (Eco)' },
+];
 
 interface InputPanelProps {
   pdfs: UploadedPdfFile[];
@@ -35,6 +46,8 @@ interface InputPanelProps {
   onDeckKeyChange: (val: string) => void;
   selectedProfile: 'auto' | DomainProfile;
   onProfileChange: (val: 'auto' | DomainProfile) => void;
+  selectedModel: GeminiModelOption;
+  onModelChange: (val: GeminiModelOption) => void;
   useGoogleSearch: boolean;
   onToggleGoogleSearch: (val: boolean) => void;
   onGenerateClinicalMap: () => void;
@@ -70,6 +83,8 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   onDeckKeyChange,
   selectedProfile,
   onProfileChange,
+  selectedModel,
+  onModelChange,
   useGoogleSearch,
   onToggleGoogleSearch,
   onGenerateClinicalMap,
@@ -92,6 +107,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({
   const localMediaInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
   const [showJsonEditor, setShowJsonEditor] = useState(false);
+  const [confirmClearAction, setConfirmClearAction] = useState<
+    null | 'pdfs' | 'localMedia' | 'json'
+  >(null);
 
   const localMediaCount = Object.keys(localMediaAssets).length;
 
@@ -170,9 +188,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({
         </button>
       </div>
 
-      {/* Row 1: Deck Key + Domain Profile + Google Search Toggle */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-end">
-        <div className="md:col-span-5">
+      {/* Row 1: Deck Key + Domain Profile + Model Selector + Google Search Toggle */}
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+        <div className="md:col-span-3">
           <label
             htmlFor="deck-key-input"
             className="block text-xs font-medium text-slate-300 mb-1.5"
@@ -184,8 +202,8 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             type="text"
             value={deckKey}
             onChange={(e) => onDeckKeyChange(e.target.value)}
-            placeholder="Ex.: etica_medica, abdome_agudo, diabetes_mellitus"
-            className="w-full px-3.5 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none transition-colors"
+            placeholder="Ex.: etica_medica, abdome_agudo"
+            className="w-full px-3 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none transition-colors"
           />
         </div>
 
@@ -200,7 +218,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
             id="domain-profile-select"
             value={selectedProfile}
             onChange={(e) => onProfileChange(e.target.value as 'auto' | DomainProfile)}
-            className="w-full px-3 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 focus:border-sky-400 focus:outline-none transition-colors cursor-pointer"
+            className="w-full px-2.5 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 focus:border-sky-400 focus:outline-none transition-colors cursor-pointer"
           >
             <option value="auto">Automático (por tema)</option>
             {DOMAIN_PROFILE_ORDER.map((prof) => (
@@ -211,17 +229,38 @@ export const InputPanel: React.FC<InputPanelProps> = ({
           </select>
         </div>
 
-        <div className="md:col-span-4">
+        <div className="md:col-span-3">
+          <label
+            htmlFor="gemini-model-select"
+            className="block text-xs font-medium text-slate-300 mb-1.5"
+          >
+            Modelo IA
+          </label>
+          <select
+            id="gemini-model-select"
+            value={selectedModel}
+            onChange={(e) => onModelChange(e.target.value as GeminiModelOption)}
+            className="w-full px-2.5 py-2 text-sm bg-[#0B0F17] border border-slate-700/90 rounded-lg text-slate-100 focus:border-sky-400 focus:outline-none transition-colors cursor-pointer"
+          >
+            {GEMINI_MODEL_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="md:col-span-3">
           <label
             htmlFor="google-search-toggle"
-            className="flex items-center justify-between gap-3 px-3.5 py-2 rounded-lg border border-slate-700/90 bg-[#0B0F17] cursor-pointer select-none"
+            className="flex items-center justify-between gap-2.5 px-3 py-1.5 rounded-lg border border-slate-700/90 bg-[#0B0F17] cursor-pointer select-none min-h-[38px]"
           >
             <div className="min-w-0">
               <div className="text-xs font-medium text-slate-200 truncate">
-                Google Search + Imagens Web
+                Google Search + Web
               </div>
-              <div className="text-[11px] text-slate-400 truncate">
-                Diretrizes + Wikimedia, Wikipedia, LITFL
+              <div className="text-[10px] text-slate-400 truncate">
+                Diretrizes + Wikimedia/LITFL
               </div>
             </div>
             <input
@@ -321,13 +360,35 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                     <span>Galeria da Apostila &amp; Recortar ({extractedImagesCount})</span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={onClearPdfs}
-                  className="text-slate-400 hover:text-red-400 cursor-pointer"
-                >
-                  Remover todos
-                </button>
+                {confirmClearAction === 'pdfs' ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmClearAction(null);
+                        onClearPdfs();
+                      }}
+                      className="px-2 py-0.5 rounded bg-red-900/90 border border-red-600 text-red-100 hover:bg-red-800 font-semibold cursor-pointer"
+                    >
+                      Confirmar remover PDFs
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClearAction(null)}
+                      className="text-slate-400 hover:text-slate-200 cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClearAction('pdfs')}
+                    className="text-slate-400 hover:text-red-400 cursor-pointer"
+                  >
+                    Remover todos
+                  </button>
+                )}
               </div>
             </div>
             <ul className="divide-y divide-slate-800 max-h-40 overflow-y-auto">
@@ -466,23 +527,67 @@ export const InputPanel: React.FC<InputPanelProps> = ({
               </button>
             )}
             {localMediaCount > 0 && onClearLocalMedia && (
-              <button
-                type="button"
-                onClick={onClearLocalMedia}
-                className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Limpar mídias
-              </button>
+              confirmClearAction === 'localMedia' ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmClearAction(null);
+                      onClearLocalMedia();
+                    }}
+                    className="px-2 py-0.5 text-[11px] font-semibold text-red-100 bg-red-900/90 border border-red-600 rounded hover:bg-red-800 whitespace-nowrap cursor-pointer"
+                  >
+                    Confirmar limpar mídias
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClearAction(null)}
+                    className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearAction('localMedia')}
+                  className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Limpar mídias
+                </button>
+              )
             )}
 
             {rawJsonText && (
-              <button
-                type="button"
-                onClick={() => onRawJsonChange('')}
-                className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Limpar JSON
-              </button>
+              confirmClearAction === 'json' ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmClearAction(null);
+                      onRawJsonChange('');
+                    }}
+                    className="px-2 py-0.5 text-[11px] font-semibold text-red-100 bg-red-900/90 border border-red-600 rounded hover:bg-red-800 whitespace-nowrap cursor-pointer"
+                  >
+                    Confirmar limpar JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClearAction(null)}
+                    className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearAction('json')}
+                  className="text-xs text-slate-400 hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Limpar JSON
+                </button>
+              )
             )}
           </div>
         </div>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -156,6 +156,8 @@ export const CardItem: React.FC<CardItemProps> = ({
   onQuickSwapFromStrip,
   onRefreshQuickGallery,
 }) => {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const questionImgs = extractCardImagesWithMeta(card.question, card.id, cleanDeckKey);
   const hintImgs = extractCardImagesWithMeta(card.hint, card.id, cleanDeckKey);
   const allCardImgs = [...questionImgs, ...hintImgs];
@@ -399,14 +401,37 @@ export const CardItem: React.FC<CardItemProps> = ({
             <span>{isEditing ? 'Fechar' : 'Editar'}</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => onDeleteCard(card.id)}
-            aria-label={`Excluir card ${card.id}`}
-            className="text-slate-500 hover:text-red-400 cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+          {confirmDelete ? (
+            <span className="inline-flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmDelete(false);
+                  onDeleteCard(card.id);
+                }}
+                aria-label={`Confirmar exclusão do card ${card.id}`}
+                className="px-1.5 py-0.5 text-[11px] font-semibold text-red-100 bg-red-900/90 border border-red-600 rounded hover:bg-red-800 cursor-pointer"
+              >
+                Excluir?
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              aria-label={`Excluir card ${card.id}`}
+              className="text-slate-500 hover:text-red-400 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 

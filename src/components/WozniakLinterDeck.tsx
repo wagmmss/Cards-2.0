@@ -91,6 +91,11 @@ interface WozniakLinterDeckProps {
   onExportApkg: () => void;
   isExportingBundle?: boolean;
   isExportingApkg?: boolean;
+  onRecreateCanonicalDeck?: () => void;
+  isGeneratingDeck?: boolean;
+  onAddMissingConceptsToMap?: (
+    concepts: DeckFinalVerificationReport['missingConcepts']
+  ) => void;
 }
 
 export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
@@ -138,6 +143,9 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   onExportApkg,
   isExportingBundle = false,
   isExportingApkg = false,
+  onRecreateCanonicalDeck,
+  isGeneratingDeck = false,
+  onAddMissingConceptsToMap,
 }) => {
   const [filterMode, setFilterMode] = useState<
     'ALL' | 'WARNINGS' | 'MISSING_MEDIA' | 'MANUAL_IMAGE' | 'AUDIT_FLAGGED' | 'BASIC' | 'CLOZE'
@@ -147,6 +155,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
   const [viewTab, setViewTab] = useState<'CARDS' | 'RAW_JSON'>('CARDS');
   const [copiedJson, setCopiedJson] = useState(false);
   const [showAllPrunedIds, setShowAllPrunedIds] = useState(false);
+  const [confirmClearOrphans, setConfirmClearOrphans] = useState(false);
 
   // Medical Image Picker state per card
   const [imagePickerCardId, setImagePickerCardId] = useState<number | null>(null);
@@ -597,23 +606,47 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
         </div>
 
         {(duplicateImageCount > 0 || missingLegendCount > 0 || modalityConflictCount > 0) && (
-          <div className="px-3.5 py-2 rounded-lg bg-amber-950/35 border border-amber-800/60 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-amber-200 tabular-nums">
-            <span className="font-semibold text-amber-300">Auditoria Visual pré-.apkg:</span>
-            {duplicateImageCount > 0 && (
-              <span>
-                <strong>{duplicateImageCount}</strong> imagem(ns) repetida(s) no deck
-              </span>
-            )}
-            {missingLegendCount > 0 && (
-              <span>
-                <strong>{missingLegendCount}</strong> imagem(ns) sem legenda &lt;i&gt; (≥6 pal.)
-              </span>
-            )}
-            {modalityConflictCount > 0 && (
-              <span>
-                <strong>{modalityConflictCount}</strong> conflito(s) de modalidade exame×legenda
-              </span>
-            )}
+          <div className="px-3.5 py-2 rounded-lg bg-amber-950/35 border border-amber-800/60 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-200 tabular-nums">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="font-semibold text-amber-300">Auditoria Visual pré-.apkg:</span>
+              {duplicateImageCount > 0 && (
+                <span>
+                  <strong>{duplicateImageCount}</strong> imagem(ns) repetida(s) no deck
+                </span>
+              )}
+              {missingLegendCount > 0 && (
+                <span>
+                  <strong>{missingLegendCount}</strong> imagem(ns) sem legenda &lt;i&gt; (≥6 pal.)
+                </span>
+              )}
+              {modalityConflictCount > 0 && (
+                <span>
+                  <strong>{modalityConflictCount}</strong> conflito(s) de modalidade exame×legenda
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setViewTab('CARDS');
+                  setFilterMode('WARNINGS');
+                }}
+                className="px-2 py-0.5 rounded bg-amber-900/70 border border-amber-700/70 text-[11px] font-medium text-amber-100 hover:bg-amber-800/80 cursor-pointer"
+              >
+                Filtrar Avisos
+              </button>
+              {totalFlaggedCards > 0 && (
+                <button
+                  type="button"
+                  disabled={isRepairing}
+                  onClick={onAutoRepairAllFlagged}
+                  className="px-2 py-0.5 rounded bg-amber-400 text-[11px] font-semibold text-slate-950 hover:bg-amber-300 disabled:opacity-50 cursor-pointer"
+                >
+                  Auto-Reparar ({totalFlaggedCards})
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -621,51 +654,66 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
           internatoAudit.blockedImagesFound.length > 0 ||
           blockedImageFilenames.length > 0 ||
           internatoAudit.practicalScenarioCount > 0) && (
-          <div className="px-3.5 py-2 rounded-lg bg-[#0B0F17] border border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300 tabular-nums">
-            <span
-              className={`font-semibold ${
-                internatoAudit.passed ? 'text-emerald-400' : 'text-amber-300'
-              }`}
-            >
-              Autoauditoria Internato-First:
-            </span>
-            <span>
-              Cenários práticos:{' '}
-              <strong className="text-slate-100">{internatoAudit.practicalScenarioCount}</strong>/
-              {cards.length}
-            </span>
-            {internatoAudit.internatoWarnings.length > 0 && (
-              <>
-                <span aria-hidden="true" className="text-slate-600">·</span>
-                <span className="text-amber-300">
-                  <strong>{internatoAudit.internatoWarnings.length}</strong> alerta(s) de raciocínio/R1
-                </span>
-              </>
-            )}
-            {internatoAudit.blockedImagesFound.length > 0 && (
-              <>
-                <span aria-hidden="true" className="text-slate-600">·</span>
-                <span className="text-rose-400 font-medium">
-                  <strong>{internatoAudit.blockedImagesFound.length}</strong> imagem(ns) descartada(s) detectada(s)
-                </span>
-              </>
-            )}
-            {blockedImageFilenames.length > 0 && (
-              <>
-                <span aria-hidden="true" className="text-slate-600">·</span>
-                <span className="text-slate-400">
-                  <strong>{blockedImageFilenames.length}</strong> imagem(ns) bloqueada(s) na sessão
-                  {onClearBlockedImages && (
-                    <button
-                      type="button"
-                      onClick={onClearBlockedImages}
-                      className="ml-1.5 underline text-sky-300 hover:text-sky-200 cursor-pointer"
-                    >
-                      limpar
-                    </button>
-                  )}
-                </span>
-              </>
+          <div className="px-3.5 py-2 rounded-lg bg-[#0B0F17] border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300 tabular-nums">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span
+                className={`font-semibold ${
+                  internatoAudit.passed ? 'text-emerald-400' : 'text-amber-300'
+                }`}
+              >
+                Autoauditoria Internato-First:
+              </span>
+              <span>
+                Cenários práticos:{' '}
+                <strong className="text-slate-100">{internatoAudit.practicalScenarioCount}</strong>/
+                {cards.length}
+              </span>
+              {internatoAudit.internatoWarnings.length > 0 && (
+                <>
+                  <span aria-hidden="true" className="text-slate-600">·</span>
+                  <span className="text-amber-300">
+                    <strong>{internatoAudit.internatoWarnings.length}</strong> alerta(s) de raciocínio/R1
+                  </span>
+                </>
+              )}
+              {internatoAudit.blockedImagesFound.length > 0 && (
+                <>
+                  <span aria-hidden="true" className="text-slate-600">·</span>
+                  <span className="text-rose-400 font-medium">
+                    <strong>{internatoAudit.blockedImagesFound.length}</strong> imagem(ns) descartada(s) detectada(s)
+                  </span>
+                </>
+              )}
+              {blockedImageFilenames.length > 0 && (
+                <>
+                  <span aria-hidden="true" className="text-slate-600">·</span>
+                  <span className="text-slate-400">
+                    <strong>{blockedImageFilenames.length}</strong> imagem(ns) bloqueada(s) na sessão
+                    {onClearBlockedImages && (
+                      <button
+                        type="button"
+                        onClick={onClearBlockedImages}
+                        className="ml-1.5 underline text-sky-300 hover:text-sky-200 cursor-pointer"
+                      >
+                        limpar
+                      </button>
+                    )}
+                  </span>
+                </>
+              )}
+            </div>
+            {(internatoAudit.internatoWarnings.length > 0 ||
+              internatoAudit.blockedImagesFound.length > 0) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setViewTab('CARDS');
+                  setFilterMode('WARNINGS');
+                }}
+                className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[11px] font-medium text-amber-200 hover:bg-slate-700 shrink-0 cursor-pointer"
+              >
+                Ver Cards com Alerta
+              </button>
             )}
           </div>
         )}
@@ -728,7 +776,7 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
 
         {/* Boletim da Auditoria Prévia Card-a-Card */}
         {deckAuditReport && (
-          <div className="px-3.5 py-2.5 rounded-lg bg-[#0B0F17] border border-amber-700/60 space-y-1 text-xs text-slate-200">
+          <div className="px-3.5 py-2.5 rounded-lg bg-[#0B0F17] border border-amber-700/60 space-y-2 text-xs text-slate-200">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold text-amber-300">
                 Auditoria Card-a-Card (Antes da Reconstrução):
@@ -751,20 +799,46 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
             {deckAuditReport.overallSummary && (
               <p className="text-[11px] text-slate-400">{deckAuditReport.overallSummary}</p>
             )}
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              {auditFlaggedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewTab('CARDS');
+                    setFilterMode('AUDIT_FLAGGED');
+                  }}
+                  className="px-2.5 py-1 rounded bg-amber-950/80 border border-amber-700/70 text-[11px] font-medium text-amber-200 hover:bg-amber-900/80 cursor-pointer"
+                >
+                  Filtrar Para Refazer/Podar ({auditFlaggedCount})
+                </button>
+              )}
+              {onRecreateCanonicalDeck && (
+                <button
+                  type="button"
+                  disabled={isGeneratingDeck}
+                  onClick={onRecreateCanonicalDeck}
+                  className="px-2.5 py-1 rounded bg-sky-400 text-[11px] font-semibold text-slate-950 hover:bg-sky-300 disabled:opacity-50 cursor-pointer"
+                >
+                  {isGeneratingDeck
+                    ? 'Reconstruindo Deck...'
+                    : 'Aplicar Vereditos (Passo 2: Reconstruir)'}
+                </button>
+              )}
+            </div>
           </div>
         )}
 
         {/* Boletim Final de Adequação do Deck */}
         {finalVerificationReport && (
           <div
-            className={`px-3.5 py-3 rounded-lg border space-y-1.5 text-xs ${
+            className={`px-3.5 py-3 rounded-lg border space-y-2 text-xs ${
               finalVerificationReport.approved
                 ? 'bg-emerald-950/35 border-emerald-700/70 text-emerald-100'
                 : 'bg-amber-950/35 border-amber-700/70 text-amber-100'
             }`}
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-bold">
                   {finalVerificationReport.approved
                     ? '✅ Verificação Final Aprovada'
@@ -775,6 +849,18 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                   {finalVerificationReport.mapCoveragePct}%
                 </span>
               </div>
+              {finalVerificationReport.missingConcepts.length > 0 && onAddMissingConceptsToMap && (
+                <button
+                  type="button"
+                  onClick={() => onAddMissingConceptsToMap(finalVerificationReport.missingConcepts)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-400 text-[11px] font-semibold text-slate-950 hover:bg-sky-300 cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>
+                    Adicionar {finalVerificationReport.missingConcepts.length} Lacuna(s) ao Mapa
+                  </span>
+                </button>
+              )}
             </div>
             <p className="text-[11px] text-slate-200 leading-relaxed">
               {finalVerificationReport.summary}
@@ -794,13 +880,55 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
               </p>
             )}
             {finalVerificationReport.weakCardFixes.length > 0 && (
-              <p className="text-[11px] text-indigo-200">
-                <strong>Sugestões pontuais:</strong>{' '}
-                {finalVerificationReport.weakCardFixes
-                  .slice(0, 4)
-                  .map((w) => `ID ${w.cardId}: ${w.issue}`)
-                  .join(' | ')}
-              </p>
+              <div className="space-y-1.5 pt-1">
+                <div className="text-[11px] font-semibold text-indigo-200">
+                  Sugestões pontuais acionáveis:
+                </div>
+                <div className="space-y-1">
+                  {finalVerificationReport.weakCardFixes.slice(0, 6).map((w) => (
+                    <div
+                      key={`${w.cardId}-${w.issue.slice(0, 24)}`}
+                      className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded bg-slate-900/70 border border-slate-800 text-[11px]"
+                    >
+                      <span className="text-slate-200 min-w-0">
+                        <strong className="font-mono text-sky-300">ID {w.cardId}:</strong> {w.issue}
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setViewTab('CARDS');
+                            setFilterMode('ALL');
+                            setSearchQuery(String(w.cardId));
+                          }}
+                          className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 cursor-pointer"
+                        >
+                          Localizar
+                        </button>
+                        {onAutoRepairSingleCardWithAi && (
+                          <button
+                            type="button"
+                            disabled={repairingCardId === w.cardId || isRepairing}
+                            onClick={() =>
+                              onAutoRepairSingleCardWithAi(
+                                w.cardId,
+                                undefined,
+                                w.fixInstruction || w.issue
+                              )
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-500/80 text-white hover:bg-indigo-400 disabled:opacity-50 font-medium cursor-pointer"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>
+                              {repairingCardId === w.cardId ? 'Reescrevendo...' : 'Corrigir (IA)'}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         )}
@@ -935,15 +1063,37 @@ export const WozniakLinterDeck: React.FC<WozniakLinterDeckProps> = ({
                   Cancelar Busca
                 </button>
               )}
-              <button
-                type="button"
-                onClick={onRemoveAllMissingMedia}
-                title="Remove referências de mídia que não encontraram imagem correspondente"
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                <span>Limpar Órfãs</span>
-              </button>
+              {confirmClearOrphans ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmClearOrphans(false);
+                      onRemoveAllMissingMedia();
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-100 bg-red-800 border border-red-500 rounded-lg hover:bg-red-700 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Confirmar limpar órfãs?
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClearOrphans(false)}
+                    className="px-2 py-1.5 text-xs text-slate-300 hover:text-white cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearOrphans(true)}
+                  title="Remove referências de mídia que não encontraram imagem correspondente"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-red-200 bg-red-950/70 border border-red-700/70 rounded-lg hover:bg-red-900/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                  <span>Limpar Órfãs</span>
+                </button>
+              )}
             </>
           )}
 
