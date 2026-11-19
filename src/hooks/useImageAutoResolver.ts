@@ -70,21 +70,47 @@ function computeCandidateCompositeScore(
   return score;
 }
 
+function extractNormalizedBasename(raw: string | undefined): string {
+  const clean = String(raw || '')
+    .trim()
+    .split('?')[0]
+    .split('#')[0]
+    .split(/[\\/]/)
+    .pop();
+  return (clean || '').toLowerCase();
+}
+
+function isCandidateBlocked(
+  cand: MedicalImageResult,
+  blockedSet?: ReadonlySet<string>
+): boolean {
+  if (!blockedSet || blockedSet.size === 0) return false;
+  const names = [
+    extractNormalizedBasename(cand.suggestedFilename),
+    extractNormalizedBasename(cand.fullUrl),
+    extractNormalizedBasename(cand.thumbUrl),
+  ].filter(Boolean);
+  return names.some((name) => blockedSet.has(name));
+}
+
 async function pickValidatedUniqueCandidate(params: {
   card: CanonicalCard;
   candidates: MedicalImageResult[];
   usedImageKeys: Set<string>;
+  blockedFilenames?: ReadonlySet<string>;
   imageMode: 'recognition' | 'feedback';
   model?: GeminiModelOption;
   signal: AbortSignal;
 }): Promise<ValidatedImageSelection | null> {
-  const { card, candidates, usedImageKeys, imageMode, model: _model, signal } = params;
+  const { card, candidates, usedImageKeys, blockedFilenames, imageMode, model: _model, signal } =
+    params;
   const cleanQ = stripHtml(card.question);
   const cleanA = stripHtml(card.answer);
   const cleanH = stripHtml(card.hint);
   const expectedText = `${card.topic} ${cleanQ} ${cleanA}`;
 
   const rawAvailable = candidates.filter((cand) => {
+    if (isCandidateBlocked(cand, blockedFilenames)) return false;
     const keys = getImageCandidateTrackingKeys(cand);
     return !keys.some((k) => usedImageKeys.has(k));
   });
@@ -262,12 +288,25 @@ export function useImageAutoResolver(params: {
   materialImages: PdfExtractedImage[];
   selectedModel?: GeminiModelOption;
   deckKey?: string;
+  blockedImageFilenames?: string[];
   setCards: React.Dispatch<React.SetStateAction<CanonicalCard[]>>;
   showStatus: (message: string, tone?: 'info' | 'success' | 'error') => void;
 }) {
-  const { materialImages, selectedModel, deckKey, setCards, showStatus } = params;
+  const {
+    materialImages,
+    selectedModel,
+    deckKey,
+    blockedImageFilenames = [],
+    setCards,
+    showStatus,
+  } = params;
   const [isAutoResolvingImages, setIsAutoResolvingImages] = useState(false);
   const [isSuggestingVisuals, setIsSuggestingVisuals] = useState(false);
+
+  const blockedSetRef = useRef<Set<string>>(new Set());
+  blockedSetRef.current = new Set(
+    blockedImageFilenames.map((b) => extractNormalizedBasename(b)).filter(Boolean)
+  );
 
   const activeRunIdRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -319,8 +358,11 @@ export function useImageAutoResolver(params: {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      // Deck-wide tracking set ensures 1 image = max 1 card
+      // Deck-wide tracking set ensures 1 image = max 1 card and respects user-blocked filenames
       const usedImageKeys = extractUsedImageKeysFromCards(targetCards, materialImages);
+      for (const blockedName of blockedSetRef.current) {
+        usedImageKeys.add(blockedName);
+      }
 
       setIsAutoResolvingImages(true);
       const pendingIds = new Set(cardsNeedingWebImage.map((c) => c.id));
@@ -363,7 +405,7 @@ export function useImageAutoResolver(params: {
               hint: cleanHint,
               preferredPdfImageId: targetRef.pdfImageId,
               usedImageIds: usedImageKeys,
-            });
+            }).filter((hit) => !isCandidateBlocked(hit, blockedSetRef.current));
 
             const webImages = await searchMedicalImagesApi(
               {
@@ -385,6 +427,7 @@ export function useImageAutoResolver(params: {
               card,
               candidates: mergedCandidates,
               usedImageKeys,
+              blockedFilenames: blockedSetRef.current,
               imageMode: effectiveMode,
               model: selectedModel,
               signal: controller.signal,
@@ -395,7 +438,7 @@ export function useImageAutoResolver(params: {
             if (picked) {
               resolvedCount++;
               cardUpdated = true;
-              const nextCard: CanonicalCard = {
+              const fallbackNextCard: CanonicalCard = {
                 ...applyResolvedWebImageToCard(
                   card,
                   targetRef.filename,
@@ -407,21 +450,67 @@ export function useImageAutoResolver(params: {
                 needsManualImage: false,
                 isResolvingImage: false,
               };
-              updatedMap.set(card.id, nextCard);
-              setCards((prev) => prev.map((c) => (c.id === card.id ? nextCard : c)));
+              updatedMap.set(card.id, fallbackNextCard);
+              setCards((prev) =>
+                prev.map((current) => {
+                  if (current.id !== card.id) return current;
+                  // Preserve manual edits: only patch if the placeholder target still exists on the latest card
+                  const stillHasTarget = extractUnresolvedLocalImages(current, availableNames).some(
+                    (ref) => ref.filename === targetRef.filename
+                  );
+                  if (!stillHasTarget) {
+                    return current.isResolvingImage
+                      ? { ...current, isResolvingImage: false }
+                      : current;
+                  }
+                  const patched: CanonicalCard = {
+                    ...applyResolvedWebImageToCard(
+                      current,
+                      targetRef.filename,
+                      picked.chosen,
+                      picked.alternatives,
+                      picked.visualLegend || undefined
+                    ),
+                    imageVerified: picked.imageVerified,
+                    needsManualImage: false,
+                    isResolvingImage: false,
+                  };
+                  updatedMap.set(card.id, patched);
+                  return patched;
+                })
+              );
             } else {
               // If no valid/compatible image passed validation (or only synthetic placeholders existed),
               // strip the placeholder cleanly AND mark needsManualImage so user can pick from Apostila Gallery.
               leftTextOnlyCount++;
               cardUpdated = true;
               const cleaned = removeMissingMediaFromCard(card, availableNames);
-              const nextCard: CanonicalCard = {
+              const fallbackNextCard: CanonicalCard = {
                 ...cleaned,
                 isResolvingImage: false,
                 needsManualImage: true,
               };
-              updatedMap.set(card.id, nextCard);
-              setCards((prev) => prev.map((c) => (c.id === card.id ? nextCard : c)));
+              updatedMap.set(card.id, fallbackNextCard);
+              setCards((prev) =>
+                prev.map((current) => {
+                  if (current.id !== card.id) return current;
+                  const stillHasTarget = extractUnresolvedLocalImages(current, availableNames).some(
+                    (ref) => ref.filename === targetRef.filename
+                  );
+                  if (!stillHasTarget) {
+                    return current.isResolvingImage
+                      ? { ...current, isResolvingImage: false }
+                      : current;
+                  }
+                  const patched: CanonicalCard = {
+                    ...removeMissingMediaFromCard(current, availableNames),
+                    isResolvingImage: false,
+                    needsManualImage: true,
+                  };
+                  updatedMap.set(card.id, patched);
+                  return patched;
+                })
+              );
             }
           } finally {
             if (!cardUpdated) {
@@ -491,8 +580,11 @@ export function useImageAutoResolver(params: {
       suggestAbortRef.current = controller;
       setIsSuggestingVisuals(true);
 
-      // Seed uniqueness tracker with every image already attached across the entire deck
+      // Seed uniqueness tracker with every image already attached across the entire deck + blocked filenames
       const usedImageKeys = extractUsedImageKeysFromCards(targetCards, materialImages);
+      for (const blockedName of blockedSetRef.current) {
+        usedImageKeys.add(blockedName);
+      }
 
       try {
         showStatus(
@@ -550,7 +642,7 @@ export function useImageAutoResolver(params: {
         let attachedCount = 0;
         let matUsedCount = 0;
         let cursor = 0;
-        const CONCURRENCY = 3;
+        const CONCURRENCY = 2;
 
         const worker = async () => {
           while (cursor < suggestions.length) {
@@ -571,7 +663,7 @@ export function useImageAutoResolver(params: {
               hint: cleanH,
               preferredPdfImageId: suggestion.pdfImageId,
               usedImageIds: usedImageKeys,
-            });
+            }).filter((hit) => !isCandidateBlocked(hit, blockedSetRef.current));
 
             const webHits = await searchMedicalImagesApi(
               {
@@ -593,6 +685,7 @@ export function useImageAutoResolver(params: {
               card,
               candidates: merged,
               usedImageKeys,
+              blockedFilenames: blockedSetRef.current,
               imageMode: suggestion.mode,
               model: selectedModel,
               signal: controller.signal,
@@ -605,20 +698,21 @@ export function useImageAutoResolver(params: {
             if (picked.chosen.fromMaterial) matUsedCount++;
 
             setCards((prev) =>
-              prev.map((c) =>
-                c.id === card.id
-                  ? {
-                      ...attachVisualSuggestionToCard(
-                        c,
-                        picked.chosen,
-                        picked.visualLegend || suggestion.legend,
-                        suggestion.mode,
-                        picked.alternatives
-                      ),
-                      imageVerified: picked.imageVerified,
-                    }
-                  : c
-              )
+              prev.map((c) => {
+                if (c.id !== card.id) return c;
+                // Do not overwrite if the user already attached an image manually
+                if (/<img\b/i.test(`${c.question || ''} ${c.hint || ''}`)) return c;
+                return {
+                  ...attachVisualSuggestionToCard(
+                    c,
+                    picked.chosen,
+                    picked.visualLegend || suggestion.legend,
+                    suggestion.mode,
+                    picked.alternatives
+                  ),
+                  imageVerified: picked.imageVerified,
+                };
+              })
             );
           }
         };

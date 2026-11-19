@@ -973,4 +973,156 @@ test('optimizeClinicalImageBuffer downscales oversized PNGs while keeping format
   assert.equal(invalidOut, invalidImg);
 });
 
+test('generateContentWithRetry isolates 429 cooldowns per API key fingerprint and never escalates flash-lite upward to primary', async () => {
+  const {
+    generateContentWithRetry,
+    clearGeminiCooldowns,
+    PRIMARY_GEMINI_MODEL,
+    FALLBACK_GEMINI_MODEL,
+  } = await import('./geminiClient');
+
+  clearGeminiCooldowns();
+
+  const callsKeyA: string[] = [];
+  const fakeAiKeyA = {
+    models: {
+      generateContentStream: async (req: { model: string }) => {
+        callsKeyA.push(req.model);
+        if (req.model === PRIMARY_GEMINI_MODEL) {
+          throw new Error('429 RESOURCE_EXHAUSTED: limit: 5, Please retry in 15.0s.');
+        }
+        return (async function* () {
+          yield { text: '{"ok":"fallback-a"}', candidates: [{ finishReason: 'STOP' }] };
+        })();
+      },
+    },
+  } as unknown as Parameters<typeof generateContentWithRetry>[0];
+
+  const resA = await generateContentWithRetry(
+    fakeAiKeyA,
+    { model: PRIMARY_GEMINI_MODEL, contents: 'test-a' },
+    { enableModelFallback: true, timeoutMs: 5000, keyFingerprint: 'key-fp-A' }
+  );
+  assert.equal(resA.modelUsed, FALLBACK_GEMINI_MODEL);
+  assert.deepEqual(callsKeyA, [PRIMARY_GEMINI_MODEL, FALLBACK_GEMINI_MODEL]);
+
+  // Key B must NOT inherit Key A's cooldown on PRIMARY_GEMINI_MODEL
+  const callsKeyB: string[] = [];
+  const fakeAiKeyB = {
+    models: {
+      generateContentStream: async (req: { model: string }) => {
+        callsKeyB.push(req.model);
+        return (async function* () {
+          yield { text: '{"ok":"primary-b"}', candidates: [{ finishReason: 'STOP' }] };
+        })();
+      },
+    },
+  } as unknown as Parameters<typeof generateContentWithRetry>[0];
+
+  const resB = await generateContentWithRetry(
+    fakeAiKeyB,
+    { model: PRIMARY_GEMINI_MODEL, contents: 'test-b' },
+    { enableModelFallback: true, timeoutMs: 5000, keyFingerprint: 'key-fp-B' }
+  );
+  assert.equal(resB.modelUsed, PRIMARY_GEMINI_MODEL);
+  assert.deepEqual(callsKeyB, [PRIMARY_GEMINI_MODEL]);
+
+  // Starting on FALLBACK_GEMINI_MODEL must NEVER promote upward to PRIMARY_GEMINI_MODEL
+  const callsLite: string[] = [];
+  let liteAttempts = 0;
+  const fakeAiLite = {
+    models: {
+      generateContentStream: async (req: { model: string }) => {
+        callsLite.push(req.model);
+        liteAttempts++;
+        if (liteAttempts === 1) {
+          throw new Error('503 UNAVAILABLE: high demand');
+        }
+        return (async function* () {
+          yield { text: '{"ok":"lite"}', candidates: [{ finishReason: 'STOP' }] };
+        })();
+      },
+    },
+  } as unknown as Parameters<typeof generateContentWithRetry>[0];
+
+  const resLite = await generateContentWithRetry(
+    fakeAiLite,
+    { model: FALLBACK_GEMINI_MODEL, contents: 'validate-img' },
+    { enableModelFallback: true, timeoutMs: 5000, keyFingerprint: 'key-fp-C' }
+  );
+  assert.equal(resLite.modelUsed, FALLBACK_GEMINI_MODEL);
+  assert.equal(callsLite.includes(PRIMARY_GEMINI_MODEL), false);
+});
+
+test('buildAnkiApkgBuffer prioritizes data-anki-file over colliding src basename and returns delta newRegistryEntries', async () => {
+  const { buildAnkiApkgBuffer } = await import('./ankiExport');
+  const initSqlJs = (await import('sql.js')).default;
+
+  const existingRegistry: Record<string, string> = {
+    'other_deck:id:1': 'EXISTING_GUID_1',
+    'cardio_ecg:id:101': 'EXISTING_GUID_101',
+  };
+
+  const imgOne = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 1, 1, 1]);
+  const imgTwo = Buffer.from([0x89, 0x50, 0x4e, 0x47, 2, 2, 2, 2]);
+  const imgGeneric = Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 9, 9, 9]);
+
+  const { apkgBuffer, updatedRegistry, newRegistryEntries } = await buildAnkiApkgBuffer({
+    deckKey: 'cardio_ecg',
+    deckName: 'Internato::Cardio ECG',
+    notes: [
+      {
+        id: 101,
+        type: 'basic',
+        topic: 'ECG - Ritmo',
+        question: '<img src="https://example.org/a/image.png" data-anki-file="cardio_ecg_101_image.png"><br>Qual o achado?',
+        answer: 'Fibrilação atrial.',
+        hint: '<i>Traçado eletrocardiográfico com ausência de onda P e RR irregular.</i><br><br><b>Comentário:</b> A <b>FA</b> tem RR irregular.',
+      },
+      {
+        id: 102,
+        type: 'basic',
+        topic: 'ECG - Isquemia',
+        question: '<img src="https://example.org/b/image.png" data-anki-file="cardio_ecg_102_image.png"><br>Qual a parede?',
+        answer: 'Parede anterior.',
+        hint: '<i>Traçado eletrocardiográfico com supra de ST de V1 a V4.</i><br><br><b>Comentário:</b> O <b>supra em V1-V4</b> indica parede anterior.',
+      },
+    ],
+    resolvedMedia: [
+      { filename: 'image.png', data: imgGeneric },
+      { filename: 'cardio_ecg_101_image.png', data: imgOne },
+      { filename: 'cardio_ecg_102_image.png', data: imgTwo },
+    ],
+    guidRegistry: existingRegistry,
+  });
+
+  // Only note 102 is new in delta registry; existing keys stay in updatedRegistry
+  assert.equal(Object.keys(newRegistryEntries).length, 1);
+  assert.ok(newRegistryEntries['cardio_ecg:id:102']);
+  assert.equal('other_deck:id:1' in newRegistryEntries, false);
+  assert.equal('cardio_ecg:id:101' in newRegistryEntries, false);
+  assert.equal(updatedRegistry['cardio_ecg:id:101'], 'EXISTING_GUID_101');
+  assert.equal(updatedRegistry['other_deck:id:1'], 'EXISTING_GUID_1');
+
+  // Inspect media JSON inside ZIP to verify disambiguated filenames were selected (NOT colliding image.png)
+  const apkgStr = apkgBuffer.toString('latin1');
+  assert.equal(apkgStr.includes('cardio_ecg_101_image.png'), true);
+  assert.equal(apkgStr.includes('cardio_ecg_102_image.png'), true);
+
+  // Confirm SQLite database is valid and notes reference their respective disambiguated files
+  const SQL = await initSqlJs();
+  const marker = Buffer.from('SQLite format 3\0', 'ascii');
+  const startIdx = apkgBuffer.indexOf(marker);
+  assert.ok(startIdx > 0);
+  // Find end of first collection.anki21 entry by locating next PK\x03\x04 header
+  const nextZipIdx = apkgBuffer.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]), startIdx + 16);
+  const db = new SQL.Database(apkgBuffer.subarray(startIdx, nextZipIdx));
+  const rows = db.exec('SELECT id, flds FROM notes ORDER BY id ASC');
+  db.close();
+  assert.equal(rows[0].values.length, 2);
+  assert.ok(String(rows[0].values[0][1]).includes('src="cardio_ecg_101_image.png"'));
+  assert.ok(String(rows[0].values[1][1]).includes('src="cardio_ecg_102_image.png"'));
+});
+
+
 

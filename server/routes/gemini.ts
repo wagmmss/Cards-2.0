@@ -1254,15 +1254,19 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
           );
           const mid = Math.ceil(subsetCards.length / 2);
           const halfStride = Math.max(10, Math.floor(stride / 2));
-          const [leftNotes, rightNotes] = await Promise.all([
-            runDeckBatch(subsetCards.slice(0, mid), subsetNewIdStart, depth + 1, halfStride),
-            runDeckBatch(
-              subsetCards.slice(mid),
-              subsetNewIdStart + halfStride,
-              depth + 1,
-              halfStride
-            ),
-          ]);
+          // Execução sequencial das metades evita explosão exponencial de RPM (429)
+          const leftNotes = await runDeckBatch(
+            subsetCards.slice(0, mid),
+            subsetNewIdStart,
+            depth + 1,
+            halfStride
+          );
+          const rightNotes = await runDeckBatch(
+            subsetCards.slice(mid),
+            subsetNewIdStart + halfStride,
+            depth + 1,
+            halfStride
+          );
           return [...leftNotes, ...rightNotes];
         }
 
@@ -1794,7 +1798,11 @@ REGRAS ESTRITAS DE INSPEÇÃO VISUAL:
                 },
               },
             },
-            { signal, timeoutMs: 15_000, enableModelFallback: true }
+            {
+              signal,
+              timeoutMs: 15_000,
+              enableModelFallback: activeModel !== FALLBACK_GEMINI_MODEL,
+            }
           ),
         signal
       );

@@ -1285,6 +1285,13 @@ export function extractDeckMetadata(
         ? card.image_mode
         : undefined;
 
+    const normalizedTags = Array.isArray(card.tags)
+      ? (card.tags.filter((t) => typeof t === 'string') as string[])
+      : undefined;
+    const priorityFromTag = normalizedTags?.find((t) => /^P[1-4]$/.test(t.trim()))?.trim() as
+      | CanonicalCard['priority']
+      | undefined;
+
     return {
       id: numericId,
       type,
@@ -1292,9 +1299,7 @@ export function extractDeckMetadata(
       question: qAudioClean.cleanedHtml,
       answer: type === 'cloze' ? (typeof card.answer === 'string' ? card.answer : '') : answer,
       hint: hAudioClean.cleanedHtml,
-      tags: Array.isArray(card.tags)
-        ? (card.tags.filter((t) => typeof t === 'string') as string[])
-        : undefined,
+      tags: normalizedTags,
       image_mode: imageMode,
       exam_refs: Array.isArray(card.exam_refs) ? card.exam_refs : undefined,
       last_synced_hash:
@@ -1305,7 +1310,7 @@ export function extractDeckMetadata(
         card.priority === 'P3' ||
         card.priority === 'P4'
           ? card.priority
-          : undefined,
+          : priorityFromTag,
     };
   });
 
@@ -2908,12 +2913,22 @@ export function formatCanonicalDeckJson(
   const mediaResolution = buildDeckMediaResolution(cards, cleanDeckKey);
 
   const strictNotes = cards.map((card) => {
+    const existingTags = Array.isArray(card.tags)
+      ? card.tags.map((t) => String(t).trim()).filter((t) => t && !/\s/.test(t))
+      : [];
+    const hasExplicitPriority =
+      card.priority === 'P1' ||
+      card.priority === 'P2' ||
+      card.priority === 'P3' ||
+      card.priority === 'P4';
+    const filteredExistingTags = hasExplicitPriority
+      ? existingTags.filter((t) => !/^P[1-4]$/.test(t))
+      : existingTags;
     const tags = Array.from(
       new Set([
         cleanDeckKey,
-        ...(Array.isArray(card.tags)
-          ? card.tags.map((t) => String(t).trim()).filter((t) => t && !/\s/.test(t))
-          : []),
+        ...filteredExistingTags,
+        ...(hasExplicitPriority ? [card.priority!] : []),
       ])
     );
 

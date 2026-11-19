@@ -670,8 +670,8 @@ function sanitizeFieldMediaForApkg(
 
       const baseFromSrc = normalizeLocalAssetBasename(trimmedSrc);
       const resolved =
-        resolvedByLowerName.get(baseFromSrc.toLowerCase()) ||
-        (baseFromAttr ? resolvedByLowerName.get(baseFromAttr.toLowerCase()) : undefined);
+        (baseFromAttr ? resolvedByLowerName.get(baseFromAttr.toLowerCase()) : undefined) ||
+        resolvedByLowerName.get(baseFromSrc.toLowerCase());
 
       if (resolved) {
         referencedFiles.set(resolved.filename, resolved.data);
@@ -727,7 +727,11 @@ export async function buildAnkiApkgBuffer(params: {
   }>;
   resolvedMedia: Array<{ filename: string; data: Buffer }>;
   guidRegistry?: Record<string, string>;
-}): Promise<{ apkgBuffer: Buffer; updatedRegistry: Record<string, string> }> {
+}): Promise<{
+  apkgBuffer: Buffer;
+  updatedRegistry: Record<string, string>;
+  newRegistryEntries: Record<string, string>;
+}> {
   const SQL = await getSqlJs();
   const db = new SQL.Database();
 
@@ -738,7 +742,9 @@ export async function buildAnkiApkgBuffer(params: {
       ? params.deckId
       : computeDeckIdFromKey(cleanDeckKey);
   const deckName = (params.deckName || cleanDeckKey.replace(/_/g, ' ')).trim();
-  const updatedRegistry: Record<string, string> = normalizeGuidRegistryMap(params.guidRegistry);
+  const initialRegistry: Record<string, string> = normalizeGuidRegistryMap(params.guidRegistry);
+  const updatedRegistry: Record<string, string> = { ...initialRegistry };
+  const newRegistryEntries: Record<string, string> = {};
 
   const resolvedByLowerName = new Map<string, { filename: string; data: Buffer }>();
   for (const mediaItem of params.resolvedMedia || []) {
@@ -1003,6 +1009,9 @@ export async function buildAnkiApkgBuffer(params: {
 
     const regKey = `${cleanDeckKey}:id:${nid}`;
     const guid = updatedRegistry[regKey] || genankiGuidFor(deckId, cleanDeckKey, nid);
+    if (initialRegistry[regKey] !== guid) {
+      newRegistryEntries[regKey] = guid;
+    }
     updatedRegistry[regKey] = guid;
 
     const isCloze = note.type === 'cloze';
@@ -1133,5 +1142,6 @@ export async function buildAnkiApkgBuffer(params: {
   return {
     apkgBuffer: buildZipArchive(zipEntries),
     updatedRegistry,
+    newRegistryEntries,
   };
 }

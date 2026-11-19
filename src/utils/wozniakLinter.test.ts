@@ -1762,6 +1762,42 @@ test('runInternatoSelfAudit flags Internato-First warnings, blocks discarded leg
   assert.equal(goodAudit.internatoWarnings.length, 0);
 });
 
+test('formatCanonicalDeckJson preserves priority strictly via tags (keeping root ALLOWED_FIELDS) and extractDeckMetadata restores priority and local audio', () => {
+  const cards: CanonicalCard[] = [
+    {
+      id: 171020001,
+      type: 'basic',
+      priority: 'P1',
+      topic: 'Cardiologia - Ausculta',
+      question:
+        '<b>PS:</b> Paciente com dispneia súbita e sopro diastólico em ruflar [sound:sopro_mitral.mp3]. Qual o diagnóstico mais provável?',
+      answer: 'Estenose mitral.',
+      hint: '<b>Comentário:</b> O <b>ruflar diastólico</b> com reforço pré-sistólico caracteriza <b>estenose mitral</b>, diferente do sopro holossistólico da insuficiência mitral.',
+      tags: ['cardiologia_valvopatias', 'P3'],
+    },
+  ];
+
+  const json = formatCanonicalDeckJson(cards, null, 'cardiologia_valvopatias');
+  const parsed = JSON.parse(json) as Array<Record<string, unknown>>;
+  assert.equal(parsed.length, 1);
+  // Root priority field MUST remain omitted per ALLOWED_FIELDS
+  assert.equal('priority' in parsed[0], false);
+  const exportedTags = parsed[0].tags as string[];
+  assert.equal(exportedTags.includes('P1'), true);
+  assert.equal(exportedTags.includes('P3'), false);
+
+  // Importing before local media files are attached must keep [sound:...] when preserveLocalAudio=true and restore priority from tags
+  const meta = extractDeckMetadata(json, {
+    availableMediaNames: [],
+    preserveLocalAudio: true,
+  });
+  assert.equal(meta.rawCards.length, 1);
+  assert.equal(meta.rawCards[0].priority, 'P1');
+  assert.equal(meta.rawCards[0].question.includes('[sound:sopro_mitral.mp3]'), true);
+  assert.equal(meta.removedOrphanAudioCount, 0);
+});
+
+
 
 
 

@@ -89,7 +89,12 @@ export function useBatchDeckGenerator(params: {
   const [progress, setProgress] = useState<GenerationProgress | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const singleRepairAbortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
+  const pdfsRef = useRef<UploadedPdfFile[]>(pdfs);
+  pdfsRef.current = pdfs;
+  const blockedImagesRef = useRef<string[]>(blockedImageFilenames || []);
+  blockedImagesRef.current = blockedImageFilenames || [];
 
   const startTimer = useCallback((initial: GenerationProgress) => {
     const startedAt = Date.now();
@@ -115,12 +120,17 @@ export function useBatchDeckGenerator(params: {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    if (singleRepairAbortRef.current) {
+      singleRepairAbortRef.current.abort();
+      singleRepairAbortRef.current = null;
+    }
     stopTimerAndReset();
     setIsGeneratingMap(false);
     setIsDeepeningGuidelines(false);
     setIsAuditingDeck(false);
     setIsGeneratingDeck(false);
     setIsRepairing(false);
+    setRepairingCardId(null);
     setIsVerifyingDeck(false);
     setIsRunningFullPipeline(false);
     showStatus('Operação cancelada. Seu baralho atual foi preservado sem alterações.', 'info');
@@ -129,6 +139,7 @@ export function useBatchDeckGenerator(params: {
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
+      singleRepairAbortRef.current?.abort();
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
   }, []);
@@ -138,8 +149,12 @@ export function useBatchDeckGenerator(params: {
       sourcePdfs: UploadedPdfFile[],
       signal: AbortSignal
     ): Promise<UploadedPdfFile[]> => {
-      if (!Array.isArray(sourcePdfs) || sourcePdfs.length === 0) return sourcePdfs;
-      const updated = [...sourcePdfs];
+      const latestList = pdfsRef.current.length > 0 ? pdfsRef.current : sourcePdfs;
+      if (!Array.isArray(latestList) || latestList.length === 0) return latestList;
+      const updated = latestList.map((p) => {
+        const match = pdfsRef.current.find((cur) => cur.name === p.name && cur.size === p.size);
+        return match?.fileUri ? { ...p, ...match } : p;
+      });
 
       const pendingIndices = updated
         .map((p, idx) => (p.base64Data && !p.fileUri && !p.textContent ? idx : -1))
@@ -151,6 +166,18 @@ export function useBatchDeckGenerator(params: {
         }
         const idx = pendingIndices[i];
         const pdf = updated[idx];
+
+        // Avoid hitting Express 50MB JSON body limit (~37MB raw PDF -> ~49MB base64)
+        const approxJsonBytes = pdf.base64Data.length + 2048;
+        if (approxJsonBytes > 48 * 1024 * 1024) {
+          showStatus(
+            `O PDF "${pdf.name}" excede o limite de upload (~36 MB). Comprima ou divida o PDF antes de enviar para evitar erro 413.`,
+            'error'
+          );
+          updated[idx] = { ...pdf, base64Data: '' };
+          continue;
+        }
+
         setProgress((prev) =>
           prev
             ? {
@@ -182,6 +209,7 @@ export function useBatchDeckGenerator(params: {
           if (data?.fileUri && !data.fallback) {
             const enriched: UploadedPdfFile = {
               ...pdf,
+              base64Data: '',
               fileUri: data.fileUri,
               fileName: data.fileName,
               mimeType: data.mimeType || pdf.mimeType,
@@ -189,11 +217,25 @@ export function useBatchDeckGenerator(params: {
               keyFingerprint: data.keyFingerprint || pdf.keyFingerprint,
             };
             updated[idx] = enriched;
+            pdfsRef.current = pdfsRef.current.map((item) =>
+              item.name === pdf.name && item.size === pdf.size
+                ? {
+                    ...item,
+                    base64Data: '',
+                    fileUri: enriched.fileUri,
+                    fileName: enriched.fileName,
+                    mimeType: enriched.mimeType,
+                    fileSha256: enriched.fileSha256,
+                    keyFingerprint: enriched.keyFingerprint,
+                  }
+                : item
+            );
             setPdfs((prev) =>
               prev.map((item) =>
                 item.name === pdf.name && item.size === pdf.size
                   ? {
                       ...item,
+                      base64Data: '',
                       fileUri: enriched.fileUri,
                       fileName: enriched.fileName,
                       mimeType: enriched.mimeType,
@@ -206,31 +248,41 @@ export function useBatchDeckGenerator(params: {
           }
         } catch (err) {
           if (signal.aborted) throw err;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (/413|payload too large|entity too large/i.test(errMsg)) {
+            showStatus(
+              `O PDF "${pdf.name}" ultrapassou o limite de payload (HTTP 413). Reduza o tamanho do PDF para enviá-lo à IA.`,
+              'error'
+            );
+            updated[idx] = { ...pdf, base64Data: '' };
+          }
         }
       }
 
       return updated;
     },
-    [setPdfs]
+    [setPdfs, showStatus]
   );
 
   const serializePdfsForApi = (sourcePdfs: UploadedPdfFile[]): Array<Record<string, unknown>> =>
-    sourcePdfs.map((p) => {
-      if (p.fileUri) {
-        return {
-          name: p.name,
-          size: p.size,
-          mimeType: p.mimeType,
-          fileUri: p.fileUri,
-          fileName: p.fileName,
-          fileSha256: p.fileSha256,
-          keyFingerprint: p.keyFingerprint,
-          docRole: p.docRole,
-        };
-      }
-      const { extractedImages: _omitExtracted, rawArrayBuffer: _omitBuf, ...rest } = p;
-      return { ...rest };
-    });
+    sourcePdfs
+      .filter((p) => Boolean(p.fileUri || p.textContent || p.base64Data))
+      .map((p) => {
+        if (p.fileUri) {
+          return {
+            name: p.name,
+            size: p.size,
+            mimeType: p.mimeType,
+            fileUri: p.fileUri,
+            fileName: p.fileName,
+            fileSha256: p.fileSha256,
+            keyFingerprint: p.keyFingerprint,
+            docRole: p.docRole,
+          };
+        }
+        const { extractedImages: _omitExtracted, rawArrayBuffer: _omitBuf, ...rest } = p;
+        return { ...rest };
+      });
 
   const handleGenerateClinicalMap = useCallback(
     async (externalSignal?: AbortSignal): Promise<ClinicalMapResponse> => {
@@ -631,6 +683,7 @@ export function useBatchDeckGenerator(params: {
         const apiPdfs = serializePdfsForApi(preparedPdfs);
         const pdfImagesCatalog = buildPdfImagesCatalog(preparedPdfs);
         const allRebuiltNotes: CanonicalCard[] = [...keptCards];
+        let partialFailureSummary: string | null = null;
 
         if (cardsToProcess.length > 0) {
           const BATCH_SIZE = 10;
@@ -656,6 +709,7 @@ export function useBatchDeckGenerator(params: {
             }));
 
           const batchResults: CanonicalCard[][] = Array.from({ length: totalBatches }, () => []);
+          const failedBatchErrors: Array<{ batchNumber: number; message: string; fallbackCards: CanonicalCard[] }> = [];
           let completedBatches = 0;
           let nextBatchIdx = 0;
 
@@ -665,9 +719,13 @@ export function useBatchDeckGenerator(params: {
                 throw new DOMException('Operação cancelada pelo usuário.', 'AbortError');
               }
               const batchIndex = nextBatchIdx++;
-              const batchCards = cardsToProcess
-                .slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE)
-                .map(({ imageAlternatives: _omitAlt, isResolvingImage: _omitRes, ...rest }) => rest);
+              const rawBatchSlice = cardsToProcess.slice(
+                batchIndex * BATCH_SIZE,
+                (batchIndex + 1) * BATCH_SIZE
+              );
+              const batchCards = rawBatchSlice.map(
+                ({ imageAlternatives: _omitAlt, isResolvingImage: _omitRes, ...rest }) => rest
+              );
               const batchNewIdStart = baseNewIdStart + batchIndex * ID_STRIDE;
 
               setProgress((prev) =>
@@ -680,64 +738,102 @@ export function useBatchDeckGenerator(params: {
                   : prev
               );
 
-              const data = await fetchJsonWithTimeout<{
-                notes?: CanonicalCard[];
-                fallback?: boolean;
-                error?: string;
-              }>('/api/gemini/generate-deck', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  deckKey: effectiveKey,
-                  pdfs: apiPdfs,
-                  pdfImagesCatalog,
-                  clinicalMap: activeMap,
-                  existingMetadata: extractedMeta,
-                  batchCards,
-                  batchIndex,
-                  totalBatches,
-                  nextNewIdStart: batchNewIdStart,
-                  deckOutline,
-                  model: selectedModel,
-                }),
-                timeoutMs: 185_000,
-                signal: activeSignal,
-              });
+              try {
+                const data = await fetchJsonWithTimeout<{
+                  notes?: CanonicalCard[];
+                  fallback?: boolean;
+                  error?: string;
+                }>('/api/gemini/generate-deck', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    deckKey: effectiveKey,
+                    pdfs: apiPdfs,
+                    pdfImagesCatalog,
+                    clinicalMap: activeMap,
+                    existingMetadata: extractedMeta,
+                    batchCards,
+                    batchIndex,
+                    totalBatches,
+                    nextNewIdStart: batchNewIdStart,
+                    deckOutline,
+                    model: selectedModel,
+                  }),
+                  timeoutMs: 185_000,
+                  signal: activeSignal,
+                });
 
-              if (data?.fallback || data?.error) {
-                throw new Error(
-                  data.error || `Falha da IA no lote ${batchIndex + 1}/${totalBatches}`
+                if (data?.fallback || data?.error) {
+                  throw new Error(
+                    data.error || `Falha da IA no lote ${batchIndex + 1}/${totalBatches}`
+                  );
+                }
+
+                const batchNotes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
+                if (batchNotes.length === 0) {
+                  throw new Error(`Lote ${batchIndex + 1}/${totalBatches} retornou 0 cards.`);
+                }
+
+                batchResults[batchIndex] = batchNotes;
+                completedBatches++;
+                const rebuiltSoFar =
+                  keptCards.length + batchResults.reduce((acc, arr) => acc + arr.length, 0);
+                setProgress((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        phase: 'batches',
+                        currentBatch: completedBatches,
+                        totalBatches,
+                        cardsReady: rebuiltSoFar,
+                        label: `Lote ${completedBatches}/${totalBatches} concluído (${rebuiltSoFar} cards prontos)`,
+                      }
+                    : prev
                 );
+              } catch (batchErr) {
+                if (
+                  activeSignal.aborted ||
+                  (batchErr instanceof DOMException && batchErr.name === 'AbortError')
+                ) {
+                  throw batchErr;
+                }
+                const message =
+                  batchErr instanceof Error
+                    ? batchErr.message
+                    : `Erro no lote ${batchIndex + 1}/${totalBatches}`;
+                failedBatchErrors.push({
+                  batchNumber: batchIndex + 1,
+                  message,
+                  fallbackCards: rawBatchSlice,
+                });
               }
-
-              const batchNotes: CanonicalCard[] = Array.isArray(data.notes) ? data.notes : [];
-              if (batchNotes.length === 0) {
-                throw new Error(`Lote ${batchIndex + 1}/${totalBatches} retornou 0 cards.`);
-              }
-
-              batchResults[batchIndex] = batchNotes;
-              completedBatches++;
-              const rebuiltSoFar =
-                keptCards.length + batchResults.reduce((acc, arr) => acc + arr.length, 0);
-              setProgress((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      phase: 'batches',
-                      currentBatch: completedBatches,
-                      totalBatches,
-                      cardsReady: rebuiltSoFar,
-                      label: `Lote ${completedBatches}/${totalBatches} concluído (${rebuiltSoFar} cards prontos)`,
-                    }
-                  : prev
-              );
             }
           };
 
           const workerCount = Math.min(CONCURRENCY, totalBatches);
           await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+
+          if (completedBatches === 0 && failedBatchErrors.length > 0) {
+            throw new Error(failedBatchErrors[0].message);
+          }
+
           for (const notes of batchResults) {
             allRebuiltNotes.push(...notes);
+          }
+          if (failedBatchErrors.length > 0) {
+            for (const failed of failedBatchErrors) {
+              allRebuiltNotes.push(
+                ...failed.fallbackCards.map((c) =>
+                  surgicalRepairCardLocal(c, { availableMediaNames, preserveLocalAudio: true })
+                )
+              );
+            }
+            const failedNums = failedBatchErrors
+              .map((f) => `#${f.batchNumber}`)
+              .sort()
+              .join(', ');
+            partialFailureSummary = `Reconstrução parcial preservada: ${completedBatches}/${totalBatches} lote(s) concluído(s); lote(s) ${failedNums} mantiveram versão original após falha (${failedBatchErrors[0].message}).`;
+            showStatus(partialFailureSummary, 'error');
           }
 
           if (activeMap?.items?.some((item) => item.checked !== false)) {
@@ -838,16 +934,20 @@ export function useBatchDeckGenerator(params: {
             skipTemplateGapAdditions: true,
             availableMediaNames,
             preserveLocalAudio: true,
-            blockedImageFilenames,
+            blockedImageFilenames: blockedImagesRef.current,
           }
         );
         setCards(finalCurated);
         setCurationStats(finalStats);
         if (!externalSignal) {
-          showStatus(
-            `Reconstrução concluída: ${finalStats.originalCount} → ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS mantidos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
-            'success'
-          );
+          if (partialFailureSummary) {
+            showStatus(partialFailureSummary, 'error');
+          } else {
+            showStatus(
+              `Reconstrução concluída: ${finalStats.originalCount} → ${finalStats.finalCount} cards (${finalStats.preservedIdsCount} IDs FSRS mantidos, ${finalStats.basicPct}% basic / ${finalStats.clozePct}% cloze).`,
+              'success'
+            );
+          }
           void autoResolveDeckMissingImages(finalCurated, availableMediaNames);
         }
         return finalCurated;
@@ -871,6 +971,7 @@ export function useBatchDeckGenerator(params: {
     [
       autoResolveDeckMissingImages,
       availableMediaNames,
+      blockedImageFilenames,
       cards,
       clinicalMap,
       deckKey,
@@ -1157,15 +1258,20 @@ export function useBatchDeckGenerator(params: {
       }
 
       if (repairedById.size > 0) {
-        const updatedDeck = curatedAndRepaired.map((c) =>
+        let mergedLatestDeck: CanonicalCard[] = curatedAndRepaired.map((c) =>
           repairedById.has(c.id) ? repairedById.get(c.id)! : c
         );
-        setCards(updatedDeck);
+        setCards((prev) => {
+          mergedLatestDeck = prev.map((c) =>
+            repairedById.has(c.id) ? repairedById.get(c.id)! : c
+          );
+          return mergedLatestDeck;
+        });
         const hasNewPlaceholders = Array.from(repairedById.values()).some((c) =>
-          /buscar_imagem:/i.test(`${c.question || ''} ${c.hint || ''}`)
+          /(?:buscar_imagem|pdfimg):/i.test(`${c.question || ''} ${c.hint || ''}`)
         );
         if (hasNewPlaceholders) {
-          void autoResolveDeckMissingImages(updatedDeck, availableMediaNames);
+          void autoResolveDeckMissingImages(mergedLatestDeck, availableMediaNames);
         }
       }
 
@@ -1190,6 +1296,7 @@ export function useBatchDeckGenerator(params: {
   }, [
     autoResolveDeckMissingImages,
     availableMediaNames,
+    blockedImageFilenames,
     cards,
     clinicalMap,
     deckKey,
@@ -1224,7 +1331,9 @@ export function useBatchDeckGenerator(params: {
         );
 
       const lint = lintCard(targetCard);
+      singleRepairAbortRef.current?.abort();
       const controller = new AbortController();
+      singleRepairAbortRef.current = controller;
       setRepairingCardId(cardId);
 
       try {
@@ -1308,8 +1417,11 @@ export function useBatchDeckGenerator(params: {
           availableMediaNames,
           preserveLocalAudio: true,
         });
-        const nextDeck = cards.map((c) => (c.id === cardId ? finalCard : c));
-        setCards(nextDeck);
+        let latestDeck: CanonicalCard[] = cards.map((c) => (c.id === cardId ? finalCard : c));
+        setCards((prev) => {
+          latestDeck = prev.map((c) => (c.id === cardId ? finalCard : c));
+          return latestDeck;
+        });
 
         showStatus(
           targetField
@@ -1318,8 +1430,8 @@ export function useBatchDeckGenerator(params: {
           'success'
         );
 
-        if (/buscar_imagem:/i.test(`${finalCard.question || ''} ${finalCard.hint || ''}`)) {
-          void autoResolveDeckMissingImages(nextDeck, availableMediaNames);
+        if (/(?:buscar_imagem|pdfimg):/i.test(`${finalCard.question || ''} ${finalCard.hint || ''}`)) {
+          void autoResolveDeckMissingImages(latestDeck, availableMediaNames);
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -1334,6 +1446,9 @@ export function useBatchDeckGenerator(params: {
           'info'
         );
       } finally {
+        if (singleRepairAbortRef.current === controller) {
+          singleRepairAbortRef.current = null;
+        }
         setRepairingCardId(null);
       }
     },
@@ -1551,7 +1666,11 @@ export function useBatchDeckGenerator(params: {
             })),
           };
           const gapIdStart =
-            Math.max(171000200, ...workingCards.map((c) => Number(c.id) || 0)) + 1;
+            Math.max(
+              171000200,
+              ...(extractedMeta.existingIds || []),
+              ...workingCards.map((c) => Number(c.id) || 0)
+            ) + 1;
           try {
             const gapResp = await fetchJsonWithTimeout<{
               notes?: CanonicalCard[];
@@ -1563,7 +1682,7 @@ export function useBatchDeckGenerator(params: {
                 deckKey: effectiveKey,
                 clinicalMap: syntheticMap,
                 rebuiltCards: workingCards,
-                pdfImagesCatalog: buildPdfImagesCatalog(pdfs),
+                pdfImagesCatalog: buildPdfImagesCatalog(pdfsRef.current),
                 nextNewIdStart: gapIdStart,
                 model: selectedModel,
               }),
@@ -1571,7 +1690,10 @@ export function useBatchDeckGenerator(params: {
               signal,
             });
             if (!gapResp?.fallback && Array.isArray(gapResp.notes)) {
-              const seenIds = new Set(workingCards.map((c) => c.id));
+              const seenIds = new Set([
+                ...(extractedMeta.existingIds || []),
+                ...workingCards.map((c) => c.id),
+              ]);
               for (const n of gapResp.notes) {
                 if (!seenIds.has(n.id)) {
                   seenIds.add(n.id);
@@ -1593,7 +1715,7 @@ export function useBatchDeckGenerator(params: {
             skipTemplateGapAdditions: true,
             availableMediaNames,
             preserveLocalAudio: true,
-            blockedImageFilenames,
+            blockedImageFilenames: blockedImagesRef.current,
           }
         );
         setCards(reCurated);
@@ -1627,8 +1749,10 @@ export function useBatchDeckGenerator(params: {
   }, [
     autoResolveDeckMissingImages,
     availableMediaNames,
+    blockedImageFilenames,
     cards,
     deckKey,
+    ensurePdfsUploadedToGemini,
     extractedMeta,
     handleAuditExistingDeck,
     handleGenerateClinicalMap,

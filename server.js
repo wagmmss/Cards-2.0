@@ -1860,12 +1860,13 @@ function parseGeminiApiKeys() {
   return Array.from(new Set(rawList));
 }
 var geminiKeyCooldownUntil = /* @__PURE__ */ new Map();
+var clientKeyFingerprintMap = /* @__PURE__ */ new WeakMap();
 var geminiKeyCursor = 0;
 function getKeyFingerprint(apiKey) {
   return crypto.createHash("sha256").update(apiKey).digest("hex").slice(0, 12);
 }
 function createGoogleGenAiClient(apiKey) {
-  return new GoogleGenAI({
+  const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
       timeout: 12e4,
@@ -1874,6 +1875,8 @@ function createGoogleGenAiClient(apiKey) {
       }
     }
   });
+  clientKeyFingerprintMap.set(client, getKeyFingerprint(apiKey));
+  return client;
 }
 function getAiClient() {
   const keys = parseGeminiApiKeys();
@@ -1899,7 +1902,8 @@ function markKeyCooldown(apiKey, error) {
   const isHardQuota = /per day|PerDay|limit:\s*20|402|prepayment credits|API_KEY_INVALID|PERMISSION_DENIED/i.test(
     raw
   );
-  const cooldownMs = isHardQuota ? 1e3 * 60 * 60 : 1e3 * 65;
+  const isTransientServerOverload = /503|UNAVAILABLE|high demand/i.test(raw) && !/429|RESOURCE_EXHAUSTED|quota exceeded/i.test(raw);
+  const cooldownMs = isHardQuota ? 1e3 * 60 * 60 : isTransientServerOverload ? 1e3 * 12 : 1e3 * 65;
   geminiKeyCooldownUntil.set(apiKey, Date.now() + cooldownMs);
 }
 async function withGeminiKeyRotation(task, signal) {
@@ -2295,6 +2299,15 @@ var ALLOWED_GEMINI_MODELS = /* @__PURE__ */ new Set([
   "gemini-3.1-flash-lite"
 ]);
 var geminiModelCooldownUntil = /* @__PURE__ */ new Map();
+function getModelCooldownKey(keyFingerprint, model) {
+  return `${keyFingerprint}:${model}`;
+}
+function getDownwardFallbackModel(baseModel) {
+  if (baseModel === FALLBACK_GEMINI_MODEL) {
+    return null;
+  }
+  return FALLBACK_GEMINI_MODEL;
+}
 function parseGeminiRetryDelayMs(error) {
   const raw = extractErrorDetails(error);
   const match = raw.match(/Please\s+retry\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s)/i);
@@ -2318,8 +2331,10 @@ function resolveGeminiModel(requestedModel) {
 }
 async function generateContentWithRetry(ai, params, options = {}) {
   const { signal, timeoutMs = 15e4, enableModelFallback = true } = options;
+  const effectiveKeyFp = options.keyFingerprint || clientKeyFingerprintMap.get(ai) || "default";
   const baseModel = params.model || PRIMARY_GEMINI_MODEL;
-  const alternateModel = baseModel === FALLBACK_GEMINI_MODEL ? PRIMARY_GEMINI_MODEL : FALLBACK_GEMINI_MODEL;
+  const downwardFallback = enableModelFallback ? getDownwardFallbackModel(baseModel) : null;
+  const hasModelFallback = Boolean(downwardFallback && downwardFallback !== baseModel);
   const baseThinking = params.config?.thinkingConfig?.thinkingLevel;
   const attemptPlans = [
     { model: baseModel, thinkingLevel: baseThinking, delayBeforeMs: 0 },
@@ -2328,14 +2343,14 @@ async function generateContentWithRetry(ai, params, options = {}) {
       thinkingLevel: baseThinking === ThinkingLevel.HIGH ? ThinkingLevel.MEDIUM : baseThinking,
       delayBeforeMs: 1800
     },
-    ...enableModelFallback ? [
+    ...hasModelFallback && downwardFallback ? [
       {
-        model: alternateModel,
+        model: downwardFallback,
         thinkingLevel: ThinkingLevel.MEDIUM,
         delayBeforeMs: 2500
       },
       {
-        model: alternateModel,
+        model: downwardFallback,
         thinkingLevel: ThinkingLevel.LOW,
         delayBeforeMs: 3500
       }
@@ -2356,8 +2371,11 @@ async function generateContentWithRetry(ai, params, options = {}) {
       throw new DOMException("Opera\xE7\xE3o cancelada pelo usu\xE1rio.", "AbortError");
     }
     const now = Date.now();
-    const modelCoolingUntil = geminiModelCooldownUntil.get(plan.model) || 0;
-    const hasUncooledAlternatePlan = attemptPlans.slice(i + 1).some((p) => p.model !== plan.model && (geminiModelCooldownUntil.get(p.model) || 0) <= now);
+    const cooldownKey = getModelCooldownKey(effectiveKeyFp, plan.model);
+    const modelCoolingUntil = geminiModelCooldownUntil.get(cooldownKey) || 0;
+    const hasUncooledAlternatePlan = attemptPlans.slice(i + 1).some(
+      (p) => p.model !== plan.model && (geminiModelCooldownUntil.get(getModelCooldownKey(effectiveKeyFp, p.model)) || 0) <= now
+    );
     if (modelCoolingUntil > now && hasUncooledAlternatePlan) {
       continue;
     }
@@ -2436,7 +2454,7 @@ async function generateContentWithRetry(ai, params, options = {}) {
         signal,
         `Timeout ap\xF3s ${Math.round(timeoutMs / 1e3)}s no modelo ${plan.model}`
       );
-      geminiModelCooldownUntil.delete(plan.model);
+      geminiModelCooldownUntil.delete(cooldownKey);
       return result;
     } catch (error) {
       lastError = error;
@@ -2453,15 +2471,15 @@ async function generateContentWithRetry(ai, params, options = {}) {
       if (isQuotaError) {
         const retryMs = parseGeminiRetryDelayMs(error);
         lastSuggestedDelayMs = retryMs;
-        geminiModelCooldownUntil.set(plan.model, Date.now() + retryMs);
+        geminiModelCooldownUntil.set(cooldownKey, Date.now() + retryMs);
       } else {
         lastSuggestedDelayMs = 0;
       }
-      const canRetry = isRetryableGeminiError(error) || enableModelFallback && isModelOverloadOrQuotaError(error);
+      const canRetry = isRetryableGeminiError(error) || hasModelFallback && isModelOverloadOrQuotaError(error);
       if (!canRetry || i === attemptPlans.length - 1) {
         throw error;
       }
-      if (enableModelFallback && (isQuotaError || /TimeoutError|timed out|DEADLINE_EXCEEDED/i.test(errDetails))) {
+      if (hasModelFallback && (isQuotaError || /TimeoutError|timed out|DEADLINE_EXCEEDED/i.test(errDetails))) {
         while (i + 1 < attemptPlans.length && attemptPlans[i + 1].model === plan.model && attemptPlans.slice(i + 2).some((p) => p.model !== plan.model)) {
           i++;
         }
@@ -3642,15 +3660,18 @@ Retorne EXCLUSIVAMENTE um objeto JSON v\xE1lido no seguinte formato:
           );
           const mid = Math.ceil(subsetCards.length / 2);
           const halfStride = Math.max(10, Math.floor(stride / 2));
-          const [leftNotes, rightNotes] = await Promise.all([
-            runDeckBatch(subsetCards.slice(0, mid), subsetNewIdStart, depth + 1, halfStride),
-            runDeckBatch(
-              subsetCards.slice(mid),
-              subsetNewIdStart + halfStride,
-              depth + 1,
-              halfStride
-            )
-          ]);
+          const leftNotes = await runDeckBatch(
+            subsetCards.slice(0, mid),
+            subsetNewIdStart,
+            depth + 1,
+            halfStride
+          );
+          const rightNotes = await runDeckBatch(
+            subsetCards.slice(mid),
+            subsetNewIdStart + halfStride,
+            depth + 1,
+            halfStride
+          );
           return [...leftNotes, ...rightNotes];
         }
         return parsedNotes;
@@ -3979,7 +4000,7 @@ Retorne EXCLUSIVAMENTE um JSON v\xE1lido no formato:
     }
   });
   router.post("/validate-image", async (req, res) => {
-    const { signal, cleanup } = createRequestAbortSignal(req, res, 42e3);
+    const { signal, cleanup } = createRequestAbortSignal(req, res, 55e3);
     let mediaReachableRaster = false;
     try {
       const {
@@ -4102,7 +4123,11 @@ REGRAS ESTRITAS DE INSPE\xC7\xC3O VISUAL:
               }
             }
           },
-          { signal, timeoutMs: 15e3, enableModelFallback: true }
+          {
+            signal,
+            timeoutMs: 15e3,
+            enableModelFallback: activeModel !== FALLBACK_GEMINI_MODEL
+          }
         ),
         signal
       );
@@ -4853,7 +4878,7 @@ function sanitizeFieldMediaForApkg(rawHtml, resolvedByLowerName, referencedFiles
         return cleanedAttrs ? `<img src="${targetFilename}" ${cleanedAttrs}>` : `<img src="${targetFilename}">`;
       }
       const baseFromSrc = normalizeLocalAssetBasename(trimmedSrc);
-      const resolved = resolvedByLowerName.get(baseFromSrc.toLowerCase()) || (baseFromAttr ? resolvedByLowerName.get(baseFromAttr.toLowerCase()) : void 0);
+      const resolved = (baseFromAttr ? resolvedByLowerName.get(baseFromAttr.toLowerCase()) : void 0) || resolvedByLowerName.get(baseFromSrc.toLowerCase());
       if (resolved) {
         referencedFiles.set(resolved.filename, resolved.data);
         return cleanedAttrs ? `<img src="${resolved.filename}" ${cleanedAttrs}>` : `<img src="${resolved.filename}">`;
@@ -4887,7 +4912,9 @@ async function buildAnkiApkgBuffer(params) {
   const cleanDeckKey = sanitizeDeckKeyForAnki(params.deckKey || "internato_deck", "internato_deck");
   const deckId = typeof params.deckId === "number" && params.deckId > 1 ? params.deckId : computeDeckIdFromKey(cleanDeckKey);
   const deckName = (params.deckName || cleanDeckKey.replace(/_/g, " ")).trim();
-  const updatedRegistry = normalizeGuidRegistryMap(params.guidRegistry);
+  const initialRegistry = normalizeGuidRegistryMap(params.guidRegistry);
+  const updatedRegistry = { ...initialRegistry };
+  const newRegistryEntries = {};
   const resolvedByLowerName = /* @__PURE__ */ new Map();
   for (const mediaItem of params.resolvedMedia || []) {
     const canonicalName = normalizeLocalAssetBasename(mediaItem?.filename || "");
@@ -5140,6 +5167,9 @@ async function buildAnkiApkgBuffer(params) {
     usedNoteIds.add(nid);
     const regKey = `${cleanDeckKey}:id:${nid}`;
     const guid = updatedRegistry[regKey] || genankiGuidFor(deckId, cleanDeckKey, nid);
+    if (initialRegistry[regKey] !== guid) {
+      newRegistryEntries[regKey] = guid;
+    }
     updatedRegistry[regKey] = guid;
     const isCloze = note.type === "cloze";
     const mid = isCloze ? CLOZE_MODEL_ID : BASIC_MODEL_ID;
@@ -5241,7 +5271,8 @@ async function buildAnkiApkgBuffer(params) {
   });
   return {
     apkgBuffer: buildZipArchive(zipEntries),
-    updatedRegistry
+    updatedRegistry,
+    newRegistryEntries
   };
 }
 
@@ -6528,7 +6559,7 @@ function createMediaRouter() {
         mediaManifest,
         mediaAssets
       );
-      const { apkgBuffer, updatedRegistry } = await buildAnkiApkgBuffer({
+      const { apkgBuffer, updatedRegistry, newRegistryEntries } = await buildAnkiApkgBuffer({
         deckKey: cleanDeckKey,
         deckName: deckName || cleanDeckKey.replace(/_/g, " "),
         deckId: typeof deckId === "number" ? deckId : void 0,
@@ -6547,9 +6578,11 @@ function createMediaRouter() {
         "X-Updated-Guid-Count",
         String(Object.keys(updatedRegistry).length)
       );
-      const serializedRegistry = JSON.stringify(updatedRegistry);
-      if (serializedRegistry.length <= 6e3) {
-        res.setHeader("X-Updated-Guid-Registry", encodeURIComponent(serializedRegistry));
+      if (Object.keys(newRegistryEntries).length > 0) {
+        const serializedDelta = JSON.stringify(newRegistryEntries);
+        if (serializedDelta.length <= 16e3) {
+          res.setHeader("X-Updated-Guid-Registry", encodeURIComponent(serializedDelta));
+        }
       }
       res.setHeader(
         "Content-Disposition",

@@ -179,6 +179,7 @@ export default function App() {
     materialImages,
     selectedModel,
     deckKey,
+    blockedImageFilenames,
     setCards,
     showStatus,
   });
@@ -304,6 +305,7 @@ export default function App() {
     try {
       const meta = extractDeckMetadata(text, {
         availableMediaNames: Object.keys(localMediaAssets),
+        preserveLocalAudio: true,
       });
       setJsonError(null);
       setExtractedMeta(meta);

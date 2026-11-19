@@ -283,7 +283,7 @@ export function createMediaRouter(): express.Router {
         mediaAssets
       );
 
-      const { apkgBuffer, updatedRegistry } = await buildAnkiApkgBuffer({
+      const { apkgBuffer, updatedRegistry, newRegistryEntries } = await buildAnkiApkgBuffer({
         deckKey: cleanDeckKey,
         deckName: deckName || cleanDeckKey.replace(/_/g, ' '),
         deckId: typeof deckId === 'number' ? deckId : undefined,
@@ -304,9 +304,11 @@ export function createMediaRouter(): express.Router {
         'X-Updated-Guid-Count',
         String(Object.keys(updatedRegistry).length)
       );
-      const serializedRegistry = JSON.stringify(updatedRegistry);
-      if (serializedRegistry.length <= 6000) {
-        res.setHeader('X-Updated-Guid-Registry', encodeURIComponent(serializedRegistry));
+      if (Object.keys(newRegistryEntries).length > 0) {
+        const serializedDelta = JSON.stringify(newRegistryEntries);
+        if (serializedDelta.length <= 16_000) {
+          res.setHeader('X-Updated-Guid-Registry', encodeURIComponent(serializedDelta));
+        }
       }
       res.setHeader(
         'Content-Disposition',

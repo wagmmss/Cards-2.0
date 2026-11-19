@@ -17,6 +17,7 @@ export function parseGeminiApiKeys(): string[] {
 }
 
 const geminiKeyCooldownUntil = new Map<string, number>();
+const clientKeyFingerprintMap = new WeakMap<GoogleGenAI, string>();
 let geminiKeyCursor = 0;
 
 function getKeyFingerprint(apiKey: string): string {
@@ -24,7 +25,7 @@ function getKeyFingerprint(apiKey: string): string {
 }
 
 function createGoogleGenAiClient(apiKey: string): GoogleGenAI {
-  return new GoogleGenAI({
+  const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
       timeout: 120_000,
@@ -33,6 +34,8 @@ function createGoogleGenAiClient(apiKey: string): GoogleGenAI {
       },
     },
   });
+  clientKeyFingerprintMap.set(client, getKeyFingerprint(apiKey));
+  return client;
 }
 
 export function getAiClient(): GoogleGenAI | null {
@@ -61,7 +64,13 @@ function markKeyCooldown(apiKey: string, error: unknown): void {
   const isHardQuota = /per day|PerDay|limit:\s*20|402|prepayment credits|API_KEY_INVALID|PERMISSION_DENIED/i.test(
     raw
   );
-  const cooldownMs = isHardQuota ? 1000 * 60 * 60 : 1000 * 65;
+  const isTransientServerOverload =
+    /503|UNAVAILABLE|high demand/i.test(raw) && !/429|RESOURCE_EXHAUSTED|quota exceeded/i.test(raw);
+  const cooldownMs = isHardQuota
+    ? 1000 * 60 * 60
+    : isTransientServerOverload
+      ? 1000 * 12
+      : 1000 * 65;
   geminiKeyCooldownUntil.set(apiKey, Date.now() + cooldownMs);
 }
 
@@ -544,6 +553,22 @@ const ALLOWED_GEMINI_MODELS = new Set([
 
 const geminiModelCooldownUntil = new Map<string, number>();
 
+export function clearGeminiCooldowns(): void {
+  geminiKeyCooldownUntil.clear();
+  geminiModelCooldownUntil.clear();
+}
+
+function getModelCooldownKey(keyFingerprint: string, model: string): string {
+  return `${keyFingerprint}:${model}`;
+}
+
+function getDownwardFallbackModel(baseModel: string): string | null {
+  if (baseModel === FALLBACK_GEMINI_MODEL) {
+    return null;
+  }
+  return FALLBACK_GEMINI_MODEL;
+}
+
 function parseGeminiRetryDelayMs(error: unknown): number {
   const raw = extractErrorDetails(error);
   const match = raw.match(/Please\s+retry\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s)/i);
@@ -571,11 +596,12 @@ export interface GenerateWithRetryOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   enableModelFallback?: boolean;
+  keyFingerprint?: string;
 }
 
 /**
  * Executa geração em streaming com timeout explícito por tentativa, cancelamento por AbortSignal
- * e fallback automático de modelo/thinkingLevel quando houver 429/503/sobrecarga.
+ * e fallback automático estritamente descendente de modelo/thinkingLevel quando houver 429/503/sobrecarga.
  */
 export async function generateContentWithRetry(
   ai: GoogleGenAI,
@@ -589,10 +615,12 @@ export async function generateContentWithRetry(
   searchQueries: string[];
 }> {
   const { signal, timeoutMs = 150_000, enableModelFallback = true } = options;
+  const effectiveKeyFp =
+    options.keyFingerprint || clientKeyFingerprintMap.get(ai) || 'default';
 
   const baseModel = params.model || PRIMARY_GEMINI_MODEL;
-  const alternateModel =
-    baseModel === FALLBACK_GEMINI_MODEL ? PRIMARY_GEMINI_MODEL : FALLBACK_GEMINI_MODEL;
+  const downwardFallback = enableModelFallback ? getDownwardFallbackModel(baseModel) : null;
+  const hasModelFallback = Boolean(downwardFallback && downwardFallback !== baseModel);
   const baseThinking = params.config?.thinkingConfig?.thinkingLevel;
 
   const attemptPlans: Array<{
@@ -607,15 +635,15 @@ export async function generateContentWithRetry(
         baseThinking === ThinkingLevel.HIGH ? ThinkingLevel.MEDIUM : baseThinking,
       delayBeforeMs: 1800,
     },
-    ...(enableModelFallback
+    ...(hasModelFallback && downwardFallback
       ? [
           {
-            model: alternateModel,
+            model: downwardFallback,
             thinkingLevel: ThinkingLevel.MEDIUM,
             delayBeforeMs: 2500,
           },
           {
-            model: alternateModel,
+            model: downwardFallback,
             thinkingLevel: ThinkingLevel.LOW,
             delayBeforeMs: 3500,
           },
@@ -640,12 +668,17 @@ export async function generateContentWithRetry(
     }
 
     const now = Date.now();
-    const modelCoolingUntil = geminiModelCooldownUntil.get(plan.model) || 0;
+    const cooldownKey = getModelCooldownKey(effectiveKeyFp, plan.model);
+    const modelCoolingUntil = geminiModelCooldownUntil.get(cooldownKey) || 0;
     const hasUncooledAlternatePlan = attemptPlans
       .slice(i + 1)
-      .some((p) => p.model !== plan.model && (geminiModelCooldownUntil.get(p.model) || 0) <= now);
+      .some(
+        (p) =>
+          p.model !== plan.model &&
+          (geminiModelCooldownUntil.get(getModelCooldownKey(effectiveKeyFp, p.model)) || 0) <= now
+      );
 
-    // If this model is already in a recent 429 cooldown and an uncooled fallback model exists, skip straight to fallback
+    // If this key+model is already in a recent 429 cooldown and an uncooled downward fallback exists, skip straight to fallback
     if (modelCoolingUntil > now && hasUncooledAlternatePlan) {
       continue;
     }
@@ -740,7 +773,7 @@ export async function generateContentWithRetry(
         `Timeout após ${Math.round(timeoutMs / 1000)}s no modelo ${plan.model}`
       );
 
-      geminiModelCooldownUntil.delete(plan.model);
+      geminiModelCooldownUntil.delete(cooldownKey);
       return result;
     } catch (error: unknown) {
       lastError = error;
@@ -759,22 +792,22 @@ export async function generateContentWithRetry(
       if (isQuotaError) {
         const retryMs = parseGeminiRetryDelayMs(error);
         lastSuggestedDelayMs = retryMs;
-        geminiModelCooldownUntil.set(plan.model, Date.now() + retryMs);
+        geminiModelCooldownUntil.set(cooldownKey, Date.now() + retryMs);
       } else {
         lastSuggestedDelayMs = 0;
       }
 
       const canRetry =
         isRetryableGeminiError(error) ||
-        (enableModelFallback && isModelOverloadOrQuotaError(error));
+        (hasModelFallback && isModelOverloadOrQuotaError(error));
 
       if (!canRetry || i === attemptPlans.length - 1) {
         throw error;
       }
 
-      // On 429 or TimeoutError, jump past any remaining retry on the exact same model when an alternate fallback model exists
+      // On 429 or TimeoutError, jump past any remaining retry on the exact same model when a downward fallback model exists
       if (
-        enableModelFallback &&
+        hasModelFallback &&
         (isQuotaError || /TimeoutError|timed out|DEADLINE_EXCEEDED/i.test(errDetails))
       ) {
         while (
